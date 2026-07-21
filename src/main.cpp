@@ -34,6 +34,8 @@
 #include "quiet_hours.h"
 #include "pomo.h"
 #include "client_pages.h"
+#include "game_state.h"
+#include <time.h>
 
 #ifndef CARD_VERSION
 #define CARD_VERSION "0.1.0-adarkroom"
@@ -69,6 +71,29 @@ bool            g_sdOk            = false;   // ble_link.cpp reads it (extern) f
                                              // STATUS's sd= token.
 static uint32_t g_bootMs          = 0;
 static uint32_t g_lastInteraction = 0;
+
+// The Room+Outside game model. Loaded (or freshly started) each cold boot, its
+// passive economy settled forward from the RTC (offline income/population while
+// the card slept), and persisted before sleep. room_page wiring is the next
+// task; this is the minimal init/settle/save spine that keeps it linked and the
+// save file live. See game_state.h.
+adr::GameState g_game;
+
+// RTC -> Unix epoch (seconds). Only differences matter to settle(), so the
+// timezone mktime assumes is irrelevant as long as it's consistent.
+static uint32_t epochNow() {
+    m5::rtc_date_t d; m5::rtc_time_t t;
+    M5.Rtc.getDateTime(&d, &t);
+    struct tm tmv = {};
+    tmv.tm_year = d.year - 1900;
+    tmv.tm_mon  = d.month - 1;
+    tmv.tm_mday = d.date;
+    tmv.tm_hour = t.hours;
+    tmv.tm_min  = t.minutes;
+    tmv.tm_sec  = t.seconds;
+    time_t e = mktime(&tmv);
+    return e > 0 ? (uint32_t)e : 0;
+}
 
 // BM8563 alarm/timer IRQ flag, read immediately after M5.begin. Set -> this
 // cold boot came from the RTC alarm (timerSleep); clear -> a human pressed the
@@ -213,6 +238,7 @@ static void sleepNow(const char* reason) {
                           (unsigned long)sleepSecs);
         }
     }
+    g_game.save();                     // persist the game before power-off
     Serial.printf("[sleep] %s — timerSleep(%lus)\n", reason, (unsigned long)sleepSecs);
     Serial.flush();
     delay(40);
@@ -302,6 +328,18 @@ void setup() {
     g_sdOk = sdInit();
     Serial.printf("[boot] sd %s\n", g_sdOk ? "ok" : "none");
     frame_store::init(g_sdOk);
+
+    // Load the save (or start a new dark room), then settle the passive economy
+    // forward across however long we slept (RTC epoch diff, 10s steps, 24h cap).
+    if (!g_game.load()) {
+        g_game.init();
+        Serial.println("[game] new game (no save)");
+    }
+    uint32_t nowE = epochNow();
+    uint32_t steps = g_game.settle(nowE);
+    Serial.printf("[game] settled %lu step(s); fire=%d temp=%d builder=%d pop=%u wood=%ld\n",
+                  (unsigned long)steps, g_game.fire, g_game.temp,
+                  g_game.builderLevel, g_game.population, (long)g_game.whole(adr::R_WOOD));
 
     // The ring is all client (game) pages — no host pages exist. Restore the
     // last-shown game page by NAME and paint it in quality mode (a cold-boot
