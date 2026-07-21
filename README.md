@@ -4,6 +4,12 @@
 
 非官方社区移植，与 Doublespeak Games 无隶属/背书关系。
 
+## 当前状态
+
+**Phase 1 已完成**（v0.2.0-adarkroom）：Room 火焰/builder/craftables 全链路、Outside 村庄人口与 10 职业分配、官方简体中文界面与文本、离线结算引擎（睡眠期间 income/火焰状态正确推进）、SD 卡存档。**不含** Path/World 探索、事件系统与 Ship/Space 结局。
+
+Phase 2（Path + World 地图探索与战斗）、Phase 3（全事件池 + setpiece + Ship 结局）计划见 `docs/research.md` §6 分期计划。
+
 ## 硬件
 
 - **M5PaperS3**（ESP32-S3-R8 + 4.7" ED047TC1 540×960 16 级灰度墨水屏）
