@@ -19,7 +19,7 @@ public:
     const char* name() const override { return "room"; }
     bool draw(m5gfx::M5Canvas& canvas) override;
     const pages::Region* regions(int* n) const override;
-    void onLocalAction(uint8_t param) override;
+    void onLocalAction(uint8_t param, int x) override;   // x unused (no ±split)
     void tick(uint32_t nowMs) override;
     // wantsAwake stays false: the economy accrues offline via settle() on wake,
     // so there is nothing to keep the panel powered for between interactions.

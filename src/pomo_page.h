@@ -32,7 +32,7 @@ public:
     const char* name() const override { return "pomo"; }
     bool draw(m5gfx::M5Canvas& canvas) override;
     const pages::Region* regions(int* n) const override;
-    void onLocalAction(uint8_t param) override;  // -> pomo::onLocalAction(param)
+    void onLocalAction(uint8_t param, int x) override;  // x unused; -> pomo::onLocalAction(param)
     void tick(uint32_t nowMs) override;          // Task 6 fills the counting cadence
     bool wantsAwake() const override;            // == pomo::wantsAwake()
 };

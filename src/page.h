@@ -44,9 +44,13 @@ public:
 
     // Firmware-local action: the pager calls this when a long-press lands on
     // one of THIS page's type=1 regions (see pager::handleTouch), passing the
-    // region's param. The action is consumed on-device, never reported to the
-    // host. Default: no-op (server pages carry no firmware-local behavior).
-    virtual void onLocalAction(uint8_t param) { (void)param; }
+    // region's param AND the press's x coordinate. x resolves the horizontal
+    // half a Region's y-band cannot — the Outside page splits each worker band
+    // into a −/＋ pair on one row (x < mid = decrement, x >= mid = increment).
+    // Pages that don't care (Room, pomo) ignore x. The action is consumed
+    // on-device, never reported to the host. Default: no-op (server pages carry
+    // no firmware-local behavior).
+    virtual void onLocalAction(uint8_t param, int x) { (void)param; (void)x; }
 
     // Time axis — called every loop() pass ONLY while this page is current
     // (pager::tickCurrent). May partial-refresh a sub-rect. Default: no-op.

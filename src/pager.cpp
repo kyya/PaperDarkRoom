@@ -382,8 +382,8 @@ bool handleTouch() {
         if (!t.wasHold()) continue;
         // Coords reaching pager code are content-frame at rot 2 (full
         // rationale on the click path below) — no correction needed.
-        int tx = t.x, ty = t.y;
-        (void)tx;                                      // regions are y-only here
+        int tx = t.x, ty = t.y;                        // ty picks the band, tx
+                                                       // resolves its −/＋ half
         int ring = currentRingIndex();
         pages::Page* pg = pageAt(ring);
         int rn = 0;
@@ -397,7 +397,7 @@ bool handleTouch() {
             // to the host. The pager stays page-agnostic — it dispatches to the
             // current page's onLocalAction (Page vfunc); the page owns what the
             // action means and any feedback tones.
-            pg->onLocalAction(hb->param);
+            pg->onLocalAction(hb->param, tx);
             Serial.printf("[pager] local-action page=%d region=%d param=%u\n",
                           ring, idx, hb->param);
         } else if (hb) {

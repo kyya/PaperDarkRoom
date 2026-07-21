@@ -358,7 +358,8 @@ bool RoomPage::draw(m5gfx::M5Canvas& c) {
 // full redraw; failure (cost/cooldown/locked): low beep, no redraw. "more" flips
 // to the next batch. save() lives here because the engine actions do not persist
 // themselves (single write — no double-save).
-void RoomPage::onLocalAction(uint8_t param) {
+void RoomPage::onLocalAction(uint8_t param, int x) {
+    (void)x;                          // Room bands are full-width, no ±split
     uint32_t now = epochNow();
 
     if (param == A_MORE) {
