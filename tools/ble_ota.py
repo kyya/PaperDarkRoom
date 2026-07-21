@@ -22,6 +22,13 @@ this while another BLE central is mid-session with the device: two centrals,
 one peripheral. After the first flash that adds the OTA characteristic,
 Windows/WinRT may need the device removed + re-paired to drop its cached GATT
 table (see README.md).
+
+On macOS, bleak's CoreBluetooth backend applies no back-pressure to
+write-without-response: it accepts the whole image into a queue in a fraction
+of a second, overruns the ESP32's BLE receive buffer, and silently drops
+chunks so the image never completes. `--throttle` paces each chunk (ms/chunk,
+default 50) to keep the peripheral's buffer from overflowing. Windows/WinRT
+already back-pressures writes, so pass `--throttle 0` there.
 """
 # PEP 563: defer annotation evaluation so the PEP 604 `X | None` return hints
 # below parse as strings — the Mac venv runs CLT python 3.9, which would else
@@ -99,6 +106,11 @@ async def main() -> int:
                          "(default: %(default)s)")
     ap.add_argument("--progress", type=int, default=64,
                     help="log every N chunks (default: %(default)s)")
+    ap.add_argument("--throttle", type=float, default=50.0,
+                    help="delay per chunk, ms — paces write-without-response so "
+                         "the ESP32 BLE buffer doesn't overflow on macOS "
+                         "(CoreBluetooth has no send back-pressure); 0 disables "
+                         "for Windows/WinRT (default: %(default)s)")
     args = ap.parse_args()
 
     fw = Path(args.fw)
@@ -169,6 +181,8 @@ async def main() -> int:
                     return 1
                 await client.write_gatt_char(DATA, image[off:off + chunk],
                                              response=False)
+                if args.throttle:
+                    await asyncio.sleep(args.throttle / 1000)
                 if (ci + 1) % args.progress == 0 or ci + 1 == nchunks:
                     sent = min(off + chunk, total)
                     el = max(time.time() - t0, 1e-3)
