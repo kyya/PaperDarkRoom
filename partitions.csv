@@ -1,0 +1,26 @@
+# dashboard-fw dashboard-env — big-nvs 16MB layout.
+#
+# WHY: the BLE bond lives in the `nvs` partition (namespace bt_config.conf).
+# The stock nvs is only 0x5000 (20 KB = 5 pages), SHARED with PHY calibration
+# (phy/cal_data) + net80211 + M5/app state. The device cold-boots every 15 min
+# (~thousands of boots), so the 20 KB nvs runs permanently near-full (measured:
+# 214 written / 207 erased entries). When a boot's nvs_flash_init() hits
+# NO_FREE_PAGES, the Arduino core SILENTLY (CORE_DEBUG_LEVEL=0) erases the whole
+# nvs partition -> the bond is wiped -> macOS reconnects with a stale LTK ->
+# CBError 14 "Peer removed pairing information".
+#
+# FIX: relocate `nvs` to high flash and grow it to 1 MB (256 pages). nvs_flash /
+# Bluedroid resolve the partition by LABEL, not offset, so the location is free
+# to move. Crucially, bootloader(0x0) / partitions(0x8000) / boot_app0(0xe000) /
+# app(0x10000) all stay at the arduino-esp32 HARDCODED offsets (see
+# framework tools/platformio-build.py FLASH_EXTRA_IMAGES + upload.offset_address)
+# so the boot path is 100% conventional and the app boots as before. With 256
+# pages, GC never tips into NO_FREE_PAGES for this workload -> the bond survives
+# indefinitely. Flash with a full erase so nvs starts fresh (re-pair once).
+#
+# Name,   Type, SubType, Offset,   Size,     Flags
+otadata,  data, ota,     0xe000,   0x2000,
+app0,     app,  ota_0,   0x10000,  0x640000,
+app1,     app,  ota_1,   0x650000, 0x640000,
+nvs,      data, nvs,     0xc90000, 0x100000,
+coredump, data, coredump,0xd90000, 0x10000,

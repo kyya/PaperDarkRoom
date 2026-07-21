@@ -1,0 +1,39 @@
+A Dark Room — M5PaperS3 port
+============================
+
+This firmware (src/adarkroom/) is an unofficial community PORT / homage of the
+game "A Dark Room" to the M5PaperS3 e-ink card. It is not affiliated with,
+endorsed by, or produced by the original authors.
+
+--------------------------------------------------------------------------------
+A Dark Room
+  Copyright (c) Doublespeak Games
+  Source:  https://github.com/doublespeakgames/adarkroom
+  License: Mozilla Public License 2.0 (MPL-2.0)
+
+  The game's data tables, narrative/UI text, and the official Simplified
+  Chinese translation (lang/zh_cn) are licensed under MPL-2.0. Firmware source
+  files in src/adarkroom/ that port those tables/text/logic are derivative
+  works of MPL-2.0 files and therefore carry an MPL-2.0 file header (Exhibit A)
+  and keep their source public (this repository satisfies that disclosure).
+
+  This placeholder-skeleton commit ports no game data or text yet, so no source
+  file here carries the MPL header at this stage; the header is added to each
+  file as it takes on ported tables/strings. See research.md §2 for the full
+  compliance action checklist.
+
+--------------------------------------------------------------------------------
+fusion-pixel-font (planned — CJK font source, not yet embedded)
+  License: SIL Open Font License 1.1 (OFL-1.1)
+  Source:  https://github.com/TakWolf/fusion-pixel-font
+  See daemon/fonts/fusion_pixel_OFL.txt in this repository.
+
+  When the Chinese text pipeline lands, the generated CJK bitmap-subset header
+  will retain the OFL copyright notice, and this NOTICE credits the font author
+  and OFL as required.
+--------------------------------------------------------------------------------
+
+The purely original firmware modules reused from the dashboard-fw dashboard firmware
+(BLE transport, OTA, deep-sleep, pager, frame_store, status bar) are NOT derived
+from the upstream game and remain under this project's own license (see the
+repository LICENSE).
