@@ -35,10 +35,12 @@
 #include "pomo.h"
 #include "client_pages.h"
 #include "game_state.h"
+#include "event_engine.h"
+#include "event_modal.h"
 #include <time.h>
 
 #ifndef CARD_VERSION
-#define CARD_VERSION "0.2.0-adarkroom"
+#define CARD_VERSION "0.3.0-adarkroom"
 #endif
 #ifndef WAKE_INTERVAL_SECS
 #define WAKE_INTERVAL_SECS 900
@@ -223,6 +225,10 @@ static void otaConfirmHealthy() {
 }
 
 static void sleepNow(const char* reason) {
+    // If a random event is on screen, click its no-cost default (safe exit) so we
+    // never power off mid-choice (research.md §5.4). The save() below persists the
+    // resulting state; the modal is RAM-only and gone after the cold-boot wake.
+    events::dismissDefault();
     pager::payGhostDebtIfDue();
     uint32_t sleepSecs = WAKE_INTERVAL_SECS;
     uint16_t qStart, qEnd;
@@ -327,6 +333,7 @@ void setup() {
 
     g_sdOk = sdInit();
     Serial.printf("[boot] sd %s\n", g_sdOk ? "ok" : "none");
+    if (g_sdOk) SD.mkdir("/.darkroom");   // parent dir; mkdir on existing dir just returns false
     frame_store::init(g_sdOk);
 
     // Load the save (or start a new dark room), then settle the passive economy
@@ -340,6 +347,13 @@ void setup() {
     Serial.printf("[game] settled %lu step(s); fire=%d temp=%d builder=%d pop=%u wood=%ld\n",
                   (unsigned long)steps, g_game.fire, g_game.temp,
                   g_game.builderLevel, g_game.population, (long)g_game.whole(adr::R_WOOD));
+
+    // Bind the random-event engine to the settled model. Its scheduler state
+    // (nextEventAt / delayed echo) is persisted in GameState; bind() only wires
+    // the pointer and clears the RAM-only "event on screen" flag. Events fire
+    // only while awake (research.md §5.4); the offline echo was already redeemed
+    // by settle() above.
+    events::bind(&g_game);
 
     // The ring is all client (game) pages — no host pages exist. Restore the
     // last-shown game page by NAME and paint it in quality mode (a cold-boot
@@ -426,6 +440,21 @@ void loop() {
     // the reused ble_link/status_bar link cleanly; both are guarded no-ops here.
     pomo::tick();
     pager::tickCurrent(now);
+
+    // Random-event engine (research.md §4.1/§5.4), page-independent:
+    //  - drive the scheduler ~1s (RTC epoch = scheduling/echo clock);
+    //  - the instant an event activates, pop its modal (once, QUALITY draw);
+    //  - run the modal's 2-minute idle-timeout watchdog every pass.
+    // The modal's own active() guard keeps pager pushes/ticks off the panel while
+    // it's up; anyWantsAwake() (via events::active()) keeps the card awake here.
+    static uint32_t s_evTick = 0;
+    if (now - s_evTick >= 1000) {
+        s_evTick = now;
+        events::tick(now, epochNow());
+    }
+    if (events::active() && !event_modal::active())
+        event_modal::show(now);
+    event_modal::checkTimeout(now);
 
     // OTA: on the last streamed byte, verify + commit + reboot (never returns)
     // or report ota=err. No-op unless an OTA transfer just finished. THE

@@ -44,9 +44,11 @@ struct LogEntry {
 };
 
 constexpr int   LOG_CAP    = 8;
-constexpr int   SAVE_VER   = 1;
+constexpr int   SAVE_VER   = 2;    // v2 adds the random-event fields (nextEventAt,
+                                   // delayed-echo slot); v1 saves still load.
+constexpr uint8_t ECHO_NONE = 0xFF;  // delayedEcho.res sentinel: slot empty
 #ifndef ADR_SAVE_PATH
-#define ADR_SAVE_PATH "/adr_save.json"
+#define ADR_SAVE_PATH "/.darkroom/adr_save.json"
 #endif
 
 // Compile switch: keep the fire frozen while the device deep-sleeps (default),
@@ -83,7 +85,18 @@ public:
     bool     needWoodActive;         // NEED_WOOD countdown armed (level 1)
 
     uint32_t lastSettleTs;           // epoch of last settled 10s boundary
-    uint32_t rng;                    // deterministic PRNG (traps / pop)
+    uint32_t rng;                    // deterministic PRNG (traps / pop / events)
+
+    // ---- random-event persistence (v0.3.0, SAVE_VER 2) ----
+    // Epoch the next event is due (0 = unscheduled -> the engine rerolls on the
+    // first tick; also the v1-migration default). Events run only while awake
+    // (research.md §5.4); the on-screen scene machine itself is NOT persisted.
+    uint32_t nextEventAt;
+    // Mysterious Wanderer delayed echo: a single pending payout (res==ECHO_NONE
+    // when empty), redeemed at dueEpoch in settle()/tick — offline too.
+    uint8_t  echoRes;                // Res, or ECHO_NONE
+    int32_t  echoAmt;                // whole units to grant
+    uint32_t echoDueEpoch;           // epoch the payout is due
 
     LogEntry log[LOG_CAP];
     uint8_t  logCount;               // linear: [0..logCount), newest last,
@@ -124,6 +137,28 @@ public:
 
     void pushLog(const char* enKey, int32_t arg = 0, bool hasArg = false);
 
+    // Deterministic PRNG (public so event_engine draws from the same stream —
+    // keeps event branches reproducible for a fixed seed, research §5.2).
+    uint32_t nextRand();                     // xorshift, [0, 2^32)
+    int      rand1000();                     // [0, 1000)
+
+    // ---- random-event side effects (ported from outside.js) ----
+    // Reduce population by num (clamped at 0), then strip assigned workers so
+    // the derived gatherer count never goes negative (killVillagers parity).
+    void killVillagers(int num);
+    // Raze `num` occupied huts, killing their residents; returns victims total
+    // (destroyHuts parity, allowEmpty=false).
+    int  destroyHuts(int num);
+
+    // ---- Mysterious Wanderer delayed echo ----
+    // Arm the single echo slot (overwrites any pending one). res==ECHO_NONE to
+    // clear. amtWhole is in whole units.
+    void armDelayedEcho(uint8_t res, int32_t amtWhole, uint32_t dueEpoch);
+    // If armed and nowEpoch >= dueEpoch, grant the payout, log the wanderer's
+    // return, clear the slot, and return true. Called from settle() (offline)
+    // and events::tick (awake).
+    bool redeemDelayedEcho(uint32_t nowEpoch);
+
 private:
     Result makeCraftable(uint8_t craftId);   // shared build/craft core
     void   onFireChange();
@@ -133,8 +168,6 @@ private:
     void   advanceBuilder();
     void   increasePopulation();
     void   unlockForest();
-    uint32_t nextRand();                     // xorshift, [0, 2^32)
-    int      rand1000();                     // [0, 1000)
 };
 
 }  // namespace adr

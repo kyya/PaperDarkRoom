@@ -10,12 +10,16 @@
 //   -> assign hunter, plus an explicit break-on-shortage (断料停产) check and a
 //   save/load JSON round-trip.
 //
-// Build (Windhawk clang++ is the available host toolchain on this box):
+// Build (clang++ is the available host toolchain on this box):
 //   clang++ -std=c++17 -I src tools/adr_smoke.cpp src/game_state.cpp \
+//           src/event_engine.cpp \
 //           -DADR_SAVE_PATH='"adr_smoke_save.json"' -o adr_smoke.exe
 #include "game_state.h"
+#include "event_engine.h"
+#include "events_data.h"
 #include <cstdio>
 #include <cstdint>
+#include <cstring>
 
 using namespace adr;
 
@@ -85,6 +89,23 @@ int main() {
                  gs.whole(R_TEETH) + gs.whole(R_CLOTH) + gs.whole(R_CHARM);
     CHECK(drops1 > drops0, "traps yielded loot");
     printf("     trap loot delta = %d\n", drops1 - drops0);
+
+    // Bug repro: "陷阱捕获到XXX" on real hardware showed nothing after the
+    // intro. Print the raw log tail and assert the catch itself (which
+    // resource(s) got caught) actually made it into the log ring, not just
+    // the bare "the traps contain " intro with no follow-up entry.
+    printf("     log tail after checkTraps (raw en_key, newest last):\n");
+    for (int i = 0; i < gs.logCount; i++)
+        printf("       [%d] \"%s\"%s\n", i, gs.log[i].enKey,
+               gs.log[i].hasArg ? " (has arg)" : "");
+    bool sawIntro = false, sawCatch = false;
+    for (int i = 0; i < gs.logCount; i++) {
+        if (strcmp(gs.log[i].enKey, "the traps contain ") == 0) sawIntro = true;
+        for (int j = 0; j < 6; j++)
+            if (strcmp(gs.log[i].enKey, TRAP_DROPS[j].msg) == 0) sawCatch = true;
+    }
+    CHECK(sawIntro, "trap-check log has the \"the traps contain \" intro");
+    CHECK(sawCatch, "trap-check log names what was actually caught (bug repro)");
 
     printf("== build a hut ==\n");
     // top up wood for the 100-wood hut + later lodge/traps via the builder over time
@@ -166,6 +187,203 @@ int main() {
     CHECK(gl.buildings[B_LODGE] == gs.buildings[B_LODGE], "buildings restored");
     CHECK(gl.workers[J_HUNTER] == gs.workers[J_HUNTER], "workers restored");
     CHECK(gl.logCount == gs.logCount && gl.logCount > 0, "log restored");
+
+    // =====================================================================
+    // Random-event engine (v0.3.0). Deterministic branches: seed gs.rng, then
+    // the first rand1000() draw of each flow is the branch/echo roll.
+    //   rng=1 -> rand1000()==369  (< 500)
+    //   rng=2 -> rand1000()==738  (in [500,800))
+    // =====================================================================
+
+    printf("== [events] The Nomad: full trade + goodbye ==\n");
+    {
+        GameState e; e.init(); uint32_t t = 2000; e.settle(t);
+        e.stores[R_FUR] = 500 * FP;               // afford scales/teeth/bait
+        events::bind(&e);
+        CHECK(events::startEvent(EV_NOMAD, t), "Nomad activates (fur>0)");
+        CHECK(events::active(), "event is active");
+        CHECK(strcmp(events::eventTitleKey(), "The Nomad") == 0, "title == The Nomad");
+        CHECK(events::btnCount() == 4, "start scene has 4 buttons");
+        int furB = e.whole(R_FUR), scB = e.whole(R_SCALES);
+        CHECK(events::choose(0) == RC_OK, "buy scales ok");
+        CHECK(e.whole(R_FUR) == furB - 100 && e.whole(R_SCALES) == scB + 1,
+              "buy scales: -100 fur, +1 scale");
+        CHECK(events::active(), "stays open after a trade (SCENE_STAY)");
+        int furC = e.whole(R_FUR);
+        CHECK(events::choose(2) == RC_OK, "buy bait ok");
+        CHECK(e.whole(R_FUR) == furC - 5 && e.whole(R_BAIT) == 1,
+              "buy bait: -5 fur, +1 bait");
+        CHECK(events::defaultBtnIndex() == 3, "default (safe-exit) btn is 'say goodbye' (3)");
+        CHECK(events::choose(3) == RC_OK, "say goodbye ok");
+        CHECK(!events::active(), "event ended after goodbye");
+    }
+
+    printf("== [events] reproducible probability branches ==\n");
+    {
+        // Noises Inside: rng=1 -> investigate roll 369 < 500 -> scales branch.
+        GameState e; e.init(); uint32_t t = 3000; e.settle(t);
+        e.stores[R_WOOD] = 1000 * FP;
+        events::bind(&e);
+        e.rng = 1;
+        CHECK(events::startEvent(EV_NOISES_IN, t), "Noises(inside) activates (wood>0)");
+        CHECK(events::choose(0) == RC_OK, "investigate");
+        CHECK(e.whole(R_SCALES) > 0 && e.whole(R_TEETH) == 0 && e.whole(R_CLOTH) == 0,
+              "rng=1 -> scales branch (reproducible)");
+        CHECK(events::active() && events::currentScene() == S_NI_SCALES,
+              "landed on the scales sub-scene");
+        events::choose(0);                         // 'leave' -> end
+        CHECK(!events::active(), "leave ends the event");
+    }
+    {
+        // Beggar: rng=1 -> give50 roll 369 < 500 -> scales (+20).
+        GameState e; e.init(); uint32_t t = 3100; e.settle(t);
+        e.stores[R_FUR] = 500 * FP;
+        events::bind(&e);
+        e.rng = 1;
+        CHECK(events::startEvent(EV_BEGGAR, t), "Beggar activates");
+        CHECK(events::choose(0) == RC_OK, "give 50");
+        CHECK(e.whole(R_SCALES) == 20 && e.whole(R_TEETH) == 0,
+              "rng=1 -> Beggar scales +20");
+    }
+    {
+        // Same event, rng=2 -> roll 738 in [500,800) -> teeth (+20): a DIFFERENT,
+        // still-reproducible branch.
+        GameState e; e.init(); uint32_t t = 3200; e.settle(t);
+        e.stores[R_FUR] = 500 * FP;
+        events::bind(&e);
+        e.rng = 2;
+        CHECK(events::startEvent(EV_BEGGAR, t), "Beggar activates (seed 2)");
+        CHECK(events::choose(0) == RC_OK, "give 50 (seed 2)");
+        CHECK(e.whole(R_TEETH) == 20 && e.whole(R_SCALES) == 0,
+              "rng=2 -> Beggar teeth +20 (branch differs, reproducible)");
+    }
+
+    printf("== [events] cost gating: unaffordable buttons ==\n");
+    {
+        GameState e; e.init(); uint32_t t = 4000; e.settle(t);
+        e.stores[R_FUR] = 50 * FP;                 // bait(5) ok; scales(100)/teeth(200) not
+        events::bind(&e);
+        CHECK(events::startEvent(EV_NOMAD, t), "Nomad activates (fur=50)");
+        CHECK(!events::btnAvailable(0), "buy scales unaffordable (need 100)");
+        CHECK(!events::btnAvailable(1), "buy teeth unaffordable (need 200)");
+        CHECK(events::btnAvailable(2), "buy bait affordable (need 5)");
+        CHECK(events::btnAvailable(3), "say goodbye always available (free)");
+        CHECK(events::choose(0) == RC_ERR_COST, "choose unaffordable -> RC_ERR_COST");
+        CHECK(events::active() && e.whole(R_FUR) == 50, "failed buy left state untouched");
+        events::dismissDefault();
+    }
+
+    printf("== [events] dismissDefault: timeout safe exit ==\n");
+    {
+        GameState e; e.init(); uint32_t t = 5000; e.settle(t);
+        e.stores[R_FUR] = 300 * FP;
+        events::bind(&e);
+        CHECK(events::startEvent(EV_NOMAD, t), "Nomad activates");
+        int fur = e.whole(R_FUR);
+        events::dismissDefault();
+        CHECK(!events::active(), "dismissDefault ended the event");
+        CHECK(e.whole(R_FUR) == fur, "dismissDefault is cost-free");
+    }
+
+    printf("== [events] Mysterious Wanderer: delayed echo pays off ==\n");
+    {
+        GameState e; e.init(); uint32_t t = 6000; e.settle(t);
+        e.stores[R_WOOD] = 200 * FP;               // afford give 100
+        events::bind(&e);
+        e.rng = 1;                                 // echo roll 369 < 500 -> arms
+        CHECK(events::startEvent(EV_WANDER_WOOD, t), "Wanderer(wood) activates");
+        CHECK(events::choose(0) == RC_OK, "give 100 wood");
+        CHECK(e.whole(R_WOOD) == 100, "wood 200 -> 100 after giving");
+        CHECK(e.echoRes == R_WOOD && e.echoAmt == 300, "echo armed: +300 wood pending");
+        CHECK(e.echoDueEpoch == t + 60, "echo due 60s later");
+        CHECK(events::choose(0) == RC_OK, "say goodbye (Wanderer scene)");
+        CHECK(!events::active(), "event ended");
+        CHECK(!e.redeemDelayedEcho(t + 30), "not redeemed before due");
+        CHECK(e.echoRes == R_WOOD, "echo still pending at +30s");
+        int woodPre = e.whole(R_WOOD);
+        e.settle(t + 120);                         // wake past the due time
+        CHECK(e.echoRes == ECHO_NONE, "echo redeemed offline via settle()");
+        CHECK(e.whole(R_WOOD) >= woodPre + 300, "wood +300 from the wanderer's return");
+        bool sawReturn = false;
+        for (int i = 0; i < e.logCount; i++)
+            if (strcmp(e.log[i].enKey,
+                       "the mysterious wanderer returns, cart piled high with wood.") == 0)
+                sawReturn = true;
+        CHECK(sawReturn, "wanderer return logged");
+    }
+
+    printf("== [events] save/load round-trip: event fields ==\n");
+    {
+        GameState e; e.init(); e.settle(7000);
+        e.nextEventAt = 7777;
+        e.armDelayedEcho(R_FUR, 1500, 8888);
+        CHECK(e.save(), "save v2 ok");
+        GameState el; el.init();
+        CHECK(el.load(), "load v2 ok");
+        CHECK(el.nextEventAt == 7777, "nextEventAt round-trips");
+        CHECK(el.echoRes == R_FUR && el.echoAmt == 1500 && el.echoDueEpoch == 8888,
+              "delayed-echo slot round-trips");
+    }
+
+    printf("== [events] v1 save migration: fields default, no data loss ==\n");
+    {
+        // A complete v1 JSON (no "nev"/"echo" keys) built with known values.
+        char v1[4096]; size_t o = 0;
+        o += (size_t)snprintf(v1 + o, sizeof v1 - o,
+            "{\"v\":1,\"ts\":123,\"rng\":42,\"fire\":3,\"temp\":3,\"bl\":4,\"pop\":7,"
+            "\"fl\":7,\"cd\":[0,0,0],\"tm\":[30,30,15,300,90],\"stores\":[");
+        for (int i = 0; i < RES_COUNT; i++)
+            o += (size_t)snprintf(v1 + o, sizeof v1 - o, "%s%d",
+                                  i ? "," : "", i == R_WOOD ? 400 * FP : 0);
+        o += (size_t)snprintf(v1 + o, sizeof v1 - o, "],\"bld\":[");
+        for (int i = 0; i < BLD_COUNT; i++)
+            o += (size_t)snprintf(v1 + o, sizeof v1 - o, "%s0", i ? "," : "");
+        o += (size_t)snprintf(v1 + o, sizeof v1 - o, "],\"itm\":[");
+        for (int i = 0; i < ITEM_COUNT; i++)
+            o += (size_t)snprintf(v1 + o, sizeof v1 - o, "%s0", i ? "," : "");
+        o += (size_t)snprintf(v1 + o, sizeof v1 - o, "],\"wrk\":[");
+        for (int i = 0; i < JOB_COUNT; i++)
+            o += (size_t)snprintf(v1 + o, sizeof v1 - o, "%s0", i ? "," : "");
+        o += (size_t)snprintf(v1 + o, sizeof v1 - o, "],\"log\":[]}");
+
+        GameState e; e.init();
+        CHECK(e.fromJson(v1), "v1 save loads (fromJson accepts v==1)");
+        CHECK(e.population == 7 && e.builderLevel == 4, "v1 core fields loaded");
+        CHECK(e.whole(R_WOOD) == 400, "v1 stores loaded");
+        CHECK(e.nextEventAt == 0, "v1 migration: nextEventAt defaults to 0 (reroll)");
+        CHECK(e.echoRes == ECHO_NONE, "v1 migration: echo slot empty");
+    }
+
+    printf("== [events] scheduler: seed / wake-grace / awake-fire (§5.4) ==\n");
+    {
+        GameState e; e.init(); uint32_t t = 100000; e.settle(t);
+        e.stores[R_FUR] = 500 * FP;                // Room fur events available
+        events::bind(&e);
+        // Fresh: nextEventAt==0 -> first tick seeds it 3-5 min out, fires nothing.
+        events::tick(0, t);
+        CHECK(events::nextEventAt() >= t + 180 && events::nextEventAt() <= t + 300,
+              "fresh tick seeds next event 3-5 min out");
+        CHECK(!events::active(), "no event on the seeding tick");
+
+        // Wake past the due time (long gap = deep sleep): must NOT fire on the
+        // waking instant; re-arms to now+60..120s.
+        uint32_t w = events::nextEventAt() + 10000;
+        events::tick(0, w);
+        CHECK(!events::active(), "waking past due does not fire immediately");
+        CHECK(events::nextEventAt() >= w + 60 && events::nextEventAt() <= w + 120,
+              "wake re-arms to now+60..120s");
+
+        // Awake continuation (1s ticks): when the re-armed time arrives, an
+        // available event fires.
+        uint32_t due = events::nextEventAt();
+        e.rng = 1;
+        for (uint32_t s = w + 1; s <= due + 1 && !events::active(); s++)
+            events::tick(0, s);
+        CHECK(events::active(), "an available event fires when due while awake");
+        events::dismissDefault();
+        CHECK(!events::active() && events::nextEventAt() > due,
+              "dismiss ends it and reschedules the next");
+    }
 
     printf("\n==== %d passed, %d failed ====\n", g_pass, g_fail);
     return g_fail ? 1 : 0;

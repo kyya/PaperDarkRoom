@@ -4,6 +4,7 @@
 #include "page.h"
 #include "client_pages.h"
 #include "preview.h"
+#include "event_modal.h"
 #include <M5Unified.h>
 #include <climits>
 #include <cstring>
@@ -200,6 +201,10 @@ bool showPage(int ring, bool quality) {
     // the grid. The single central guard the whole preview state relies on;
     // preview::exit() clears it before the caller redraws the chosen page.
     if (preview::active()) return false;
+    // Same guard for the event modal (research.md §4.1): while a random event is
+    // on screen no background push / tick can repaint the page under it.
+    // event_modal::closeAndRestore() clears the flag before its own showPage.
+    if (event_modal::active()) return false;
     pages::Page* p = pageAt(ring);
     if (!p) return false;
     M5.Display.setEpdMode(quality ? epd_mode_t::epd_quality
@@ -317,6 +322,21 @@ bool handleTouch() {
     if (s_ignoreUntilClear) {
         if (tc != 0) return true;                  // still interacting, consumed
         s_ignoreUntilClear = false;
+    }
+
+    // Event modal (research.md §4.1): while a random event is up it owns every
+    // touch. A single-finger long-press on a button band drives events::choose()
+    // (event_modal::handleHold does the hit-test, tones, repaint/exit). A short
+    // tap is swallowed (no page turn); a >=3-finger grip is swallowed too, so the
+    // preview switcher can't open over a live event. Sits before the three-finger
+    // branch precisely to win that race.
+    if (event_modal::active()) {
+        for (int i = 0; tc <= 1 && i < tc; i++) {
+            auto t = M5.Touch.getDetail(i);
+            if (!t.wasHold()) continue;
+            return event_modal::handleHold(t.x, t.y);   // coords already content-frame
+        }
+        return true;                               // consume short taps / multi-touch
     }
 
     // Three-finger long-press detection (before any single-finger handling).
@@ -487,6 +507,7 @@ void tickCurrent(uint32_t nowMs) {
     // the grid. Least-intrusive choke point (one guard covers all page ticks);
     // the pomo service keeps counting, only its VIEW repaint is held off.
     if (preview::active()) return;
+    if (event_modal::active()) return;   // event modal owns the panel too
     pages::Page* p = pageAt(currentRingIndex());
     if (p) p->tick(nowMs);
 }

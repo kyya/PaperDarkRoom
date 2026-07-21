@@ -35,7 +35,11 @@ void GameState::init() {
     tPop = POP_DELAY_MIN_S;
     needWoodActive = false;
     lastSettleTs = 0;                 // set on first settle()
-    rng = 0x1a2b3c4du;                // fixed seed -> deterministic traps/pop
+    rng = 0x1a2b3c4du;                // fixed seed -> deterministic traps/pop/events
+    nextEventAt = 0;                  // engine rerolls on first tick
+    echoRes = ECHO_NONE;              // no pending Wanderer echo
+    echoAmt = 0;
+    echoDueEpoch = 0;
     logCount = 0;
     memset(log, 0, sizeof log);
 }
@@ -93,6 +97,9 @@ uint32_t GameState::settle(uint32_t nowEpoch) {
     for (uint32_t i = 0; i < steps; i++) stepOnce();
     if (capped) lastSettleTs = nowEpoch;
     else        lastSettleTs += steps * INCOME_TICK_S;
+    // A Wanderer echo that came due while offline is redeemed on wake as a lump
+    // (its payout does not retroactively feed the just-simulated economy).
+    redeemDelayedEcho(nowEpoch);
     return steps;
 }
 
@@ -273,18 +280,26 @@ Result GameState::checkTraps(uint32_t now) {
     int numBait = whole(R_BAIT); if (numBait < 0) numBait = 0;
     int baited = numBait < numTraps ? numBait : numTraps;   // extra roll per bait
     int numDrops = numTraps + baited;
+    bool caught[6] = { false, false, false, false, false, false };
     for (int i = 0; i < numDrops; i++) {
         int roll = rand1000();
         for (int j = 0; j < 6; j++) {
             if (roll < TRAP_DROPS[j].rollUnderMilli) {
                 stores[TRAP_DROPS[j].res] += 1 * FP;
+                caught[j] = true;
                 break;
             }
         }
     }
     stores[R_BAIT] -= baited * FP;
     cdTraps = now;
+    // "the traps contain " is an intro key, not a full sentence (see
+    // strings_zh.h "陷阱捕获到") — the actual catch has to follow as its own
+    // log line(s), one per distinct resource type this round, or the intro
+    // renders with nothing after it (the reported "陷阱捕获到XXX后面缺失" bug).
     pushLog("the traps contain ");
+    for (int j = 0; j < 6; j++)
+        if (caught[j]) pushLog(TRAP_DROPS[j].msg);
     return RC_OK;
 }
 
@@ -368,6 +383,62 @@ Result GameState::assignWorker(uint8_t job, int delta) {
     return RC_OK;
 }
 
+// ===================== random-event side effects ==========================
+
+void GameState::killVillagers(int num) {
+    int p = (int)population - num;
+    if (p < 0) p = 0;
+    population = (uint16_t)p;
+    // If more villagers are assigned to jobs than remain, strip workers in job
+    // order until the derived gatherer count is non-negative (outside.js parity).
+    int raw = (int)population;
+    for (int j = J_HUNTER; j < JOB_COUNT; j++) raw -= (int)workers[j];
+    if (raw < 0) {
+        int gap = -raw;
+        for (int j = J_HUNTER; j < JOB_COUNT && gap > 0; j++) {
+            int nw = (int)workers[j];
+            if (nw < gap) { gap -= nw; workers[j] = 0; }
+            else          { workers[j] = (uint16_t)(nw - gap); gap = 0; }
+        }
+    }
+}
+
+int GameState::destroyHuts(int num) {
+    int dead = 0;
+    for (int i = 0; i < num; i++) {
+        int pop  = (int)population;
+        int full = pop / HUT_ROOM;                        // fully occupied huts
+        int huts = (pop + HUT_ROOM - 1) / HUT_ROOM;       // ceil(pop/HUT_ROOM)
+        if (huts == 0) break;
+        int target = (int)((rand1000() * (uint32_t)huts) / 1000u) + 1;  // 1..huts
+        int inhabitants = 0;
+        if (target <= full)          inhabitants = HUT_ROOM;
+        else if (target == full + 1) inhabitants = pop % HUT_ROOM;
+        if (buildings[B_HUT] > 0) buildings[B_HUT]--;
+        if (inhabitants) { killVillagers(inhabitants); dead += inhabitants; }
+    }
+    return dead;
+}
+
+void GameState::armDelayedEcho(uint8_t res, int32_t amtWhole, uint32_t dueEpoch) {
+    echoRes = res;
+    echoAmt = amtWhole;
+    echoDueEpoch = dueEpoch;
+}
+
+bool GameState::redeemDelayedEcho(uint32_t nowEpoch) {
+    if (echoRes == ECHO_NONE) return false;
+    if (nowEpoch < echoDueEpoch) return false;
+    stores[echoRes] += echoAmt * FP;
+    pushLog(echoRes == R_FUR
+            ? "the mysterious wanderer returns, cart piled high with furs."
+            : "the mysterious wanderer returns, cart piled high with wood.");
+    echoRes = ECHO_NONE;
+    echoAmt = 0;
+    echoDueEpoch = 0;
+    return true;
+}
+
 // ===================== JSON (de)serialization =============================
 
 namespace {
@@ -434,6 +505,9 @@ size_t GameState::toJson(char* out, size_t cap) const {
     AP("\"cd\":[%lu,%lu,%lu],", (unsigned long)cdFire,
        (unsigned long)cdGather, (unsigned long)cdTraps);
     AP("\"tm\":[%d,%d,%d,%d,%d],", tTemp, tBuilder, tNeedWood, tFireCool, tPop);
+    AP("\"nev\":%lu,", (unsigned long)nextEventAt);
+    AP("\"echo\":[%d,%ld,%lu],", echoRes, (long)echoAmt,
+       (unsigned long)echoDueEpoch);
     AP("\"stores\":[");
     for (int i = 0; i < RES_COUNT; i++) AP("%s%ld", i ? "," : "", (long)stores[i]);
     AP("],\"bld\":[");
@@ -457,7 +531,7 @@ size_t GameState::toJson(char* out, size_t cap) const {
 bool GameState::fromJson(const char* j) {
     if (!j) return false;
     long v = readLong(afterKey(j, "v"));
-    if (v != SAVE_VER) return false;
+    if (v != 1 && v != 2) return false;  // accept v1 (pre-events) AND v2 saves
     init();                              // defaults, then overwrite
     lastSettleTs = (uint32_t)readLong(afterKey(j, "ts"));
     rng          = (uint32_t)readLong(afterKey(j, "rng"));
@@ -476,6 +550,14 @@ bool GameState::fromJson(const char* j) {
     int32_t tm[5];  readIntArr(afterKey(j, "tm"), tm, 5);
     tTemp = tm[0]; tBuilder = tm[1]; tNeedWood = tm[2];
     tFireCool = tm[3]; tPop = tm[4];
+    // v2 event fields — absent in v1 saves, where init()'s defaults stand
+    // (nextEventAt=0 => reroll on load; echo slot empty).
+    nextEventAt = (uint32_t)readLong(afterKey(j, "nev"));   // nullptr -> 0
+    const char* echoP = afterKey(j, "echo");
+    if (echoP) {
+        int32_t e[3]; readIntArr(echoP, e, 3);
+        echoRes = (uint8_t)e[0]; echoAmt = e[1]; echoDueEpoch = (uint32_t)e[2];
+    }
     readIntArr(afterKey(j, "stores"), stores, RES_COUNT);
     int32_t tmp[32];   // >= max(BLD_COUNT, ITEM_COUNT, JOB_COUNT)
     readIntArr(afterKey(j, "bld"), tmp, BLD_COUNT);
