@@ -10,8 +10,8 @@
 // rather than compress). See outside_page.h for the region model.
 #include "outside_page.h"
 #include "cjk_text.h"
-#include "page_header.h"
-#include "pomo_page.h"          // PAD, HDR_DIV_Y (shared layout authority)
+#include "pomo_page.h"          // PAD (shared layout authority)
+#include "page_tabs.h"          // shared two-tab header (生火间 │ 小型村落)
 #include "pager.h"
 #include "game_state.h"
 #include <M5Unified.h>
@@ -19,7 +19,7 @@
 #include <string.h>
 #include <time.h>
 
-// main.cpp owns both the game model and the full-screen sprite.
+// main.cpp owns the game model and the full-screen sprite.
 extern adr::GameState g_game;
 extern M5Canvas canvas;
 
@@ -28,32 +28,105 @@ using namespace adr;
 namespace {
 constexpr int SCALE     = 2;                 // 12px grid x2 = 24px CJK
 constexpr int GLYPH     = 12 * SCALE;        // 24px line box
-constexpr int MAX_BANDS = 4;                 // matches OutsidePage::MAX_BANDS
+constexpr int CONTENT_W = 540 - 2 * PAD;     // 492px usable (§9.2)
+constexpr int MAX_ROWS  = 4;                 // matches OutsidePage::MAX_BANDS (rows)
+constexpr int MAX_COLS  = 2;                 // two-column worker grid
+constexpr int MAX_SLOTS = MAX_ROWS * MAX_COLS;   // 8 worker cells / page
 
-// ---- vertical budget (§9.4), all measured to clear the 32px status bar -----
-constexpr int POP_Y     = 120;               // population row (below the rule)
-constexpr int BLD_TOP   = 172;               // building summary top
-constexpr int BLD_ROWH  = 28;                // per building row
+// ---- vertical budget (§9.4), all measured to clear the 32px status bar. The
+// two-tab header (page_tabs::TAB_H = 72px) owns the top band, so the info block
+// reflows below it and the page ends with a merged-in inventory section (the
+// standalone Inventory page was folded here, fw 0.2.2). fw 0.2.3 inserts a野外
+// action row (伐木 / 查看陷阱, migrated off the Room page — they are upstream
+// outside.js actions) between the building summary and the worker bands: one
+// 80px band-row (ACT_H + 10px gap = 90px). Everything below shifts down 90px, so
+// the inventory grid gives back exactly the 3 rows that 90px is worth
+// (INV_ROWS 9 -> 6). Long-press bands stay 80px (§9.3's hard floor). Layout
+// top->bottom:
+//   header(0..72) · population(80) · buildings(120, <=4x2) · action row
+//   (258, 1x80: 伐木 | 查看陷阱) · worker bands (348, <=4x80) ·
+//   inventory (bordered box 720..916, legend "库存" embedded in the top
+//   border at 708..732, up to 6x2 rows inside).
+// ----------------------------------------------------------------------------
+constexpr int POP_Y     = 80;                // population row (below the header)
+constexpr int BLD_TOP   = 120;               // building summary top
+constexpr int BLD_ROWH  = 32;                // per building row
 constexpr int BLD_ROWS  = 4;                 // <=4 rows x 2 cols (8 cells)
 constexpr int BLD_COLX[2] = { PAD, 288 };    // two-column x origins (Room parity)
 
-constexpr int BAND_TOP  = 300;               // first worker band top
-constexpr int BAND_H    = 92;                // long-press band (§9.3: >=80px)
-constexpr int BAND_GAP  = 12;
-constexpr int BAND_X0   = PAD;               // 24
-constexpr int BAND_X1   = 540 - PAD;         // 516
-constexpr int BAND_MID  = 270;               // −/＋ split x (= center of band)
+// 野外 action row: 伐木 (left col) / 查看陷阱 (right col), same two-column
+// geometry as the worker bands (COL_X0 / COL_W below). Buildings end at
+// 120 + 4*32 = 248; the row sits at 258 (10px gap), ends 338, then a 10px gap
+// to the first worker band.
+constexpr int ACT_TOP   = 258;               // action row top (below buildings)
+constexpr int ACT_H     = 80;                // long-press band (§9.3: >=80px floor)
 
-// Big geometric −/＋ glyphs, drawn as bars (no font dependency, unambiguous
-// affordance). Minus sits in the left (decrement) half by the divider; plus is
-// centered in the right (increment) half.
-constexpr int SYM_LEN   = 44;                // bar long axis
+constexpr int BAND_TOP  = 348;               // first worker row top (below action row)
+constexpr int BAND_H    = 80;                // long-press band (§9.3: >=80px, hard floor)
+constexpr int BAND_GAP  = 10;                // vertical gap between rows
+// 4 worker rows end at 348 + 3*90 + 80 = 698. The inventory section (folded in
+// from the old Inventory page) sits below as a bordered box, matching upstream
+// A Dark Room's fieldset-style stores panel: a 1px rect (x 24..516) with the
+// "库存" legend embedded in the top border line (the line breaks around the
+// text, a few px of gap on each side — same idea as an HTML <fieldset>). Inside,
+// non-zero stores (whole units) then non-zero items fill a two-column grid,
+// each cell "name ... qty" with the name left-aligned and the quantity
+// right-aligned (two ends of the column, not a single flush-left string). 6
+// rows x 2 = 12 cells fit before the bottom border at 916 (< 928 status bar); a
+// 13th+ entry collapses the last cell to "…" (U+2026 is in the glyph closure).
+// Phase 1's usual non-zero count fits without the ellipsis.
+constexpr int INV_LABEL_Y     = 708;         // legend text top (glyph top)
+constexpr int INV_BOX_X0      = PAD;         // 24 — box left edge
+constexpr int INV_BOX_X1      = 540 - PAD;   // 516 — box right edge
+constexpr int INV_BOX_Y0      = INV_LABEL_Y + GLYPH / 2;   // 720 — top border,
+                                              // through the legend's vertical
+                                              // center (fieldset/legend style)
+constexpr int INV_BOX_Y1      = 916;         // bottom border (< 928 status bar)
+constexpr int INV_LEGEND_INSET = 8;          // left corner -> where the top
+                                              // border line breaks
+constexpr int INV_LEGEND_GAP   = 4;          // gap on each side of the legend
+                                              // text before the line resumes
+constexpr int INV_PAD_SIDE    = 12;          // box border -> column content inset
+// The legend glyph straddles the top border (centered on it, see INV_BOX_Y0
+// above), so it extends GLYPH/2 = 12px BELOW the line itself, to y=732 —
+// row 0 must clear THAT, not the border line, or it collides with "库存"
+// (both sit at column-0's x=36). >=8px clearance below the glyph bottom:
+constexpr int INV_LEGEND_BOTTOM = INV_LABEL_Y + GLYPH;      // 732
+constexpr int INV_ROW_GAP       = 12;        // clearance below the legend glyph
+constexpr int INV_ROW_TOP     = INV_LEGEND_BOTTOM + INV_ROW_GAP;  // 744 — first row top
+constexpr int INV_ROWH        = 28;          // per inventory cell row height
+constexpr int INV_ROWS        = 6;           // 744 + 6*28 = 912 (< INV_BOX_Y1 916)
+constexpr int INV_CELLS       = INV_ROWS * 2;   // 12 cells before overflow
+constexpr int INV_COL_GAP     = 16;          // gutter between the two columns
+constexpr int INV_CONTENT_X0  = INV_BOX_X0 + INV_PAD_SIDE;   // 36
+constexpr int INV_CONTENT_X1  = INV_BOX_X1 - INV_PAD_SIDE;   // 504
+constexpr int INV_COL_W       = (INV_CONTENT_X1 - INV_CONTENT_X0 - INV_COL_GAP) / 2; // 226
+constexpr int INV_COLX[2] = { INV_CONTENT_X0, INV_CONTENT_X0 + INV_COL_W + INV_COL_GAP };  // {36, 278}
+// Two 240px columns with a 12px gutter fill the 492px content width. Each band
+// is a stepper: a centered "名 xN" label flanked by a big minus (left half) and
+// plus (right half); the widest measured label (144px) clears both glyphs. The
+// press x picks the column (COL_MID) and then the −/＋ half within that band.
+constexpr int COL_GAP   = 12;
+constexpr int COL_W     = (CONTENT_W - COL_GAP) / 2;         // 240
+constexpr int COL_X0[MAX_COLS] = { PAD, PAD + COL_W + COL_GAP };   // {24, 276}
+constexpr int COL_MID   = 540 / 2;           // 270: x < MID => left column
+
+// Geometric −/＋ bars (no font dependency), positioned by local x within a band.
+// Minus centers in the left (decrement) half, plus in the right (increment) half.
+constexpr int SYM_LEN   = 40;                // bar long axis
 constexpr int SYM_TH    = 10;                // bar thickness
-constexpr int MINUS_CX  = 235;               // left of the divider
-constexpr int PLUS_CX   = (BAND_MID + BAND_X1) / 2;   // 393, right-half center
+constexpr int MINUS_LX  = 24;                // − center, local x in band
+constexpr int PLUS_LX   = COL_W - 24;        // + center, local x in band (216)
 
 // "更多" pagination sentinel; real params are Job ids (J_HUNTER..J_ARMOURER).
 constexpr uint8_t A_MORE = 0xFF;
+
+// The野外 action row (伐木 / 查看陷阱) is a single Region carrying this sentinel
+// param — distinct from the worker row indices (0..MAX_ROWS-1) that share the
+// region table — so onLocalAction can tell the two row kinds apart (no page.h /
+// pager change). Its two cells route to gatherWood/checkTraps by the press
+// column, exactly as the Room page's A_GATHER/A_TRAPS did.
+constexpr uint8_t PARAM_ACTIONS = 0xFE;
 
 struct BandView {
     uint8_t code;                // Job id, or A_MORE
@@ -85,20 +158,25 @@ int buildJobs(uint8_t* out, int cap) {
     return n;
 }
 
-// Compute the visible bands for `page`: fills regionsOut[] (y-geometry + job
-// param) and views[] (code + label). Batches of 3 real jobs + a trailing "更多"
-// band once the full list exceeds MAX_BANDS (Room's手法). Returns the count.
-int layoutBands(pages::Region* regionsOut, BandView* views, int page) {
+// Compute the visible worker grid for `page`. Fills slotCodes[] (row-major:
+// slot s -> row s/2, col s%2) + views[] (code + label) for painting, and
+// regionsOut[] with ONE y-band per ROW (param = row index). Both columns of a
+// row share a row band; the pager hit-tests y only, so onLocalAction resolves
+// the column — and then the −/＋ half — from the press x. Batches of 7 real
+// jobs + a trailing "更多" cell once the full list exceeds MAX_SLOTS (Room's
+// 手法). *slotCountOut receives the filled cell count; returns the ROW count.
+int layoutBands(pages::Region* regionsOut, uint8_t* slotCodes, BandView* views,
+                int page, int* slotCountOut) {
     uint8_t all[JOB_COUNT];
     int total = buildJobs(all, (int)sizeof(all));
 
     int numPages, start, take;
     bool more;
     int pg = 0;
-    if (total <= MAX_BANDS) {
+    if (total <= MAX_SLOTS) {
         numPages = 1; start = 0; take = total; more = false;
     } else {
-        int perPage = MAX_BANDS - 1;                 // 3 real + 1 "更多"
+        int perPage = MAX_SLOTS - 1;                 // 7 real + 1 "更多"
         numPages = (total + perPage - 1) / perPage;
         pg = ((page % numPages) + numPages) % numPages;
         start = pg * perPage;
@@ -107,24 +185,31 @@ int layoutBands(pages::Region* regionsOut, BandView* views, int page) {
     }
 
     int k = 0;
-    for (int i = 0; i < take && k < MAX_BANDS; i++) views[k++].code = all[start + i];
-    if (more && k < MAX_BANDS) views[k++].code = A_MORE;
+    for (int i = 0; i < take && k < MAX_SLOTS; i++) slotCodes[k++] = all[start + i];
+    if (more && k < MAX_SLOTS) slotCodes[k++] = A_MORE;
+    int slotCount = k;
 
-    for (int i = 0; i < k; i++) {
-        int top = BAND_TOP + i * (BAND_H + BAND_GAP);
-        regionsOut[i].y0 = (uint16_t)top;
-        regionsOut[i].y1 = (uint16_t)(top + BAND_H);
-        regionsOut[i].type = 1;                      // firmware-local
-        regionsOut[i].param = views[i].code;
-        if (views[i].code == A_MORE)
-            snprintf(views[i].label, sizeof(views[i].label), "更多 (%d/%d)",
+    for (int s = 0; s < slotCount; s++) {
+        views[s].code = slotCodes[s];
+        if (slotCodes[s] == A_MORE)
+            snprintf(views[s].label, sizeof(views[s].label), "更多 (%d/%d)",
                      (pg + 1 < numPages ? pg + 2 : 1), numPages);
         else
-            snprintf(views[i].label, sizeof(views[i].label), "%s x%u",
-                     tr(JOB_KEY[views[i].code]),
-                     (unsigned)g_game.workers[views[i].code]);
+            snprintf(views[s].label, sizeof(views[s].label), "%s x%u",
+                     tr(JOB_KEY[slotCodes[s]]),
+                     (unsigned)g_game.workers[slotCodes[s]]);
     }
-    return k;
+
+    int rows = (slotCount + MAX_COLS - 1) / MAX_COLS;
+    for (int r = 0; r < rows; r++) {
+        int top = BAND_TOP + r * (BAND_H + BAND_GAP);
+        regionsOut[r].y0 = (uint16_t)top;
+        regionsOut[r].y1 = (uint16_t)(top + BAND_H);
+        regionsOut[r].type = 1;                      // firmware-local
+        regionsOut[r].param = (uint8_t)r;            // row; onLocalAction adds col from x
+    }
+    *slotCountOut = slotCount;
+    return rows;
 }
 
 // ---- drawing pieces --------------------------------------------------------
@@ -167,37 +252,224 @@ void drawBuildings(m5gfx::M5Canvas& c) {
     }
 }
 
-// One worker band: 2px frame, left label "名 xN", a vertical divider at the
-// −/＋ split, a big minus bar in the left half and a big plus in the right half.
-void drawJobBand(m5gfx::M5Canvas& c, int top, const char* label) {
-    c.drawRect(BAND_X0, top, BAND_X1 - BAND_X0, BAND_H, TFT_BLACK);
-    c.drawRect(BAND_X0 + 1, top + 1, BAND_X1 - BAND_X0 - 2, BAND_H - 2, TFT_BLACK);
+// One inventory cell: name left-aligned at the column's left edge, quantity
+// right-aligned at the column's right edge (two-ends alignment, matching
+// upstream's fieldset stores panel — not a single flush-left "name qty" run).
+// Row-major: idx -> row idx/2, column idx%2 (the old Inventory page's order).
+void drawInvCell(m5gfx::M5Canvas& c, int idx, const char* name, long qty) {
+    int col = idx % 2, row = idx / 2;
+    int x0 = INV_COLX[col];
+    int y  = INV_ROW_TOP + row * INV_ROWH;
+    cjk::drawText(c, x0, y, name, SCALE);
+
+    char qtyStr[16];
+    snprintf(qtyStr, sizeof(qtyStr), "%ld", qty);
+    int qw = cjk::textWidth(qtyStr, SCALE);
+    cjk::drawText(c, x0 + INV_COL_W - qw, y, qtyStr, SCALE);
+}
+
+// The bordered inventory box itself: a 1px rect with the "库存" legend embedded
+// in the top border line, fieldset/legend style — the line runs from the box's
+// left edge to just before the text, breaks for the text (plus a small gap on
+// each side), then resumes to the right edge. The three remaining sides are
+// plain rect edges.
+void drawInventoryBox(m5gfx::M5Canvas& c) {
+    const char* legend = tr("stores");                          // "库存"
+    int legendW  = cjk::textWidth(legend, SCALE);
+    int lineEnd  = INV_BOX_X0 + INV_LEGEND_INSET;                // 32
+    int textX    = lineEnd + INV_LEGEND_GAP;                     // 36
+    int resumeX  = textX + legendW + INV_LEGEND_GAP;
+
+    c.drawFastHLine(INV_BOX_X0, INV_BOX_Y0, lineEnd - INV_BOX_X0, TFT_BLACK);
+    if (resumeX < INV_BOX_X1)
+        c.drawFastHLine(resumeX, INV_BOX_Y0, INV_BOX_X1 - resumeX, TFT_BLACK);
+    cjk::drawText(c, textX, INV_BOX_Y0 - GLYPH / 2, legend, SCALE);
+
+    c.drawFastVLine(INV_BOX_X0, INV_BOX_Y0, INV_BOX_Y1 - INV_BOX_Y0, TFT_BLACK);
+    c.drawFastVLine(INV_BOX_X1, INV_BOX_Y0, INV_BOX_Y1 - INV_BOX_Y0, TFT_BLACK);
+    c.drawFastHLine(INV_BOX_X0, INV_BOX_Y1, INV_BOX_X1 - INV_BOX_X0 + 1, TFT_BLACK);
+}
+
+// The merged-in inventory section: the bordered box + legend, then every
+// non-zero resource (whole units) followed by every non-zero crafted item,
+// two columns, name-left/qty-right. Past the 12-cell grid the last cell
+// collapses to "…" (Phase 1's usual count fits, so the ellipsis is a rare tail
+// guard); an empty inventory shows "空".
+void drawInventory(m5gfx::M5Canvas& c) {
+    drawInventoryBox(c);
+
+    int nz = 0;
+    for (int r = 0; r < RES_COUNT; r++)  if (g_game.whole((uint8_t)r) > 0) nz++;
+    for (int i = 0; i < ITEM_COUNT; i++) if (g_game.items[i] > 0)          nz++;
+
+    bool overflow = nz > INV_CELLS;
+    int limit = overflow ? INV_CELLS - 1 : nz;   // reserve the last cell for "…"
+    int shown = 0;
+    for (int r = 0; r < RES_COUNT && shown < limit; r++) {
+        long q = (long)g_game.whole((uint8_t)r);
+        if (q > 0) drawInvCell(c, shown++, tr(RES_KEY[r]), q);
+    }
+    for (int i = 0; i < ITEM_COUNT && shown < limit; i++)
+        if (g_game.items[i] > 0)
+            drawInvCell(c, shown++, tr(ITEM_KEY[i]), (long)g_game.items[i]);
+
+    if (overflow) {
+        int col = (INV_CELLS - 1) % 2, row = (INV_CELLS - 1) / 2;
+        cjk::drawText(c, INV_COLX[col], INV_ROW_TOP + row * INV_ROWH, "…", SCALE);
+    } else if (shown == 0) {
+        cjk::drawText(c, INV_COLX[0], INV_ROW_TOP, tr("none"), SCALE);   // "空"
+    }
+}
+
+// 1px dashed rect, 4px-on/4px-off on all four edges — the disabled-button
+// frame (no inner concentric rect, unlike the enabled 2-ring frame below).
+void drawDashedRect(m5gfx::M5Canvas& c, int x0, int y0, int w, int h) {
+    int x1 = x0 + w - 1, y1 = y0 + h - 1;
+    for (int x = x0; x <= x1; x += 8) {
+        int len = (x1 - x + 1 < 4) ? (x1 - x + 1) : 4;
+        c.drawFastHLine(x, y0, len, TFT_BLACK);
+        c.drawFastHLine(x, y1, len, TFT_BLACK);
+    }
+    for (int y = y0; y <= y1; y += 8) {
+        int len = (y1 - y + 1 < 4) ? (y1 - y + 1) : 4;
+        c.drawFastVLine(x0, y, len, TFT_BLACK);
+        c.drawFastVLine(x1, y, len, TFT_BLACK);
+    }
+}
+
+// Cooldown fill colour: main.cpp runs the sprite at canvas.setColorDepth(
+// grayscale_8bit), and the panel underneath (ED047TC1) is a real 16-level
+// grayscale EPD (see platformio.ini) — not 1bpp. An RGB565 grey constant
+// converts cleanly through M5GFX's colour pipeline into a genuine mid-grey
+// pixel value, so a real light-grey fill (not a checkerboard dither) is the
+// right tool here. TFT_SILVER (0xC618 / 192,192,192) stays clearly lighter
+// than the 24px black label drawn on top of it.
+constexpr uint32_t COOL_FILL = TFT_SILVER;
+
+// A job band is disabled when NEITHER stepper half can act: no worker in the
+// job to pull back to idle (minus) AND no idle villager to add (plus).
+// assignWorker() has no cost/prerequisite gate of its own — a band never
+// appears until its building exists (buildJobs already filters that) — so
+// "no assignable villagers" is the only one of the three general disable
+// categories (资源不足/前置未满足/无可分配村民) that applies to this page's
+// buttons. Reads GameState's public fields only; the engine is untouched.
+bool jobBandDisabled(uint8_t job) {
+    return g_game.workers[job] == 0 && g_game.numGatherers() == 0;
+}
+
+// One half-width worker band at column origin x0: enabled = 2px frame (two
+// concentric rects); disabled (see jobBandDisabled) = a single 1px dashed
+// outer frame, no inner ring — the label stays normal 24px either way. A
+// centered "名 xN" label, a big minus bar in the left (decrement) half and a
+// big plus in the right (increment) half — a standard [− value +] stepper. No
+// divider: the ± glyphs at the edges convey the two tap zones, and the label
+// centers clear of both (widest measured label 144px << the room between the
+// glyphs). Press behavior is unchanged either way — a disabled band's press
+// still resolves to an engine no-op (low beep), same as it already did.
+void drawJobBand(m5gfx::M5Canvas& c, int x0, int top, const char* label,
+                  bool disabled) {
+    if (disabled) {
+        drawDashedRect(c, x0, top, COL_W, BAND_H);
+    } else {
+        c.drawRect(x0, top, COL_W, BAND_H, TFT_BLACK);
+        c.drawRect(x0 + 1, top + 1, COL_W - 2, BAND_H - 2, TFT_BLACK);
+    }
 
     int cy = top + BAND_H / 2;
-    c.fillRect(BAND_MID - 1, top + 12, 2, BAND_H - 24, TFT_BLACK);   // divider
-
-    cjk::drawText(c, BAND_X0 + 8, top + (BAND_H - GLYPH) / 2 - 4, label, SCALE);
-
-    // minus (left/decrement half)
-    c.fillRect(MINUS_CX - SYM_LEN / 2, cy - SYM_TH / 2, SYM_LEN, SYM_TH, TFT_BLACK);
-    // plus (right/increment half)
-    c.fillRect(PLUS_CX - SYM_LEN / 2, cy - SYM_TH / 2, SYM_LEN, SYM_TH, TFT_BLACK);
-    c.fillRect(PLUS_CX - SYM_TH / 2, cy - SYM_LEN / 2, SYM_TH, SYM_LEN, TFT_BLACK);
-}
-
-// The trailing "更多" band: framed, centered label, no −/＋ (it flips the page).
-void drawMoreBand(m5gfx::M5Canvas& c, int top, const char* label) {
-    c.drawRect(BAND_X0, top, BAND_X1 - BAND_X0, BAND_H, TFT_BLACK);
-    c.drawRect(BAND_X0 + 1, top + 1, BAND_X1 - BAND_X0 - 2, BAND_H - 2, TFT_BLACK);
     int lw = cjk::textWidth(label, SCALE);
-    cjk::drawText(c, (540 - lw) / 2, top + (BAND_H - GLYPH) / 2 - 4, label, SCALE);
+    cjk::drawText(c, x0 + (COL_W - lw) / 2, top + (BAND_H - GLYPH) / 2 - 4,
+                  label, SCALE);
+
+    int mx = x0 + MINUS_LX, px = x0 + PLUS_LX;
+    // minus (left/decrement half)
+    c.fillRect(mx - SYM_LEN / 2, cy - SYM_TH / 2, SYM_LEN, SYM_TH, TFT_BLACK);
+    // plus (right/increment half)
+    c.fillRect(px - SYM_LEN / 2, cy - SYM_TH / 2, SYM_LEN, SYM_TH, TFT_BLACK);
+    c.fillRect(px - SYM_TH / 2, cy - SYM_LEN / 2, SYM_TH, SYM_LEN, TFT_BLACK);
 }
 
-void paintBands(m5gfx::M5Canvas& c, const BandView* views, int count) {
-    for (int i = 0; i < count; i++) {
-        int top = BAND_TOP + i * (BAND_H + BAND_GAP);
-        if (views[i].code == A_MORE) drawMoreBand(c, top, views[i].label);
-        else                         drawJobBand(c, top, views[i].label);
+// The trailing "更多" cell: half-width frame, centered label, no −/＋ (either
+// half flips the page).
+void drawMoreBand(m5gfx::M5Canvas& c, int x0, int top, const char* label) {
+    c.drawRect(x0, top, COL_W, BAND_H, TFT_BLACK);
+    c.drawRect(x0 + 1, top + 1, COL_W - 2, BAND_H - 2, TFT_BLACK);
+    int lw = cjk::textWidth(label, SCALE);
+    cjk::drawText(c, x0 + (COL_W - lw) / 2, top + (BAND_H - GLYPH) / 2 - 4,
+                  label, SCALE);
+}
+
+// One half-width野外 action cell (伐木 / 查看陷阱) at column origin x0 — the
+// same frame language the Room page uses (drawBand): enabled = solid double
+// ring; unavailable/cooling = 1px dashed outer frame. A live cooldown fills
+// the band's interior with a full-height grey block growing in from the left
+// (width = the fraction of the cooldown remaining, so it drains back to 0 as
+// time passes) — the upstream A Dark Room button-cooldown affordance — with the
+// 24px label painted on top so it stays legible. Geometry is identical to a
+// worker band; only the −/＋ glyphs and the stepper semantics are absent — this
+// is a single long-press verb.
+void drawActionBand(m5gfx::M5Canvas& c, int x0, int top, const char* label,
+                    bool enabled, int coolLeft, int coolTotal) {
+    if (enabled) {
+        c.drawRect(x0, top, COL_W, ACT_H, TFT_BLACK);
+        c.drawRect(x0 + 1, top + 1, COL_W - 2, ACT_H - 2, TFT_BLACK);
+    } else {
+        drawDashedRect(c, x0, top, COL_W, ACT_H);
+    }
+
+    if (coolTotal > 0 && coolLeft > 0) {                      // draining cooldown
+        int fx0 = x0 + 2, fy0 = top + 2;
+        int fwMax = COL_W - 4, fh = ACT_H - 4;
+        int fw = (int)((int64_t)fwMax * coolLeft / coolTotal);   // drains to 0
+        if (fw > 0) c.fillRect(fx0, fy0, fw, fh, COOL_FILL);
+    }
+
+    int lw = cjk::textWidth(label, SCALE);
+    cjk::drawText(c, x0 + (COL_W - lw) / 2, top + (ACT_H - GLYPH) / 2 - 4,
+                  label, SCALE);
+}
+
+// Paint the whole action row. Left column = 伐木 (gather wood): always offered
+// here — the Room page gated it on outsideUnlocked, which is a precondition for
+// this page drawing at all. Right column = 查看陷阱 (check traps): drawn only
+// when a trap stands (buildings[B_TRAP] > 0); with none, the cell is left blank
+// (无供给整格不画, not a disabled frame), matching the Room供给 condition. A live
+// gather/traps cooldown (channels 1/2) renders the cell dashed with a draining
+// bar, same as the Room page.
+void drawActionRow(m5gfx::M5Canvas& c, uint32_t now) {
+    int gcool = g_game.cooldownLeft(1, now);                 // gather channel
+    drawActionBand(c, COL_X0[0], ACT_TOP, tr("gather wood"),
+                   gcool == 0, gcool, GATHER_DELAY_S);
+    if (g_game.buildings[B_TRAP] > 0) {
+        int tcool = g_game.cooldownLeft(2, now);             // traps channel
+        drawActionBand(c, COL_X0[1], ACT_TOP, tr("check traps"),
+                       tcool == 0, tcool, TRAPS_DELAY_S);
+    }
+}
+
+// The action row's partial-refresh target (Room's buttonAreaRect parity): the
+// row band plus a 2px bleed. tick() repaints just this rect while a cooldown
+// drains, instead of a full-page redraw.
+pages::Rect actionRowRect() {
+    return pages::Rect{ 0, ACT_TOP - 2, 540, ACT_H + 4 };
+}
+
+// Clear the action row rect and repaint it into `c` (for the partial-refresh
+// path — the surrounding full-page pixels already sit in the canvas).
+void repaintActionRow(m5gfx::M5Canvas& c, uint32_t now) {
+    pages::Rect r = actionRowRect();
+    c.fillRect(r.x, r.y, r.w, r.h, TFT_WHITE);
+    drawActionRow(c, now);
+}
+
+// Place slot s at row s/2, column s%2 (row-major reading order).
+void paintBands(m5gfx::M5Canvas& c, const BandView* views, int slotCount) {
+    for (int s = 0; s < slotCount; s++) {
+        int row = s / MAX_COLS, col = s % MAX_COLS;
+        int top = BAND_TOP + row * (BAND_H + BAND_GAP);
+        int x0 = COL_X0[col];
+        if (views[s].code == A_MORE) drawMoreBand(c, x0, top, views[s].label);
+        else                         drawJobBand(c, x0, top, views[s].label,
+                                                  jobBandDisabled(views[s].code));
     }
 }
 }  // namespace
@@ -214,32 +486,79 @@ const pages::Region* OutsidePage::regions(int* n) const {
 bool OutsidePage::draw(m5gfx::M5Canvas& c) {
     if (!g_game.outsideUnlocked) return false;
     c.fillSprite(TFT_WHITE);
-    page_header::draw(c);             // clock header + dashed rule (every page)
+    page_tabs::draw(c, 1);           // two-tab header, Outside active
     drawPopRow(c);
     drawBuildings(c);
-    BandView views[MAX_BANDS];
-    m_regionCount = layoutBands(m_regions, views, m_page);
-    paintBands(c, views, m_regionCount);
+
+    // 野外 action row — region[0]: one type=1 band carrying PARAM_ACTIONS; the
+    // press column resolves 伐木 vs 查看陷阱 in onLocalAction.
+    drawActionRow(c, epochNow());
+    m_regions[0].y0 = (uint16_t)ACT_TOP;
+    m_regions[0].y1 = (uint16_t)(ACT_TOP + ACT_H);
+    m_regions[0].type  = 1;
+    m_regions[0].param = PARAM_ACTIONS;
+
+    // Worker bands — region[1..]; layoutBands sets each param = worker row index.
+    BandView views[MAX_SLOTS];
+    int workerRows = layoutBands(m_regions + 1, m_slotCodes, views, m_page, &m_slotCount);
+    m_regionCount = 1 + workerRows;
+    paintBands(c, views, m_slotCount);
+    drawInventory(c);                // merged-in stores/items section (lower band)
     return true;
 }
 
-// Long-press on a band -> assign/unassign a villager. x resolves the half: left
-// of the divider decrements, right increments. Any real change high-beeps,
-// persists, and repaints; a no-op (no idle population to add, or already 0) low
-// beeps. "更多" flips to the next batch of jobs. save() lives here (the engine
-// action does not persist itself — single write, no double-save).
+// Long-press on a band -> assign/unassign a villager. x resolves the column and
+// then the band half: the left half decrements, the right increments. Any real
+// change high-beeps, persists, and repaints; a no-op (no idle population to add,
+// or already 0) low beeps. "更多" flips to the next batch of jobs. save() lives
+// here (the engine action does not persist itself — single write, no double-save).
 void OutsidePage::onLocalAction(uint8_t param, int x) {
-    if (param == A_MORE) {
+    // 野外 action row (伐木 / 查看陷阱) — the migrated Room verbs. Same GameState
+    // path and feedback as the Room page: the press column picks the verb, a
+    // success high-beeps + persists + repaints, a rejected/blank press low-beeps.
+    if (param == PARAM_ACTIONS) {
+        uint32_t now = epochNow();
+        int col = (x < COL_MID) ? 0 : 1;              // left 伐木, right 查看陷阱
+        Result r;
+        if (col == 0) {
+            r = g_game.gatherWood(now);
+        } else if (g_game.buildings[B_TRAP] > 0) {
+            r = g_game.checkTraps(now);
+        } else {
+            M5.Speaker.tone(600, 120);                // blank cell (no trap stands)
+            return;
+        }
+        if (r == RC_OK) {
+            M5.Speaker.tone(1800, 80);
+            g_game.save();
+            pager::showPage(pager::currentRingIndex(), false);
+        } else {
+            M5.Speaker.tone(600, 120);                // cooldown / engine reject
+        }
+        return;
+    }
+
+    // param is the worker ROW index; the press x resolves the column (x < COL_MID
+    // = left) and then, inside the hit band, the −/＋ half. An empty cell (odd
+    // count's trailing column) low-beeps and does nothing.
+    int row  = param;
+    int col  = (x < COL_MID) ? 0 : 1;
+    int slot = row * MAX_COLS + col;
+    if (slot < 0 || slot >= m_slotCount) { M5.Speaker.tone(600, 120); return; }
+    uint8_t code = m_slotCodes[slot];
+
+    if (code == A_MORE) {
         m_page++;
         M5.Speaker.tone(1800, 80);
         pager::showPage(pager::currentRingIndex(), false);
         return;
     }
-    uint8_t job = param;
+    uint8_t job = code;
     if (job == J_GATHERER || job >= JOB_COUNT) { M5.Speaker.tone(600, 120); return; }
 
     int before = (int)g_game.workers[job];
-    int delta = (x < BAND_MID) ? -1 : +1;
+    // −/＋ against the hit band's own midline (left half decrements).
+    int delta = (x < COL_X0[col] + COL_W / 2) ? -1 : +1;
     g_game.assignWorker(job, delta);
 
     if ((int)g_game.workers[job] != before) {   // a villager actually moved
@@ -252,14 +571,15 @@ void OutsidePage::onLocalAction(uint8_t param, int x) {
 }
 
 // Time axis (awake only). Settle the economy each second, then repaint on any
-// change to a painted number/label (population, workers, buildings); otherwise a
-// wall-minute rollover refreshes the header clock (QUALITY, clears ghosting).
-// Worker bands carry no cooldown, so — unlike Room — every change is a full
-// redraw; there is no partial button-area path. Mirrors the Room cadence.
+// change to a painted number/label (population, workers, buildings, worker
+// disabled-frames — see jobBandDisabled). No clock header lives on this page
+// anymore, so there is no per-minute chrome refresh to do; a quiet second is a
+// pure no-op. Worker bands carry no cooldown, so — unlike Room — every change
+// is a full redraw; there is no partial button-area path.
 void OutsidePage::tick(uint32_t nowMs) {
     static uint32_t s_lastTick = 0;
     static uint32_t s_lastSig  = 0;
-    static int      s_lastMin  = -1;
+    static bool     s_wasCooling = false;
 
     if (s_lastTick != 0 && nowMs - s_lastTick < 1000) return;
     s_lastTick = nowMs;
@@ -271,22 +591,35 @@ void OutsidePage::tick(uint32_t nowMs) {
     auto mix = [&](uint32_t v) { sig = (sig ^ v) * 16777619u; };
     mix(g_game.population); mix((uint32_t)g_game.maxPopulation());
     mix(g_game.outsideUnlocked ? 1u : 0u);
+    mix((uint32_t)(uint8_t)g_game.fire);       // Room tab title (shared header)
     for (int i = 0; i < JOB_COUNT; i++) mix(g_game.workers[i]);
     for (int i = 0; i < BLD_COUNT; i++) mix(g_game.buildings[i]);
+    // Inventory section: repaint when any shown store/item count changes.
+    for (int i = 0; i < RES_COUNT; i++)  mix((uint32_t)g_game.whole((uint8_t)i));
+    for (int i = 0; i < ITEM_COUNT; i++) mix((uint32_t)g_game.items[i]);
 
-    m5::rtc_time_t tm; M5.Rtc.getTime(&tm);
-    bool minuteRolled = (tm.minutes != s_lastMin);
-    s_lastMin = tm.minutes;
+    // 野外 action-row cooldowns (gather ch1 / traps ch2) drain a progress bar,
+    // but — unlike the worker bands — they are NOT in the content signature: the
+    // wood/meat they yield is banked at press time, so nothing else changes while
+    // they cool. Mirror the Room page: while either is live (or on the tick it
+    // clears) repaint JUST the action row, QUALITY on the clearing tick to wipe
+    // the bar ghost and restore the solid frame.
+    bool cooling = g_game.cooldownLeft(1, now) > 0 ||
+                   (g_game.buildings[B_TRAP] > 0 && g_game.cooldownLeft(2, now) > 0);
 
     if (sig != s_lastSig) {
         s_lastSig = sig;
         pager::showPage(pager::currentRingIndex(), false);   // recomputes bands
+        s_wasCooling = cooling;
         return;
     }
 
-    if (minuteRolled) {
-        page_header::draw(canvas);
-        pager::partialRefresh(pages::Rect{ 0, 0, 540, HDR_DIV_Y + 4 },
-                              pages::RefreshMode::QUALITY);
+    if (cooling || s_wasCooling) {
+        repaintActionRow(canvas, now);
+        bool cleared = (!cooling && s_wasCooling);
+        pager::partialRefresh(actionRowRect(),
+                              cleared ? pages::RefreshMode::QUALITY
+                                      : pages::RefreshMode::FAST);
     }
+    s_wasCooling = cooling;
 }

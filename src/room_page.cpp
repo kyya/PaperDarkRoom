@@ -10,8 +10,8 @@
 // rather than compress). See room_page.h for the region model.
 #include "room_page.h"
 #include "cjk_text.h"
-#include "page_header.h"
-#include "pomo_page.h"          // PAD, HDR_DIV_Y (shared layout authority)
+#include "pomo_page.h"          // PAD (shared layout authority)
+#include "page_tabs.h"          // shared two-tab header (生火间 │ 小型村落)
 #include "pager.h"
 #include "game_state.h"
 #include <M5Unified.h>
@@ -29,25 +29,36 @@ namespace {
 constexpr int SCALE     = 2;                 // 12px grid x2 = 24px CJK
 constexpr int CONTENT_W = 540 - 2 * PAD;     // 492px usable (§9.2)
 constexpr int GLYPH     = 12 * SCALE;        // 24px line box
-constexpr int MAX_BANDS = 4;                 // matches RoomPage::MAX_BANDS
+constexpr int MAX_ROWS  = 5;                 // matches RoomPage::MAX_BANDS (rows)
+constexpr int MAX_COLS  = 2;                 // two-column button grid
+constexpr int MAX_SLOTS = MAX_ROWS * MAX_COLS;   // 10 action cells / page
 
-// ---- vertical budget (§9.4), all measured to clear the 32px status bar -----
-constexpr int STATE_Y   = 120;               // fire/temp state line (below rule)
-constexpr int RES_TOP   = 158;               // resource summary top
-constexpr int RES_ROWH  = 28;                // per resource row
-constexpr int RES_ROWS  = 5;                 // <=5 rows x 2 cols
-constexpr int RES_COLX[2] = { PAD, 288 };    // two-column x origins
-constexpr int LOG_TOP   = 300;               // log stream top
+// ---- vertical budget (§9.4): the two-tab header (page_tabs::TAB_H = 72px) owns
+// the top band, so the fire/temp state line + log stream reflow BELOW it. Long-
+// press bands shrank from 92 to 80px (§9.3's hard floor — do not go lower) to
+// answer "buttons too big"; the 68px this frees (5*92+4*12=508 -> 5*80+4*10=440)
+// goes entirely to the log: LOG_LINES 8 -> 10 (+60px) and the log/button gap
+// 16 -> 24px (+8px), so BTN_TOP moves from 372 to 440 and the grid still ends at
+// 880 (< 928 status bar) — the bottom margin is unchanged. Resource/inventory
+// summary lives on the Outside page's lower band. ---------------------------
+constexpr int STATE_Y   = page_tabs::CONTENT_TOP + 4;   // fire/temp line (76)
+constexpr int LOG_TOP   = STATE_Y + 40;      // log stream top (116)
 constexpr int LOG_LINEH = 30;
-constexpr int LOG_LINES = 5;                 // 5 x 30 = 150px band
-constexpr int LOG_H     = LOG_LINEH * LOG_LINES;
-constexpr int BTN_TOP   = 464;               // first action band top
-constexpr int ROOM_BTN_H = 92;               // long-press band (§9.3: >=80px)
-constexpr int BTN_GAP   = 12;
-constexpr int BTN_X0    = PAD;
-constexpr int BTN_X1    = 540 - PAD;
-constexpr int BTN_AREA_BOTTOM = BTN_TOP + (MAX_BANDS - 1) * (ROOM_BTN_H + BTN_GAP)
-                                + ROOM_BTN_H;   // 868
+constexpr int LOG_LINES = 10;                // 10 x 30 = 300px band -> ends 416,
+                                             // 24px clear of BTN_TOP
+constexpr int BTN_TOP   = 440;               // first action row top (was 372)
+constexpr int ROOM_BTN_H = 80;               // long-press band (§9.3: >=80px, floor)
+constexpr int BTN_GAP   = 10;                // vertical gap between rows
+// Two columns of 240px with a 12px gutter fill the 492px content width; each
+// band's 24px label centers in its column (widest measured label 96px << the
+// ~232px column text budget, so every action fits — pure two-column, no
+// full-width exceptions). x < COL_MID picks the left column (onLocalAction).
+constexpr int COL_GAP   = 12;
+constexpr int COL_W     = (CONTENT_W - COL_GAP) / 2;         // 240
+constexpr int COL_X0[MAX_COLS] = { PAD, PAD + COL_W + COL_GAP };   // {24, 276}
+constexpr int COL_MID   = 540 / 2;           // 270: x < MID => left column
+constexpr int BTN_AREA_BOTTOM = BTN_TOP + (MAX_ROWS - 1) * (ROOM_BTN_H + BTN_GAP)
+                                + ROOM_BTN_H;   // 880 (5 rows, clears status bar)
 
 // Action codes carried in a Region param (uint8). 0..4 are the fixed verbs;
 // A_CRAFT_BASE+craftId means "build/craft that craftable".
@@ -59,6 +70,7 @@ enum : uint8_t {
 struct BandView {
     uint8_t code;
     char    label[48];
+    bool    enabled;                 // false -> render as unavailable (dashed)
     int     coolLeft, coolTotal;
 };
 
@@ -160,13 +172,52 @@ bool craftOfferable(uint8_t id) {
     return true;
 }
 
-// Ordered action list for the current game state: fire verb, then gather/traps,
-// then every offerable craftable. Returns the count.
+// Can `code` actually fire right now? Mirrors the engine's own accept conditions
+// (game_state.cpp lightFire/stokeFire/gatherWood/checkTraps/makeCraftable) so a
+// button that WOULD be rejected renders as unavailable (dashed) instead of
+// looking pressable — the user's "看起来都能点" complaint. Reads only public
+// GameState fields + the data tables; never mutates (game_state.cpp untouched).
+// A live cooldown counts as unavailable. The offered set already guarantees the
+// unlock/workshop/maximum gates (buildActions + craftOfferable), so only the
+// per-press gates (cooldown, cost, room-too-cold) are re-checked here.
+bool isActionEnabled(uint8_t code, uint32_t now) {
+    switch (code) {
+        case A_MORE:  return true;                       // page flip is always live
+        case A_LIGHT:
+            if (g_game.cooldownLeft(0, now) > 0) return false;
+            // free first light while wood is still "undefined" (room.js quirk)
+            if (g_game.woodSeen && g_game.stores[R_WOOD] < LIGHT_FIRE_WOOD * FP)
+                return false;
+            return true;
+        case A_STOKE:
+            if (g_game.cooldownLeft(0, now) > 0) return false;
+            return g_game.stores[R_WOOD] >= STOKE_FIRE_WOOD * FP;
+        case A_GATHER: return g_game.cooldownLeft(1, now) == 0;
+        case A_TRAPS:  return g_game.cooldownLeft(2, now) == 0;
+        default: {                                        // craftable id
+            uint8_t id = (uint8_t)(code - A_CRAFT_BASE);
+            if (id >= CRAFT_COUNT) return false;
+            const Craftable& c = CRAFT[id];
+            if (g_game.temp <= TEMP_COLD) return false;   // "builder just shivers"
+            bool bld = craftIsBuilding(id);
+            uint8_t slot = craftSlot(id);
+            int count = bld ? g_game.buildings[slot] : g_game.items[slot];
+            for (int i = 0; i < 3 && c.cost[i].res != RA_END; i++) {
+                int need = c.cost[i].amt;
+                if (c.cost[i].res == R_WOOD) need += (int)c.woodIncrPerN * count;
+                if (g_game.stores[c.cost[i].res] < (int32_t)need * FP) return false;
+            }
+            return true;
+        }
+    }
+}
+
+// Ordered action list for the current game state: fire verb, then every
+// offerable craftable. Returns the count. (gather wood / check traps are野外
+// actions — upstream outside.js, not room.js — so they live on the Outside page.)
 int buildActions(uint8_t* out, int cap) {
     int n = 0;
     if (n < cap) out[n++] = (g_game.fire == FIRE_DEAD) ? A_LIGHT : A_STOKE;
-    if (g_game.outsideUnlocked && n < cap)       out[n++] = A_GATHER;
-    if (g_game.buildings[B_TRAP] > 0 && n < cap) out[n++] = A_TRAPS;
     if (g_game.craftablesUnlocked)
         for (uint8_t id = 0; id < CRAFT_COUNT && n < cap; id++)
             if (craftOfferable(id)) out[n++] = (uint8_t)(A_CRAFT_BASE + id);
@@ -203,21 +254,25 @@ void labelFor(uint8_t code, int page, int numPages, char* out, size_t cap) {
     }
 }
 
-// Compute the visible bands for `page`: fills regionsOut[] (y-geometry + action
-// param) and views[] (label + cooldown). Batches of 3 real actions + a trailing
-// "more" band once the full list exceeds MAX_BANDS. Returns the band count.
-int layoutBands(pages::Region* regionsOut, BandView* views, int page,
-                uint32_t now) {
+// Compute the visible action grid for `page`. Fills slotCodes[] (row-major:
+// slot s -> row s/2, col s%2) + views[] (label + cooldown) for painting, and
+// regionsOut[] with ONE y-band per ROW (param = row index). Both columns of a
+// row share a row band; the pager hit-tests y only, so onLocalAction resolves
+// the column from the press x (COL_MID). Batches of 7 real actions + a trailing
+// "more" cell once the full list exceeds MAX_SLOTS. *slotCountOut receives the
+// filled cell count; the return value is the ROW count (== region count).
+int layoutBands(pages::Region* regionsOut, uint8_t* slotCodes, BandView* views,
+                int page, uint32_t now, int* slotCountOut) {
     uint8_t all[64];
     int total = buildActions(all, (int)sizeof(all));
 
     int numPages, start, take;
     bool more;
     int pg = 0;
-    if (total <= MAX_BANDS) {
+    if (total <= MAX_SLOTS) {
         numPages = 1; start = 0; take = total; more = false;
     } else {
-        int perPage = MAX_BANDS - 1;                 // 3 real + 1 "more"
+        int perPage = MAX_SLOTS - 1;                 // 7 real + 1 "more"
         numPages = (total + perPage - 1) / perPage;
         pg = ((page % numPages) + numPages) % numPages;
         start = pg * perPage;
@@ -226,22 +281,29 @@ int layoutBands(pages::Region* regionsOut, BandView* views, int page,
     }
 
     int k = 0;
-    for (int i = 0; i < take && k < MAX_BANDS; i++) views[k++].code = all[start + i];
-    if (more && k < MAX_BANDS) views[k++].code = A_MORE;
+    for (int i = 0; i < take && k < MAX_SLOTS; i++) slotCodes[k++] = all[start + i];
+    if (more && k < MAX_SLOTS) slotCodes[k++] = A_MORE;
+    int slotCount = k;
 
-    for (int i = 0; i < k; i++) {
-        int top = BTN_TOP + i * (ROOM_BTN_H + BTN_GAP);
-        regionsOut[i].y0 = (uint16_t)top;
-        regionsOut[i].y1 = (uint16_t)(top + ROOM_BTN_H);
-        regionsOut[i].type = 1;                      // firmware-local
-        regionsOut[i].param = views[i].code;
-        labelFor(views[i].code, pg, numPages, views[i].label,
-                 sizeof(views[i].label));
-        int ch, tot; cooldownFor(views[i].code, ch, tot);
-        views[i].coolTotal = tot;
-        views[i].coolLeft  = (ch >= 0) ? g_game.cooldownLeft(ch, now) : 0;
+    for (int s = 0; s < slotCount; s++) {
+        views[s].code = slotCodes[s];
+        labelFor(slotCodes[s], pg, numPages, views[s].label, sizeof(views[s].label));
+        views[s].enabled = isActionEnabled(slotCodes[s], now);
+        int ch, tot; cooldownFor(slotCodes[s], ch, tot);
+        views[s].coolTotal = tot;
+        views[s].coolLeft  = (ch >= 0) ? g_game.cooldownLeft(ch, now) : 0;
     }
-    return k;
+
+    int rows = (slotCount + MAX_COLS - 1) / MAX_COLS;
+    for (int r = 0; r < rows; r++) {
+        int top = BTN_TOP + r * (ROOM_BTN_H + BTN_GAP);
+        regionsOut[r].y0 = (uint16_t)top;
+        regionsOut[r].y1 = (uint16_t)(top + ROOM_BTN_H);
+        regionsOut[r].type = 1;                      // firmware-local
+        regionsOut[r].param = (uint8_t)r;            // row; onLocalAction adds col from x
+    }
+    *slotCountOut = slotCount;
+    return rows;
 }
 
 // ---- drawing pieces --------------------------------------------------------
@@ -255,33 +317,7 @@ void drawStateLine(m5gfx::M5Canvas& c) {
     cjk::drawText(c, x + 2 * GLYPH, STATE_Y, room, SCALE);   // gap then room
 }
 
-// Non-zero resources as "名 数量" (integer part), 2 columns x up to 5 rows.
-// Overflow past the 10 cells collapses to a trailing "..." (… is not in the
-// glyph closure — ASCII dots are).
-void drawResources(m5gfx::M5Canvas& c) {
-    const int cap = RES_ROWS * 2;               // 10 cells
-    int nz = 0;
-    for (int r = 0; r < RES_COUNT; r++)
-        if (g_game.whole((uint8_t)r) > 0) nz++;
-    bool overflow = nz > cap;
-    int limit = overflow ? cap - 1 : nz;        // reserve the last cell for "..."
-    int shown = 0;
-    for (int r = 0; r < RES_COUNT && shown < limit; r++) {
-        if (g_game.whole((uint8_t)r) <= 0) continue;
-        int col = shown % 2, row = shown / 2;
-        char line[48];
-        snprintf(line, sizeof(line), "%s %ld",
-                 tr(RES_KEY[r]), (long)g_game.whole((uint8_t)r));
-        cjk::drawText(c, RES_COLX[col], RES_TOP + row * RES_ROWH, line, SCALE);
-        shown++;
-    }
-    if (overflow) {                             // last cell = (cap-1)
-        int col = (cap - 1) % 2, row = (cap - 1) / 2;
-        cjk::drawText(c, RES_COLX[col], RES_TOP + row * RES_ROWH, "...", SCALE);
-    }
-}
-
-// Log stream: newest on top, wrapped, filling the 5-line band. Picks how many
+// Log stream: newest on top, wrapped, filling the 10-line band. Picks how many
 // recent entries fit (via wrapLineCount) before drawing so nothing overruns.
 void drawLog(m5gfx::M5Canvas& c) {
     int start = g_game.logCount;   // lowest index that still fits
@@ -300,37 +336,67 @@ void drawLog(m5gfx::M5Canvas& c) {
     }
 }
 
-// One action band: 2px frame, centered 24px label, and (while cooling) a
-// draining progress bar plus a 1-in-4 diagonal stipple "disabled" cue
-// (town_page's手法).
-void drawBand(m5gfx::M5Canvas& c, int top, const char* label,
-              int coolLeft, int coolTotal) {
-    c.drawRect(BTN_X0, top, BTN_X1 - BTN_X0, ROOM_BTN_H, TFT_BLACK);
-    c.drawRect(BTN_X0 + 1, top + 1, BTN_X1 - BTN_X0 - 2, ROOM_BTN_H - 2, TFT_BLACK);
-
-    int lw = cjk::textWidth(label, SCALE);
-    cjk::drawText(c, (540 - lw) / 2, top + (ROOM_BTN_H - GLYPH) / 2 - 4, label, SCALE);
-
-    if (coolTotal > 0 && coolLeft > 0) {
-        for (int yy = top + 3; yy < top + ROOM_BTN_H - 3; yy++)
-            for (int xx = BTN_X0 + 3; xx < BTN_X1 - 3; xx++)
-                if (((xx + yy) & 3) == 0) c.drawPixel(xx, yy, TFT_BLACK);
-        int barX0 = BTN_X0 + 12, barX1 = BTN_X1 - 12;
-        int barY = top + ROOM_BTN_H - 16, barH = 8;
-        c.drawRect(barX0, barY, barX1 - barX0, barH, TFT_BLACK);
-        int inner = barX1 - barX0 - 4;
-        int fw = (int)((int64_t)inner * coolLeft / coolTotal);   // drains L->R
-        if (fw > 0) c.fillRect(barX0 + 2, barY + 2, fw, barH - 4, TFT_BLACK);
-    }
+// 1px dashed rectangle, 4px on / 4px off — the unavailable-button frame.
+void drawDashedRect(m5gfx::M5Canvas& c, int x, int y, int w, int h) {
+    const int on = 4, per = 8;
+    int xr = x + w - 1, yb = y + h - 1;
+    for (int i = 0; i < w; i++)
+        if (i % per < on) { c.drawPixel(x + i, y, TFT_BLACK);
+                            c.drawPixel(x + i, yb, TFT_BLACK); }
+    for (int i = 0; i < h; i++)
+        if (i % per < on) { c.drawPixel(x, y + i, TFT_BLACK);
+                            c.drawPixel(xr, y + i, TFT_BLACK); }
 }
 
-// Paint the whole button area (clears it first) from the given band views.
-void paintButtons(m5gfx::M5Canvas& c, const BandView* views, int count) {
+// Cooldown fill colour: main.cpp runs the sprite at canvas.setColorDepth(
+// grayscale_8bit), and the panel underneath (ED047TC1) is a real 16-level
+// grayscale EPD (see platformio.ini) — not 1bpp. An RGB565 grey constant
+// converts cleanly through M5GFX's colour pipeline into a genuine mid-grey
+// pixel value, so a real light-grey fill (not a checkerboard dither) is the
+// right tool here. TFT_SILVER (0xC618 / 192,192,192) stays clearly lighter
+// than the 24px black label drawn on top of it.
+constexpr uint32_t COOL_FILL = TFT_SILVER;
+
+// One half-width action band at column origin x0. Frame carries the availability
+// cue: enabled = the two solid rings (2px); unavailable (condition not met /
+// cooling) = a single 1px dashed outer frame, no inner ring. A cooling band
+// fills its interior with a full-height grey block growing in from the left —
+// width = the fraction of the cooldown remaining, so it drains back to 0 as
+// time passes (the upstream A Dark Room button-cooldown affordance). The 24px
+// label paints on top of the fill so it stays legible either way. All geometry
+// is clipped to this column's [x0, x0+COL_W) so the two columns never bleed
+// into each other.
+void drawBand(m5gfx::M5Canvas& c, int x0, int top, const char* label,
+              bool enabled, int coolLeft, int coolTotal) {
+    if (enabled) {
+        c.drawRect(x0, top, COL_W, ROOM_BTN_H, TFT_BLACK);
+        c.drawRect(x0 + 1, top + 1, COL_W - 2, ROOM_BTN_H - 2, TFT_BLACK);
+    } else {
+        drawDashedRect(c, x0, top, COL_W, ROOM_BTN_H);
+    }
+
+    if (coolTotal > 0 && coolLeft > 0) {                      // draining cooldown
+        int fx0 = x0 + 2, fy0 = top + 2;
+        int fwMax = COL_W - 4, fh = ROOM_BTN_H - 4;
+        int fw = (int)((int64_t)fwMax * coolLeft / coolTotal);   // drains to 0
+        if (fw > 0) c.fillRect(fx0, fy0, fw, fh, COOL_FILL);
+    }
+
+    int lw = cjk::textWidth(label, SCALE);
+    cjk::drawText(c, x0 + (COL_W - lw) / 2, top + (ROOM_BTN_H - GLYPH) / 2 - 4,
+                  label, SCALE);
+}
+
+// Paint the whole button area (clears it first) from the given slot views,
+// placing slot s at row s/2, column s%2 (row-major reading order).
+void paintButtons(m5gfx::M5Canvas& c, const BandView* views, int slotCount) {
     pages::Rect r = buttonAreaRect();
     c.fillRect(r.x, r.y, r.w, r.h, TFT_WHITE);
-    for (int i = 0; i < count; i++) {
-        int top = BTN_TOP + i * (ROOM_BTN_H + BTN_GAP);
-        drawBand(c, top, views[i].label, views[i].coolLeft, views[i].coolTotal);
+    for (int s = 0; s < slotCount; s++) {
+        int row = s / MAX_COLS, col = s % MAX_COLS;
+        int top = BTN_TOP + row * (ROOM_BTN_H + BTN_GAP);
+        drawBand(c, COL_X0[col], top, views[s].label, views[s].enabled,
+                 views[s].coolLeft, views[s].coolTotal);
     }
 }
 }  // namespace
@@ -344,13 +410,13 @@ const pages::Region* RoomPage::regions(int* n) const {
 
 bool RoomPage::draw(m5gfx::M5Canvas& c) {
     c.fillSprite(TFT_WHITE);
-    page_header::draw(c);            // clock header + dashed rule (every page)
-    drawStateLine(c);
-    drawResources(c);
+    page_tabs::draw(c, 0);           // two-tab header, Room active
+    drawStateLine(c);                // fire/temp line, reflowed below the header
     drawLog(c);
-    BandView views[MAX_BANDS];
-    m_regionCount = layoutBands(m_regions, views, m_page, epochNow());
-    paintButtons(c, views, m_regionCount);
+    BandView views[MAX_SLOTS];
+    m_regionCount = layoutBands(m_regions, m_slotCodes, views, m_page, epochNow(),
+                                &m_slotCount);
+    paintButtons(c, views, m_slotCount);
     return true;
 }
 
@@ -359,10 +425,18 @@ bool RoomPage::draw(m5gfx::M5Canvas& c) {
 // to the next batch. save() lives here because the engine actions do not persist
 // themselves (single write — no double-save).
 void RoomPage::onLocalAction(uint8_t param, int x) {
-    (void)x;                          // Room bands are full-width, no ±split
     uint32_t now = epochNow();
 
-    if (param == A_MORE) {
+    // param is the ROW index; the press x resolves which of the row's two
+    // columns was hit (x < COL_MID = left). An empty cell (odd action count's
+    // trailing column) low-beeps and does nothing.
+    int row  = param;
+    int col  = (x < COL_MID) ? 0 : 1;
+    int slot = row * MAX_COLS + col;
+    if (slot < 0 || slot >= m_slotCount) { M5.Speaker.tone(600, 120); return; }
+    uint8_t code = m_slotCodes[slot];
+
+    if (code == A_MORE) {
         m_page++;
         M5.Speaker.tone(1800, 80);
         pager::showPage(pager::currentRingIndex(), false);
@@ -370,13 +444,13 @@ void RoomPage::onLocalAction(uint8_t param, int x) {
     }
 
     Result r;
-    switch (param) {
+    switch (code) {
         case A_LIGHT:  r = g_game.lightFire(now);  break;
         case A_STOKE:  r = g_game.stokeFire(now);  break;
         case A_GATHER: r = g_game.gatherWood(now); break;
         case A_TRAPS:  r = g_game.checkTraps(now); break;
         default: {
-            uint8_t id = (uint8_t)(param - A_CRAFT_BASE);
+            uint8_t id = (uint8_t)(code - A_CRAFT_BASE);
             if (id >= CRAFT_COUNT) { M5.Speaker.tone(600, 120); return; }
             r = craftIsBuilding(id) ? g_game.build(id) : g_game.craft(id);
             break;
@@ -394,15 +468,14 @@ void RoomPage::onLocalAction(uint8_t param, int x) {
 }
 
 // Time axis (awake only). Settle the economy each second, then repaint what
-// changed: a content change (fire/temp/stores/log/unlocks) redraws the page
-// (FAST); otherwise a wall-minute rollover refreshes the header clock (QUALITY,
-// clears ghosting) and any live cooldown drains its bar in the button area
-// (FAST; QUALITY on the tick it hits zero to wipe the bar's ghost). Mirrors the
-// town_page / pomo_page cadence.
+// changed: a content change (fire/temp/stores/log/unlocks — which also flips a
+// button's available/dashed state) redraws the page (FAST); otherwise any live
+// cooldown drains its bar in the button area (FAST; QUALITY on the tick it hits
+// zero to wipe the bar's ghost and restore the solid frame). No header clock to
+// refresh anymore. Mirrors the outside_page / pomo_page cadence.
 void RoomPage::tick(uint32_t nowMs) {
     static uint32_t s_lastTick = 0;
     static uint32_t s_lastSig  = 0;
-    static int      s_lastMin  = -1;
     static bool     s_wasCooling = false;
 
     if (s_lastTick != 0 && nowMs - s_lastTick < 1000) return;
@@ -422,13 +495,9 @@ void RoomPage::tick(uint32_t nowMs) {
     for (int i = 0; i < RES_COUNT; i++) mix((uint32_t)g_game.whole((uint8_t)i));
     for (int i = 0; i < BLD_COUNT; i++) mix(g_game.buildings[i]);
 
-    m5::rtc_time_t tm; M5.Rtc.getTime(&tm);
-    bool minuteRolled = (tm.minutes != s_lastMin);
-    s_lastMin = tm.minutes;
-
     bool cooling = false;
-    for (int i = 0; i < m_regionCount; i++) {
-        int ch, tot; cooldownFor(m_regions[i].param, ch, tot);
+    for (int s = 0; s < m_slotCount; s++) {
+        int ch, tot; cooldownFor(m_slotCodes[s], ch, tot);
         if (ch >= 0 && g_game.cooldownLeft(ch, now) > 0) { cooling = true; break; }
     }
 
@@ -439,16 +508,11 @@ void RoomPage::tick(uint32_t nowMs) {
         return;
     }
 
-    if (minuteRolled) {
-        page_header::draw(canvas);
-        pager::partialRefresh(pages::Rect{ 0, 0, 540, HDR_DIV_Y + 4 },
-                              pages::RefreshMode::QUALITY);
-    }
-
     if (cooling || s_wasCooling) {
-        BandView views[MAX_BANDS];
-        m_regionCount = layoutBands(m_regions, views, m_page, now);
-        paintButtons(canvas, views, m_regionCount);
+        BandView views[MAX_SLOTS];
+        m_regionCount = layoutBands(m_regions, m_slotCodes, views, m_page, now,
+                                    &m_slotCount);
+        paintButtons(canvas, views, m_slotCount);
         bool cleared = (!cooling && s_wasCooling);
         pager::partialRefresh(buttonAreaRect(),
                               cleared ? pages::RefreshMode::QUALITY
