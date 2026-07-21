@@ -19,10 +19,9 @@ static int  s_cur   = 0;
 static bool s_sd    = false;
 static char s_curName[24] = {0};
 
-static const char* DIR      = "/pages";
-static const char* META     = "/pages/meta.json";
-static const char* META_TMP = "/pages/meta.tmp";
-static const char* LEGACY   = "/last.png";   // 0.5.x single-frame persistence
+static const char* DIR      = "/.darkroom/pages";
+static const char* META     = "/.darkroom/pages/meta.json";
+static const char* META_TMP = "/.darkroom/pages/meta.tmp";
 
 // Nibble-table CRC32, zlib polynomial (reflected). Deliberately NOT the ROM
 // esp_rom_crc32_le — this is 16 words and provably python-zlib compatible.
@@ -127,34 +126,36 @@ static void preloadPage(int i) {
 void init(bool sdOk) {
     s_sd = sdOk;
     if (!s_sd) return;
+    // One-time cleanup: earlier firmware (since removed) legacy-imported a
+    // dashboard 0.5.x /last.png fossil into our page store, and that import
+    // persisted to SD. If the fossil is still sitting on the card, our store
+    // may carry that contamination — wipe both so the device reboots to a
+    // clean empty store. Once /last.png is gone this branch never runs again.
+    if (SD.exists("/last.png")) {
+        SD.remove("/last.png");
+        for (int i = 0; i < MAX_PAGES; i++) {
+            char path[24];
+            pagePath(i, path, sizeof(path));
+            SD.remove(path);
+        }
+        SD.remove(META);
+        SD.remove(META_TMP);
+        for (int i = 0; i < MAX_PAGES; i++) {
+            if (s_pages[i].buf) free(s_pages[i].buf);
+            s_pages[i] = Page{};
+        }
+        s_count = 0;
+        s_cur = 0;
+        s_curName[0] = 0;
+        Serial.println("[store] wiped legacy /last.png contamination");
+    }
     if (!SD.exists(DIR)) SD.mkdir(DIR);
     if (readMeta()) {
         for (int i = 0; i < s_count; i++) preloadPage(i);
         Serial.printf("[store] meta ok: %d page(s), cur=%d\n", s_count, s_cur);
         return;
     }
-    // Legacy import: 0.5.x left /last.png — adopt it as a single-page set so
-    // the first boot after reflash isn't blank.
-    File f = SD.open(LEGACY, FILE_READ);
-    if (!f) return;
-    size_t len = f.size();
-    if (len == 0 || len > PAGE_BUF_MAX) { f.close(); return; }
-    uint8_t* buf = pageAlloc(len);
-    if (!buf) { f.close(); return; }
-    if (f.read(buf, len) != len) { free(buf); f.close(); return; }
-    f.close();
-    s_count = 1;
-    s_cur = 0;
-    s_pages[0].buf = buf;
-    s_pages[0].len = len;
-    s_pages[0].etag = crc32(buf, len);
-    s_pages[0].valid = true;
-    char path[24];
-    pagePath(0, path, sizeof(path));
-    File out = SD.open(path, FILE_WRITE);
-    if (out) { out.write(buf, len); out.close(); }
-    writeMeta();
-    Serial.printf("[store] imported legacy /last.png (%u B)\n", (unsigned)len);
+    // No meta (fresh SD, or just wiped above) — empty store, normal first boot.
 }
 
 int pageCount() { return s_count; }
