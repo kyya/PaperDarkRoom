@@ -41,7 +41,7 @@
 #include <time.h>
 
 #ifndef CARD_VERSION
-#define CARD_VERSION "0.5.0-adarkroom"
+#define CARD_VERSION "0.5.1-adarkroom"
 #endif
 #ifndef WAKE_INTERVAL_SECS
 #define WAKE_INTERVAL_SECS 900
