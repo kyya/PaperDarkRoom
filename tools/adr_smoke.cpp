@@ -51,6 +51,18 @@ int main() {
     CHECK(r == RC_OK, "lightFire ok");
     CHECK(gs.fire == FIRE_BURNING, "fire -> burning");
     CHECK(gs.builderLevel == 0, "builder approaching (level 0)");
+    // v0.3.1 feedback 1: the fire/temp state used to be a persistent header
+    // line; now it only reaches the user as a log notification on change
+    // (room.js onFireChange parity). Check right here, before the log ring
+    // (LOG_CAP=8) evicts this entry under the builder-chain's later pushes.
+    {
+        bool sawFireLog = false;
+        for (int i = 0; i < gs.logCount; i++)
+            if (strcmp(gs.log[i].enKey, "the fire is {0}") == 0 &&
+                gs.log[i].hasArg && gs.log[i].arg == FIRE_BURNING)
+                sawFireLog = true;
+        CHECK(sawFireLog, "onFireChange pushes \"the fire is {0}\" (fire=burning)");
+    }
 
     printf("== settle 1h: builder chain + warm room ==\n");
     advance(gs, now, 3600);
@@ -58,6 +70,15 @@ int main() {
     CHECK(gs.temp >= TEMP_WARM, "room warmed to >= warm");
     CHECK(gs.builderLevel == 4, "builder now helping (level 4)");
     CHECK(gs.craftablesUnlocked, "craftables unlocked");
+    // v0.3.1 feedback 1: adjustTemp() notifies on every temp change too
+    // (room.js parity) — several fire during the warmup, survives the ring.
+    {
+        bool sawTempLog = false;
+        for (int i = 0; i < gs.logCount; i++)
+            if (strcmp(gs.log[i].enKey, "the room is {0}") == 0 && gs.log[i].hasArg)
+                sawTempLog = true;
+        CHECK(sawTempLog, "adjustTemp pushes \"the room is {0}\" on change");
+    }
     int woodAfterBuilder = gs.whole(R_WOOD);
     CHECK(woodAfterBuilder > 4, "builder passively stocked wood (+2/tick)");
     printf("     wood after builder hour = %d\n", woodAfterBuilder);
@@ -166,6 +187,96 @@ int main() {
     t2 += 300; g2.settle(t2);              // 30 ticks
     CHECK(g2.stores[R_BAIT] > baitC && g2.stores[R_MEAT] < meatC,
           "with meat -> trapper makes bait, consumes meat");
+
+    printf("== [feedback 2] cost-insufficient build/craft pushes \"not enough X\" ==\n");
+    // room.js build()/craft(): notify "not enough " + the first short cost key.
+    // v0.3.1 feedback 2: a disabled build/craft band used to fail silently.
+    {
+        GameState g4; g4.init(); uint32_t t4 = 900; g4.settle(t4);
+        g4.temp = TEMP_MILD;               // not cold, so RC_ERR_COLD can't preempt
+        g4.craftablesUnlocked = true;
+        g4.stores[R_WOOD] = 0;             // trap costs 10 wood -> force insufficiency
+        Result rr = g4.build(C_TRAP);
+        CHECK(rr == RC_ERR_COST, "build trap fails on insufficient wood");
+        bool sawNotEnoughWood = false;
+        for (int i = 0; i < g4.logCount; i++)
+            if (strcmp(g4.log[i].enKey, "not enough wood") == 0) sawNotEnoughWood = true;
+        CHECK(sawNotEnoughWood, "cost failure pushes \"not enough wood\"");
+    }
+
+    printf("== [v0.3.2] trading post: buy() ==\n");
+    // room.js buy(): gated on the trading post standing (RC_ERR_LOCKED before),
+    // then the same "not enough X" cost-fail logging as build/craft, then a
+    // successful buy grants exactly 1 whole unit of the good with no success
+    // notification (upstream buy() has none — good.buildMsg is undefined on
+    // Room.TradeGoods entries, so Notifications.notify() no-ops; see
+    // game_state.cpp GameState::buy()).
+    {
+        GameState g6; g6.init(); uint32_t t6 = 970; g6.settle(t6);
+        g6.stores[R_FUR] = 1000 * FP;       // affords every P1 trade good
+        CHECK(g6.buy(T_SCALES) == RC_ERR_LOCKED,
+              "buy before trading post -> RC_ERR_LOCKED");
+
+        g6.buildings[B_TRADING_POST] = 1;   // trading post now stands
+        int scalesBefore = g6.whole(R_SCALES);
+        int furBefore    = g6.whole(R_FUR);
+        Result rb = g6.buy(T_SCALES);        // costs 150 fur (game_data.h TRADE)
+        CHECK(rb == RC_OK, "buy scales ok once trading post stands");
+        CHECK(g6.whole(R_SCALES) == scalesBefore + 1, "buy scales: +1 scales");
+        CHECK(g6.whole(R_FUR) == furBefore - 150, "buy scales: -150 fur");
+
+        g6.stores[R_FUR] = 0;                // force insufficiency
+        Result rc = g6.buy(T_SCALES);
+        CHECK(rc == RC_ERR_COST, "buy scales fails on insufficient fur");
+        bool sawNotEnoughFur = false;
+        for (int i = 0; i < g6.logCount; i++)
+            if (strcmp(g6.log[i].enKey, "not enough fur") == 0) sawNotEnoughFur = true;
+        CHECK(sawNotEnoughFur, "buy cost failure pushes \"not enough fur\"");
+    }
+
+    printf("== [feedback 3] duplicate log lines collapse into count ==\n");
+    // Repeatedly long-pressing a cost-disabled band (e.g. the same "not
+    // enough wood") used to scroll a fresh duplicate line every time;
+    // pushLog() now collapses a repeat of the newest entry into its count.
+    {
+        GameState g5; g5.init(); uint32_t t5 = 950; g5.settle(t5);
+        int before = g5.logCount;
+        g5.pushLog("not enough wood");
+        int afterFirst = g5.logCount;
+        CHECK(g5.log[afterFirst - 1].count == 1, "fresh entry starts at count 1");
+        g5.pushLog("not enough wood");           // identical repeat
+        CHECK(g5.logCount == afterFirst, "repeat of newest entry does not grow logCount");
+        CHECK(g5.log[g5.logCount - 1].count == 2, "repeat collapses into count=2");
+        g5.pushLog("dry brush and dead branches litter the forest floor");  // different key
+        CHECK(g5.logCount == afterFirst + 1, "a different key pushes a new entry");
+        CHECK(g5.log[g5.logCount - 1].count == 1, "new entry starts fresh at count 1");
+        CHECK(g5.log[g5.logCount - 2].count == 2, "the collapsed entry keeps its count");
+        CHECK(g5.logCount == before + 2, "net: 2 distinct entries logged, not 3");
+
+        // save/load round-trip: count must survive the JSON write/read.
+        CHECK(g5.save(), "save with a collapsed log entry ok");
+        GameState g5l; g5l.init();
+        CHECK(g5l.load(), "load ok");
+        CHECK(g5l.logCount == g5.logCount, "log length round-trips");
+        CHECK(g5l.log[g5l.logCount - 2].count == 2,
+              "collapsed entry's count round-trips through save/load");
+    }
+
+    printf("== [v0.3.3] fmtAmount: compact quantity abbreviation ==\n");
+    // game_data.h fmtAmount — pure, host-compilable, drives the Outside inventory
+    // box and the Trade balance row. v<1000 verbatim; 1e3..1e4 -> "1.2K"
+    // (TRUNCATED tenths); 1e4..1e6 -> integer K; 1e6.. -> M.
+    {
+        char b[8];
+        fmtAmount(999, b, sizeof(b));     CHECK(strcmp(b, "999") == 0,  "999 -> \"999\"");
+        fmtAmount(1000, b, sizeof(b));    CHECK(strcmp(b, "1.0K") == 0, "1000 -> \"1.0K\"");
+        fmtAmount(1234, b, sizeof(b));    CHECK(strcmp(b, "1.2K") == 0, "1234 -> \"1.2K\" (truncated)");
+        fmtAmount(1999, b, sizeof(b));    CHECK(strcmp(b, "1.9K") == 0, "1999 -> \"1.9K\" (truncated, not 2.0K)");
+        fmtAmount(56789, b, sizeof(b));   CHECK(strcmp(b, "56K") == 0,  "56789 -> \"56K\"");
+        fmtAmount(999999, b, sizeof(b));  CHECK(strcmp(b, "999K") == 0, "999999 -> \"999K\"");
+        fmtAmount(1234567, b, sizeof(b)); CHECK(strcmp(b, "1.2M") == 0, "1234567 -> \"1.2M\"");
+        fmtAmount(12000000, b, sizeof(b));CHECK(strcmp(b, "12M") == 0,  "12000000 -> \"12M\"");
+    }
 
     printf("== 24h settle cap ==\n");
     GameState g3;
