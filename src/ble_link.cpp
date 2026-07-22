@@ -98,6 +98,21 @@ static void otaFail(const char* reason) {
 class CtrlCb : public BLECharacteristicCallbacks {
     void onWrite(BLECharacteristic* c) override {
         std::string v = c->getValue();
+        // Debug game-command intercept (reuses this encrypted CTRL char to dodge
+        // a new GATT characteristic — see the Windows GATT-cache trap). A write
+        // starting with ASCII "adr:" is a game command, not a binary frame
+        // header: the header's u32 LE `total` is a small count, never 0x3A726461
+        // ("adr:" LE), so this is collision-free. Capture the line here; the main
+        // loop parses + applies it (CtrlCb/TimeCfgCb capture-vs-act division).
+        if (v.size() >= 4 && memcmp(v.data(), "adr:", 4) == 0) {
+            size_t n = v.size();
+            if (n >= sizeof(rx.gameCmd)) n = sizeof(rx.gameCmd) - 1;   // cap 63+NUL
+            memcpy(rx.gameCmd, v.data(), n);
+            rx.gameCmd[n] = '\0';
+            rx.gameCmdPending = true;
+            Serial.printf("[ble] CTRL game-cmd '%s'\n", rx.gameCmd);
+            return;
+        }
         if (v.size() < 4) return;
         const uint8_t* p = (const uint8_t*)v.data();
         uint32_t total = u32le(p);

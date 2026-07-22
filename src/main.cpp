@@ -40,7 +40,7 @@
 #include <time.h>
 
 #ifndef CARD_VERSION
-#define CARD_VERSION "0.3.3-adarkroom"
+#define CARD_VERSION "0.4.2-adarkroom"
 #endif
 #ifndef WAKE_INTERVAL_SECS
 #define WAKE_INTERVAL_SECS 900
@@ -166,6 +166,50 @@ static void applyPendingTimeConfig() {
                   ble_link::rx.rtcYearSince2000, ble_link::rx.rtcMonth,
                   ble_link::rx.rtcDay, ble_link::rx.rtcHour,
                   ble_link::rx.rtcMinute, ble_link::rx.rtcSecond);
+}
+
+// Apply a pending debug game command (the BLE CTRL "adr:" intercept — see
+// ble_link CtrlCb). One verb for now, `adr:give <res> <amount>`: inject <amount>
+// whole units of the RES_KEY-named resource (a dev/testing aid — "蓝牙直接推铁").
+// A multi-word RES_KEY ("cured meat") is sent with '_' for the space
+// ("cured_meat") and un-escaped back here before matching, so every resource is
+// reachable. Same capture-in-callback / act-in-loop split as
+// applyPendingTimeConfig; the engine write + save + repaint all live here, off
+// the BLE callback.
+static void applyPendingGameCmd() {
+    if (!ble_link::rx.gameCmdPending) return;
+    ble_link::rx.gameCmdPending = false;
+    char res[24]; int amount = 0;
+    // %23s stops at whitespace; the host sends multi-word keys with '_' for the
+    // space (so they stay one token), un-escaped just below before the strcmp.
+    if (sscanf(ble_link::rx.gameCmd, "adr:give %23s %d", res, &amount) != 2) {
+        Serial.printf("[cmd] parse fail: '%s'\n", ble_link::rx.gameCmd);
+        M5.Speaker.tone(600, 120);
+        return;
+    }
+    // Injection bound: 1..1e6 whole units. 1e6 × FP(100) = 1e8 per write, well
+    // inside int32 stores (max ~2.1e9), so a single inject can't overflow.
+    if (amount < 1 || amount > 1000000) {
+        Serial.printf("[cmd] amount out of range (1..1000000): %d\n", amount);
+        M5.Speaker.tone(600, 120);
+        return;
+    }
+    for (char* q = res; *q; q++) if (*q == '_') *q = ' ';   // "cured_meat" -> "cured meat"
+    int r = -1;
+    for (int i = 0; i < adr::RES_COUNT; i++)
+        if (strcmp(res, adr::RES_KEY[i]) == 0) { r = i; break; }
+    if (r < 0) {
+        Serial.printf("[cmd] unknown resource: '%s'\n", res);
+        M5.Speaker.tone(600, 120);
+        return;
+    }
+    g_game.stores[r] += amount * adr::FP;         // stores are fixed-point × FP
+    if (g_game.stores[r] < 0) g_game.stores[r] = 0;   // never leave it negative
+    g_game.save();
+    M5.Speaker.tone(1800, 80);
+    pager::showPage(pager::currentRingIndex(), false);
+    Serial.printf("[cmd] give %s %d -> stores[%d]=%ld\n",
+                  res, amount, r, (long)g_game.stores[r]);
 }
 
 // ---- OTA app-level rollback (NVS namespace "ota") ------------------------
@@ -434,6 +478,9 @@ void loop() {
 
     // TIME_CONFIG landed: RTC set + quiet-hours NVS save.
     applyPendingTimeConfig();
+
+    // Debug game command landed (BLE CTRL "adr:" intercept): inject resources.
+    applyPendingGameCmd();
 
     // Dormant pomo service tick (no PomoPage / pomo region exists in this
     // firmware, so it never activates) + the current page's time axis. Kept so

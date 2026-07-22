@@ -15,6 +15,13 @@
 //              still the target page index.
 //   total==0 : "sync complete, nothing (more) to push" — the main loop
 //              decides whether to sleep (SYNC) or stay awake (INTERACTIVE).
+//   "adr:…"  : a debug game command, NOT a frame header — a write whose first
+//              4 bytes are ASCII "adr:" is captured into rx.gameCmd and applied
+//              by the main loop (see applyPendingGameCmd; tools/adr_cmd.py). The
+//              binary header's u32 LE `total` is a small count and can never
+//              equal 0x3A726461 ("adr:" LE), so this overload is collision-free
+//              and old hosts are unaffected. Reuses this encrypted CTRL char to
+//              avoid adding a GATT characteristic (the Windows GATT-cache trap).
 // DATA: chunked write-without-response stream into rxBuf (unchanged from v1).
 //   A REGIONS payload is: u8 region_count | region_count * (u16 LE y0, u16 LE
 //   y1) — pixel rows a long-press on that page must land inside to select
@@ -87,6 +94,12 @@ struct Rx {
     volatile uint8_t  rtcSecond = 0;
     volatile uint16_t quietStartMin = 0;   // hour*60+min
     volatile uint16_t quietEndMin   = 0;   // hour*60+min
+    // Debug game command (set by CtrlCb's "adr:" prefix intercept, consumed
+    // once by the main loop — same capture-in-callback / act-in-loop division
+    // as timeCfgPending). gameCmd holds the whole ASCII line ("adr:give iron
+    // 300"), NUL-terminated; the flag hands it off (see applyPendingGameCmd).
+    volatile bool     gameCmdPending = false;
+    char              gameCmd[64] = {0};
 };
 
 extern Rx rx;

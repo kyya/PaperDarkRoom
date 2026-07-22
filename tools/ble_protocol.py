@@ -13,6 +13,10 @@ name) means updating both this file and src/ble_link.cpp.
 """
 from __future__ import annotations
 
+# CTRL: frame-header characteristic, also carries debug game commands — a write
+# of ASCII "adr:give <res> <amount>" is intercepted by the firmware (see
+# tools/adr_cmd.py + src/ble_link.cpp's CtrlCb).
+CTRL_UUID = "e3e30002-1111-2222-3333-444455556666"
 DATA_UUID = "e3e30003-1111-2222-3333-444455556666"
 STAT_UUID = "e3e30004-1111-2222-3333-444455556666"
 # OTA firmware update: 8-byte header <II total|crc32 (zlib CRC32), then the
