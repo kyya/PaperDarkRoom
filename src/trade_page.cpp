@@ -107,15 +107,13 @@ uint32_t epochNow() {
     return e > 0 ? (uint32_t)e : 0;
 }
 
-// Is trade good `id` offerable now (under maximum)? Mirrors room_page's old
-// tradeOfferable exactly: cost is NOT checked here (an unaffordable buy button
-// still shows, dashed), only whether it could EVER be bought again right now
-// (compass caps at 1 -> disappears once owned; room.js goodsMax parity).
+// Is trade good `id` offerable now? Delegates to the engine's buyOfferable
+// (room.js buyUnlocked: trading post up + product resource SEEN, compass always
+// offered, hidden once compass owned). v0.4.8 fix B4: the seen gate replaces the
+// old "everything shows the moment the post stands" behaviour. Cost is NOT
+// checked here — an unaffordable-but-offered buy band still shows, dashed.
 bool tradeOfferable(uint8_t id) {
-    const TradeGood& g = TRADE[id];
-    int have = g_game.whole(g.product); if (have < 0) have = 0;
-    if (g.maximum >= 0 && have >= g.maximum) return false;
-    return true;
+    return g_game.buyOfferable(id);
 }
 
 // Can good `id` be bought right now? buy() has no cooldown and no room-too-cold
@@ -276,8 +274,12 @@ const pages::Region* TradePage::regions(int* n) const {
 // skip this ring slot (same mechanism the Outside page uses for outsideUnlocked
 // — verified page-kind-agnostic: showPage -> pageAt resolves client pages too,
 // draw()==false -> showPage returns false -> showPageOrNext steps past it).
+// available() is the single source of that hide predicate — draw() and the
+// status bar's page-dot count both read it, so they never drift.
+bool TradePage::available() const { return g_game.buildings[B_TRADING_POST] > 0; }
+
 bool TradePage::draw(m5gfx::M5Canvas& c) {
-    if (g_game.buildings[B_TRADING_POST] == 0) return false;
+    if (!available()) return false;
     c.fillSprite(TFT_WHITE);
     page_tabs::draw(c, 2);           // three-tab header, Trade active
     drawBalance(c);
@@ -344,6 +346,7 @@ void TradePage::tick(uint32_t nowMs) {
     for (int i = 0; i < BLD_COUNT; i++) mix(g_game.buildings[i]);
     mix((uint32_t)(uint8_t)g_game.fire);                 // Room tab title
     mix(g_game.outsideUnlocked ? 1u : 0u);               // Outside tab gate
+    mix(g_game.seen);                                    // B4: a newly-seen resource adds its buy band
 
     if (sig != s_lastSig) {
         s_lastSig = sig;

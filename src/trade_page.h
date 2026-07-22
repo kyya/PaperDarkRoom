@@ -29,6 +29,7 @@ class TradePage : public pages::Page {
 public:
     const char* name() const override { return "trade"; }
     bool draw(m5gfx::M5Canvas& canvas) override;   // false until the post stands
+    bool available() const override;               // trading post stands (see .cpp)
     const pages::Region* regions(int* n) const override;
     void onLocalAction(uint8_t param, int x, int y) override;  // full-width: x/y unused
     void tick(uint32_t nowMs) override;

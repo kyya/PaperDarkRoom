@@ -110,6 +110,9 @@ constexpr uint8_t RA_END = 0xFF;              // cost-list terminator
 struct Craftable {
     const char*  key;            // en_key (tr + identity)
     const char*  buildMsg;       // en_key logged on successful build
+    const char*  availableMsg;   // en_key pushed ONCE when first offerable (room.js
+                                 // craftUnlocked); nullptr = none (upstream: only
+                                 // buildings carry availableMsg, not tools/weapons)
     uint8_t      type;           // CraftType
     int16_t      maximum;        // -1 = unlimited
     int32_t      woodIncrPerN;   // extra wood per existing count (trap 10/hut 50)
@@ -118,57 +121,67 @@ struct Craftable {
 
 // Buildings first (ids 0..9), then tools/upgrades/weapons (ids 10..23).
 static const Craftable CRAFT[CRAFT_COUNT] = {
-    // -- buildings --
-    { "trap", "more traps to catch more creatures", CT_BUILDING, 10, 10,
-      { {R_WOOD,10}, {RA_END,0}, {RA_END,0} } },
+    // -- buildings (each carries a room.js availableMsg, pushed once on unlock) --
+    { "trap", "more traps to catch more creatures",
+      "builder says she can make traps to catch any creatures might still be alive out there",
+      CT_BUILDING, 10, 10, { {R_WOOD,10}, {RA_END,0}, {RA_END,0} } },
     { "cart", "the rickety cart will carry more wood from the forest",
+      "builder says she can make a cart for carrying wood",
       CT_BUILDING, 1, 0, { {R_WOOD,30}, {RA_END,0}, {RA_END,0} } },
     { "hut", "builder puts up a hut, out in the forest. says word will get around.",
+      "builder says there are more wanderers. says they'll work, too.",
       CT_BUILDING, 20, 50, { {R_WOOD,100}, {RA_END,0}, {RA_END,0} } },
     { "lodge", "the hunting lodge stands in the forest, a ways out of town",
+      "villagers could help hunt, given the means",
       CT_BUILDING, 1, 0, { {R_WOOD,200}, {R_FUR,10}, {R_MEAT,5} } },
     { "trading post",
       "now the nomads have a place to set up shop, they might stick around a while",
+      "a trading post would make commerce easier",
       CT_BUILDING, 1, 0, { {R_WOOD,400}, {R_FUR,100}, {RA_END,0} } },
     { "tannery", "tannery goes up quick, on the edge of the village",
+      "builder says leather could be useful. says the villagers could make it.",
       CT_BUILDING, 1, 0, { {R_WOOD,500}, {R_FUR,50}, {RA_END,0} } },
     { "smokehouse", "builder finishes the smokehouse. she looks hungry.",
+      "should cure the meat, or it'll spoil. builder says she can fix something up.",
       CT_BUILDING, 1, 0, { {R_WOOD,600}, {R_MEAT,50}, {RA_END,0} } },
     { "workshop", "workshop's finally ready. builder's excited to get to it",
+      "builder says she could make finer things, if she had the tools",
       CT_BUILDING, 1, 0, { {R_WOOD,800}, {R_LEATHER,100}, {R_SCALES,10} } },
     { "steelworks", "a haze falls over the village as the steelworks fires up",
+      "builder says the villagers could make steel, given the tools",
       CT_BUILDING, 1, 0, { {R_WOOD,1500}, {R_IRON,100}, {R_COAL,100} } },
     { "armoury", "armoury's done, welcoming back the weapons of the past.",
+      "builder says it'd be useful to have a steady source of bullets",
       CT_BUILDING, 1, 0, { {R_WOOD,3000}, {R_STEEL,100}, {R_SULPHUR,50} } },
-    // -- tools / upgrades / weapons (need workshop) --
-    { "torch", "a torch to keep the dark away", CT_TOOL, -1, 0,
+    // -- tools / upgrades / weapons (need workshop; no upstream availableMsg) --
+    { "torch", "a torch to keep the dark away", nullptr, CT_TOOL, -1, 0,
       { {R_WOOD,1}, {R_CLOTH,1}, {RA_END,0} } },
-    { "waterskin", "this waterskin'll hold a bit of water, at least",
+    { "waterskin", "this waterskin'll hold a bit of water, at least", nullptr,
       CT_UPGRADE, 1, 0, { {R_LEATHER,50}, {RA_END,0}, {RA_END,0} } },
-    { "cask", "the cask holds enough water for longer expeditions",
+    { "cask", "the cask holds enough water for longer expeditions", nullptr,
       CT_UPGRADE, 1, 0, { {R_LEATHER,100}, {R_IRON,20}, {RA_END,0} } },
-    { "water tank", "never go thirsty again", CT_UPGRADE, 1, 0,
+    { "water tank", "never go thirsty again", nullptr, CT_UPGRADE, 1, 0,
       { {R_IRON,100}, {R_STEEL,50}, {RA_END,0} } },
     { "bone spear", "this spear's not elegant, but it's pretty good at stabbing",
-      CT_WEAPON, -1, 0, { {R_WOOD,100}, {R_TEETH,5}, {RA_END,0} } },
-    { "rucksack", "carrying more means longer expeditions to the wilds",
+      nullptr, CT_WEAPON, -1, 0, { {R_WOOD,100}, {R_TEETH,5}, {RA_END,0} } },
+    { "rucksack", "carrying more means longer expeditions to the wilds", nullptr,
       CT_UPGRADE, 1, 0, { {R_LEATHER,200}, {RA_END,0}, {RA_END,0} } },
-    { "wagon", "the wagon can carry a lot of supplies", CT_UPGRADE, 1, 0,
+    { "wagon", "the wagon can carry a lot of supplies", nullptr, CT_UPGRADE, 1, 0,
       { {R_WOOD,500}, {R_IRON,100}, {RA_END,0} } },
-    { "convoy", "the convoy can haul mostly everything", CT_UPGRADE, 1, 0,
+    { "convoy", "the convoy can haul mostly everything", nullptr, CT_UPGRADE, 1, 0,
       { {R_WOOD,1000}, {R_IRON,200}, {R_STEEL,100} } },
     { "l armour", "leather's not strong. better than rags, though.",
-      CT_UPGRADE, 1, 0, { {R_LEATHER,200}, {R_SCALES,20}, {RA_END,0} } },
-    { "i armour", "iron's stronger than leather", CT_UPGRADE, 1, 0,
+      nullptr, CT_UPGRADE, 1, 0, { {R_LEATHER,200}, {R_SCALES,20}, {RA_END,0} } },
+    { "i armour", "iron's stronger than leather", nullptr, CT_UPGRADE, 1, 0,
       { {R_LEATHER,200}, {R_IRON,100}, {RA_END,0} } },
-    { "s armour", "steel's stronger than iron", CT_UPGRADE, 1, 0,
+    { "s armour", "steel's stronger than iron", nullptr, CT_UPGRADE, 1, 0,
       { {R_LEATHER,200}, {R_STEEL,100}, {RA_END,0} } },
     { "iron sword", "sword is sharp. good protection out in the wilds.",
-      CT_WEAPON, -1, 0, { {R_WOOD,200}, {R_LEATHER,50}, {R_IRON,20} } },
+      nullptr, CT_WEAPON, -1, 0, { {R_WOOD,200}, {R_LEATHER,50}, {R_IRON,20} } },
     { "steel sword", "the steel is strong, and the blade true.",
-      CT_WEAPON, -1, 0, { {R_WOOD,500}, {R_LEATHER,100}, {R_STEEL,20} } },
+      nullptr, CT_WEAPON, -1, 0, { {R_WOOD,500}, {R_LEATHER,100}, {R_STEEL,20} } },
     { "rifle", "black powder and bullets, like the old days.",
-      CT_WEAPON, -1, 0, { {R_WOOD,200}, {R_STEEL,50}, {R_SULPHUR,50} } },
+      nullptr, CT_WEAPON, -1, 0, { {R_WOOD,200}, {R_STEEL,50}, {R_SULPHUR,50} } },
 };
 
 // Map a building/item count slot from a craft id.

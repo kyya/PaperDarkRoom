@@ -27,6 +27,8 @@ void GameState::init() {
     temp = TEMP_FREEZING;
     builderLevel = -1;
     outsideUnlocked = craftablesUnlocked = woodSeen = seenForest = false;
+    seen = 0;
+    craftShown = 0;
     cdFire = cdGather = cdTraps = 0;
     tTemp = ROOM_WARM_S;
     tBuilder = BUILDER_STATE_S;
@@ -87,6 +89,23 @@ int GameState::numGatherers() const {
     return n < 0 ? 0 : n;
 }
 
+// A job is unlocked once its required building stands; gatherer is derived (no
+// row) and miners map to BLD_NONE (P2), so both fall out of the J_HUNTER.. scan.
+int GameState::unlockedJobs(uint8_t* out, int cap) const {
+    int n = 0;
+    for (uint8_t j = J_HUNTER; j < JOB_COUNT && n < cap; j++) {
+        uint8_t reqB = JOB_REQ_BLD[j];
+        if (reqB != BLD_NONE && buildings[reqB] > 0) out[n++] = j;
+    }
+    return n;
+}
+
+bool GameState::hasUnlockedJob() const {
+    for (uint8_t j = J_HUNTER; j < JOB_COUNT; j++)
+        if (JOB_REQ_BLD[j] != BLD_NONE && buildings[JOB_REQ_BLD[j]] > 0) return true;
+    return false;
+}
+
 int GameState::cooldownLeft(int action, uint32_t now) const {
     uint32_t last = action == 0 ? cdFire : action == 1 ? cdGather : cdTraps;
     int cd = action == 0 ? STOKE_COOLDOWN_S
@@ -98,7 +117,7 @@ int GameState::cooldownLeft(int action, uint32_t now) const {
 
 // ===================== settle (offline / awake economy) ===================
 
-uint32_t GameState::settle(uint32_t nowEpoch) {
+uint32_t GameState::settle(uint32_t nowEpoch, bool offline) {
     if (lastSettleTs == 0) { lastSettleTs = nowEpoch; return 0; }
     if (nowEpoch <= lastSettleTs) return 0;
     uint32_t elapsed = nowEpoch - lastSettleTs;
@@ -106,7 +125,7 @@ uint32_t GameState::settle(uint32_t nowEpoch) {
     const uint32_t maxSteps = SETTLE_MAX_S / INCOME_TICK_S;   // 8640 (24h)
     bool capped = false;
     if (steps > maxSteps) { steps = maxSteps; capped = true; }
-    for (uint32_t i = 0; i < steps; i++) stepOnce();
+    for (uint32_t i = 0; i < steps; i++) stepOnce(offline);
     if (capped) lastSettleTs = nowEpoch;
     else        lastSettleTs += steps * INCOME_TICK_S;
     // A Wanderer echo that came due while offline is redeemed on wake as a lump
@@ -115,7 +134,7 @@ uint32_t GameState::settle(uint32_t nowEpoch) {
     return steps;
 }
 
-void GameState::stepOnce() {
+void GameState::stepOnce(bool offline) {
     // -- temperature drift (room.js adjustTemp, every 30s) --
     tTemp -= INCOME_TICK_S;
     if (tTemp <= 0) { adjustTemp(); tTemp = ROOM_WARM_S; }
@@ -131,29 +150,45 @@ void GameState::stepOnce() {
         if (tNeedWood <= 0) { unlockForest(); needWoodActive = false; }
     }
 
-    // -- fire cooling: FROZEN offline by default (research.md §5.3) --
+    // -- fire cooling (room.js coolFire, every 5min). Awake only by default: the
+    // fire and its cool timer tFireCool are FROZEN across an offline catch-up
+    // (research.md §5.3 — a 5min cool vs a 15min wake cycle would extinguish the
+    // fire on every wake, pure punishment). Because tFireCool is NOT decremented
+    // while offline, the 5min countdown resumes on wake exactly where it slept —
+    // the fire is frozen in time, not merely un-cooled. ADR_FIRE_OFFLINE_DECAY
+    // (default off) opts the offline path back in to real-time cooling. --
+    bool coolFireNow;
 #if ADR_FIRE_OFFLINE_DECAY
-    if (fire > FIRE_DEAD) {
+    (void)offline;               // offline path also cools when the switch is on
+    coolFireNow = true;
+#else
+    coolFireNow = !offline;
+#endif
+    if (coolFireNow && fire > FIRE_DEAD) {
         tFireCool -= INCOME_TICK_S;
         if (tFireCool <= 0) {
-            // builder auto-stokes a low fire if wood remains (room.js coolFire)
+            // builder auto-stokes a low fire if wood remains (room.js coolFire):
+            // notify, spend 1 wood, bump the fire up — then the cool below nets it
+            // back down, so a Helping builder holds a low fire at cost of wood.
             if (fire <= FIRE_FLICKERING && builderLevel > 3 &&
                 stores[R_WOOD] > 0) {
+                pushLog("builder stokes the fire");
                 stores[R_WOOD] -= 1 * FP;
                 if (fire < FIRE_ROARING) fire++;
             }
-            if (fire > FIRE_DEAD) fire--;
-            tFireCool = FIRE_COOL_S;
+            fire--;              // guarded fire>FIRE_DEAD above (auto-stoke only raises)
+            onFireChange();      // "the fire is {0}" + resets tFireCool to FIRE_COOL_S
         }
     }
-#endif
 
     // -- worker income (every 10s tick), all-or-nothing per source --
     applyIncomeSource(J_GATHERER, numGatherers());
     for (int j = J_HUNTER; j < JOB_COUNT; j++)
         applyIncomeSource(j, (int)workers[j]);
-    if (builderLevel >= 4)             // builder Helping: +2 wood / tick
+    if (builderLevel >= 4) {           // builder Helping: +2 wood / tick
         stores[R_WOOD] += BUILDER_WOOD_DFP;
+        markSeen(R_WOOD);
+    }
 
     // -- population growth (only once there are huts) --
     if (buildings[B_HUT] > 0) {
@@ -169,8 +204,10 @@ void GameState::applyIncomeSource(uint8_t job, int count) {
         int32_t delta = d.items[i].dfp * count;
         if (stores[d.items[i].res] + delta < 0) return;   // ANY input short -> skip all
     }
-    for (int i = 0; i < d.n; i++)
+    for (int i = 0; i < d.n; i++) {
         stores[d.items[i].res] += d.items[i].dfp * count;
+        if (d.items[i].dfp > 0) markSeen(d.items[i].res);   // a produced resource is "seen"
+    }
 }
 
 // room.js adjustTemp(): notify on EVERY temperature change (not just when the
@@ -220,6 +257,7 @@ void GameState::advanceBuilder() {
 
 void GameState::unlockForest() {
     stores[R_WOOD] = 4 * FP;                    // room.js: set stores.wood = 4
+    markSeen(R_WOOD);
     woodSeen = true;
     outsideUnlocked = true;
     pushLog("the wind howls outside");
@@ -294,6 +332,7 @@ Result GameState::gatherWood(uint32_t now) {
     if (cooldownLeft(1, now) > 0) return RC_ERR_COOLDOWN;
     int amt = buildings[B_CART] > 0 ? 50 : 10;
     stores[R_WOOD] += amt * FP;
+    markSeen(R_WOOD);
     woodSeen = true;
     cdGather = now;
     pushLog("dry brush and dead branches litter the forest floor");
@@ -313,6 +352,7 @@ Result GameState::checkTraps(uint32_t now) {
         for (int j = 0; j < 6; j++) {
             if (roll < TRAP_DROPS[j].rollUnderMilli) {
                 stores[TRAP_DROPS[j].res] += 1 * FP;
+                markSeen(TRAP_DROPS[j].res);
                 caught[j] = true;
                 break;
             }
@@ -331,6 +371,68 @@ Result GameState::checkTraps(uint32_t now) {
 }
 
 // ===================== craft / build / buy / assign =======================
+
+// room.js craftUnlocked(thing) — the progressive-unlock gate that room_page's
+// craftOfferable() consults so the build/craft buttons appear one at a time as
+// the economy grows, instead of all at once the moment the builder starts
+// Helping. Latches craftShown (upstream Room.buttons) so it evaluates — and
+// notifies — once; thereafter it short-circuits true. NOTE the "seen" gate is a
+// deliberate refinement of upstream: room.js tests `!stores[c]` (the material is
+// currently >0), which flickers a button off if you spend a material back to 0;
+// we test the seen bitset (ever owned) so an unlocked button stays unlocked
+// (research/task §5.3 fix-2). The >=50% wood-cost gate reads live wood, as
+// upstream does.
+bool GameState::craftUnlocked(uint8_t craftId) {
+    if (craftId >= CRAFT_COUNT) return false;
+    if (craftShown & (1u << craftId)) return true;   // already unlocked (memoized)
+    if (builderLevel < 4) return false;              // builder not yet Helping
+    const Craftable& c = CRAFT[craftId];
+    if (craftNeedsWorkshop(c.type) && buildings[B_WORKSHOP] == 0) return false;
+
+    // Already built at least once -> unlocked, but no availableMsg (upstream).
+    bool bld = craftIsBuilding(craftId);
+    uint8_t slot = craftSlot(craftId);
+    int count = bld ? buildings[slot] : items[slot];
+    if (count > 0) { craftShown |= (1u << craftId); return true; }
+
+    // Need >=50% of the wood cost on hand (room.js: stores.wood < cost.wood*0.5).
+    // A craftable with no wood cost skips this gate (upstream compares against
+    // undefined -> NaN -> false).
+    int woodCost = 0;
+    for (int i = 0; i < 3 && c.cost[i].res != RA_END; i++)
+        if (c.cost[i].res == R_WOOD) woodCost = c.cost[i].amt;
+    if (woodCost > 0 && stores[R_WOOD] < (int32_t)woodCost * FP / 2) return false;
+
+    // Every OTHER cost material must have been seen (wood handled above).
+    for (int i = 0; i < 3 && c.cost[i].res != RA_END; i++) {
+        if (c.cost[i].res == R_WOOD) continue;
+        if (!(seen & (1u << c.cost[i].res))) return false;
+    }
+
+    craftShown |= (1u << craftId);
+    if (c.availableMsg) pushLog(c.availableMsg);   // first-unlock builder hint
+    return true;
+}
+
+// room.js buyUnlocked(thing) — the trade-good display gate the Trade page reads.
+// Fix B4 (v0.4.8): the old Trade page only gated on the trading post standing +
+// the maximum, so every good appeared the instant the post went up. Upstream
+// only offers a good once its product resource has been SEEN (stores key
+// defined) — compass excepted, always offered so the World can be unlocked. We
+// reuse the same seen bitset craftUnlocked consults. NOTE: upstream trade goods
+// carry no availableMsg (no notify on unlock) and no maxMsg (compass has none —
+// notify no-ops on undefined), so this is a pure const predicate: a capped good
+// simply leaves the list once owned (the firmware's hide-at-max convention,
+// same as craftOfferable), with no notification.
+bool GameState::buyOfferable(uint8_t tradeId) const {
+    if (tradeId >= TRADE_COUNT) return false;
+    if (buildings[B_TRADING_POST] == 0) return false;   // post must stand
+    const TradeGood& g = TRADE[tradeId];
+    if (g.product != R_COMPASS && !hasSeen(g.product)) return false;   // "seen" gate
+    int have = whole(g.product); if (have < 0) have = 0;
+    if (g.maximum >= 0 && have >= g.maximum) return false;   // goodsMax (compass caps at 1)
+    return true;
+}
 
 Result GameState::build(uint8_t craftId) {
     if (craftId >= CRAFT_COUNT || CRAFT[craftId].type != CT_BUILDING)
@@ -410,6 +512,7 @@ Result GameState::buy(uint8_t tradeId) {
     for (int i = 0; i < 3 && g.cost[i].res != RA_END; i++)
         stores[g.cost[i].res] -= g.cost[i].amt * FP;
     stores[g.product] += 1 * FP;
+    markSeen(g.product);
     // room.js buy(): Notifications.notify(Room, good.buildMsg) on success — but
     // Room.TradeGoods entries carry no buildMsg property (only type/cost/audio),
     // so good.buildMsg is undefined, and Notifications.notify() no-ops on an
@@ -483,6 +586,7 @@ bool GameState::redeemDelayedEcho(uint32_t nowEpoch) {
     if (echoRes == ECHO_NONE) return false;
     if (nowEpoch < echoDueEpoch) return false;
     stores[echoRes] += echoAmt * FP;
+    markSeen(echoRes);
     pushLog(echoRes == R_FUR
             ? "the mysterious wanderer returns, cart piled high with furs."
             : "the mysterious wanderer returns, cart piled high with wood.");
@@ -561,6 +665,8 @@ size_t GameState::toJson(char* out, size_t cap) const {
     AP("\"nev\":%lu,", (unsigned long)nextEventAt);
     AP("\"echo\":[%d,%ld,%lu],", echoRes, (long)echoAmt,
        (unsigned long)echoDueEpoch);
+    AP("\"seen\":%lu,\"cshow\":%lu,",
+       (unsigned long)seen, (unsigned long)craftShown);
     AP("\"stores\":[");
     for (int i = 0; i < RES_COUNT; i++) AP("%s%ld", i ? "," : "", (long)stores[i]);
     AP("],\"bld\":[");
@@ -587,7 +693,7 @@ size_t GameState::toJson(char* out, size_t cap) const {
 bool GameState::fromJson(const char* j) {
     if (!j) return false;
     long v = readLong(afterKey(j, "v"));
-    if (v != 1 && v != 2) return false;  // accept v1 (pre-events) AND v2 saves
+    if (v < 1 || v > 3) return false;    // accept v1 (pre-events), v2, v3 saves
     init();                              // defaults, then overwrite
     lastSettleTs = (uint32_t)readLong(afterKey(j, "ts"));
     rng          = (uint32_t)readLong(afterKey(j, "rng"));
@@ -615,6 +721,20 @@ bool GameState::fromJson(const char* j) {
         echoRes = (uint8_t)e[0]; echoAmt = e[1]; echoDueEpoch = (uint32_t)e[2];
     }
     readIntArr(afterKey(j, "stores"), stores, RES_COUNT);
+    // v3 craft-unlock bitsets. Absent in v1/v2 saves: derive `seen` from the
+    // loaded stores (any resource currently >0 counts as seen — the best
+    // available proxy for "ever owned"), and leave craftShown=0 so already-
+    // eligible craftables re-emit their availableMsg once on the first post-
+    // upgrade load (harmless, self-limiting via the latch).
+    const char* seenP = afterKey(j, "seen");
+    if (seenP) {
+        seen = (uint32_t)readLong(seenP);
+        craftShown = (uint32_t)readLong(afterKey(j, "cshow"));   // nullptr -> 0
+    } else {
+        seen = 0;
+        for (int i = 0; i < RES_COUNT; i++) if (stores[i] > 0) seen |= (1u << i);
+        craftShown = 0;
+    }
     int32_t tmp[32];   // >= max(BLD_COUNT, ITEM_COUNT, JOB_COUNT)
     readIntArr(afterKey(j, "bld"), tmp, BLD_COUNT);
     for (int i = 0; i < BLD_COUNT; i++) buildings[i] = (uint8_t)tmp[i];

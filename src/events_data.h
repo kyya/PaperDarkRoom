@@ -10,9 +10,19 @@
 // host-compiled for the smoke test. All en_key strings double as tr() keys
 // (strings_zh.h) exactly as upstream keys them.
 //
-// Roster (10 events kept of the 13 no-combat candidates). Cut for Phase-2
-// content the firmware treats as non-existent (medicine / alien alloy / energy
-// cell / compass):
+// Roster: all 13 no-combat events. The three medicine events (The Sick Man /
+// Sickness / Plague, v0.4.9) are included — medicine is a trading-post good
+// (buy medicine), so these gate on stores.medicine>0 exactly as upstream and
+// finally give medicine a use. NOTE (upstream-faithful, unchanged): medicine has
+// no natural P1 source — traps/income never yield it, and the trading-post buy
+// button only appears once medicine has been SEEN (buyOfferable), which itself
+// needs medicine from somewhere. So in strict P1 these three fire only after
+// medicine is seeded via GM adr:give or Phase-2 World content — matching
+// upstream, where medicine is a World-gated resource. Only compass remains cut
+// (Phase-2 World content):
+// The Nomad still drops its buyCompass button. alien alloy / energy cell appear
+// ONLY as Sick-Man rewards (given, never costed) — no P1 economy depends on
+// them, they just accumulate as trophies until Phase-2 gives them a sink.
 //   - The Nomad          KEPT, buyCompass button CUT (reward = compass)
 //   - Noises (outside)   KEPT
 //   - Noises (inside)    KEPT
@@ -23,9 +33,9 @@
 //   - A Ruined Trap      KEPT
 //   - Fire               KEPT
 //   - A Beast Attack     KEPT
-//   - The Sick Man       EXCLUDED  (trigger medicine>0; rewards alloy/cells)
-//   - Sickness           EXCLUDED  (trigger + heal cost medicine)
-//   - Plague             EXCLUDED  (trigger + heal cost medicine)
+//   - The Sick Man       KEPT (v0.4.9)  trigger medicine>0; rewards alloy/cells/scales
+//   - Sickness           KEPT (v0.4.9)  heal costs medicine, else villagers die
+//   - Plague             KEPT (v0.4.9)  buy/heal with medicine, else villagers die
 #pragma once
 #include <stdint.h>
 #include "game_data.h"
@@ -51,6 +61,9 @@ enum AvailCond : uint8_t {
     AV_OUT_TRAP,        // outsideUnlocked && trap > 0
     AV_OUT_HUT_POP,     // outsideUnlocked && hut > 0 && population > arg1
     AV_OUT_POP,         // outsideUnlocked && population > arg1
+    AV_ROOM_MED,        // medicine > 0                                (Sick Man)
+    AV_OUT_POP_RANGE_MED, // outsideUnlocked && arg1<pop<arg2 && medicine>0 (Sickness)
+    AV_OUT_POP_MED,     // outsideUnlocked && pop>arg1 && medicine>0   (Plague)
 };
 
 // ---- Scene onLoad side effects (effect code + param, no lambdas in data) --
@@ -62,6 +75,9 @@ enum Effect : uint8_t {
     EFF_WRECK_TRAPS,     // destroy rand[1..trapCount] traps (Ruined Trap start)
     EFF_DESTROY_HUT,     // destroyHuts(arg) — razes huts + kills residents (Fire)
     EFF_KILL_VILLAGERS,  // kill rand[1..arg] villagers (Beast Attack start)
+    EFF_KILL_POP_HALF,   // kill rand[1..floor(pop/2)] villagers (Sickness death)
+    EFF_KILL_RANGE,      // kill rand[base..base+span-1]; arg=(base<<16)|span
+                         //   (Plague healed 2..6 = (2<<16)|5, death 10..89 = (10<<16)|80)
 };
 
 // ---- Delayed echo (Mysterious Wanderer) -----------------------------------
@@ -112,6 +128,7 @@ struct EventDef {
 enum EventId : uint8_t {
     EV_NOMAD = 0, EV_NOISES_OUT, EV_NOISES_IN, EV_BEGGAR, EV_SHADY,
     EV_WANDER_WOOD, EV_WANDER_FUR, EV_RUINED_TRAP, EV_FIRE, EV_BEAST,
+    EV_SICK_MAN, EV_SICKNESS, EV_PLAGUE,          // v0.4.9 medicine events
     EVENT_COUNT
 };
 
@@ -125,6 +142,7 @@ enum {
     PB_BEGGAR_100 = 8,   // {0.5: teeth, 0.8: scales, 1: cloth}
     PB_SHADY      = 11,   // {0.6: steal, 1: build}
     PB_RUINED     = 13,   // {0.5: nothing, 1: catch}
+    PB_SICK_HELP  = 15,   // {0.1: alloy, 0.3: cells, 0.5: scales, 1: nothing}
 };
 
 // Scene indices (kept local to this file for the PROBS/BTN wiring below).
@@ -139,6 +157,9 @@ enum {
     S_RT_START, S_RT_NOTHING, S_RT_CATCH,             // Ruined Trap
     S_FIRE_START,                                     // Fire
     S_BEAST_START,                                    // Beast Attack
+    S_SICK_START, S_SICK_ALLOY, S_SICK_CELLS, S_SICK_SCALES, S_SICK_NOTHING,  // Sick Man
+    S_SICKNESS_START, S_SICKNESS_HEALED, S_SICKNESS_DEATH,                    // Sickness
+    S_PLAGUE_START, S_PLAGUE_HEALED, S_PLAGUE_DEATH,                          // Plague
     SCENE_COUNT
 };
 
@@ -149,6 +170,8 @@ static const ProbBranch PROBS[] = {
     /* PB_BEGGAR_100 */ { 500, S_BG_TEETH }, { 800, S_BG_SCALES }, { 1000, S_BG_CLOTH },
     /* PB_SHADY      */ { 600, S_SH_STEAL }, { 1000, S_SH_BUILD },
     /* PB_RUINED     */ { 500, S_RT_NOTHING }, { 1000, S_RT_CATCH },
+    /* PB_SICK_HELP  */ { 100, S_SICK_ALLOY }, { 300, S_SICK_CELLS },
+                        { 500, S_SICK_SCALES }, { 1000, S_SICK_NOTHING },
 };
 
 // ===========================================================================
@@ -173,7 +196,13 @@ enum {
     B_RT_NOTHING = 35, B_RT_CATCH = 36,
     B_FIRE = 37,          // mourn
     B_BEAST = 38,         // go home
-    BTN_COUNT = 39
+    B_SICK_START = 39,    // help (give 1 medicine), ignore
+    B_SICK_ALLOY = 41, B_SICK_CELLS = 42, B_SICK_SCALES = 43, B_SICK_NOTHING = 44,
+    B_SICKNESS_START = 45,   // heal (1 medicine), ignore
+    B_SICKNESS_HEALED = 47, B_SICKNESS_DEATH = 48,
+    B_PLAGUE_START = 49,     // buy medicine, heal (5 medicine), ignore
+    B_PLAGUE_HEALED = 52, B_PLAGUE_DEATH = 53,
+    BTN_COUNT = 54
 };
 
 #define RA1 {RA_END,0}
@@ -239,6 +268,29 @@ static const BtnDef BTNS[BTN_COUNT] = {
 
     // --- A Beast Attack ---
     { "go home", { RAEND }, { RAEND }, "predators become prey. price is unfair", SCENE_END, 0, 0 },
+
+    // --- The Sick Man (S_SICK_START) ---
+    { "give 1 medicine", { {R_MEDICINE,1}, RA1, RA1 }, { RAEND },
+      "the man swallows the medicine eagerly", SCENE_PROB, PB_SICK_HELP, 4 },
+    { "tell him to leave", { RAEND }, { RAEND }, nullptr, SCENE_END, 0, 0 },
+    { "say goodbye", { RAEND }, { RAEND }, nullptr, SCENE_END, 0, 0 },  // alloy
+    { "say goodbye", { RAEND }, { RAEND }, nullptr, SCENE_END, 0, 0 },  // cells
+    { "say goodbye", { RAEND }, { RAEND }, nullptr, SCENE_END, 0, 0 },  // scales
+    { "say goodbye", { RAEND }, { RAEND }, nullptr, SCENE_END, 0, 0 },  // nothing
+
+    // --- Sickness ---
+    { "1 medicine", { {R_MEDICINE,1}, RA1, RA1 }, { RAEND }, nullptr, S_SICKNESS_HEALED, 0, 0 },
+    { "ignore it",  { RAEND }, { RAEND }, nullptr, S_SICKNESS_DEATH, 0, 0 },
+    { "go home", { RAEND }, { RAEND }, nullptr, SCENE_END, 0, 0 },  // healed
+    { "go home", { RAEND }, { RAEND }, nullptr, SCENE_END, 0, 0 },  // death
+
+    // --- Plague ---
+    { "buy medicine", { {R_SCALES,70}, {R_TEETH,50}, RA1 }, { {R_MEDICINE,1}, RA1, RA1 },
+      nullptr, SCENE_STAY, 0, 0 },
+    { "5 medicine", { {R_MEDICINE,5}, RA1, RA1 }, { RAEND }, nullptr, S_PLAGUE_HEALED, 0, 0 },
+    { "do nothing", { RAEND }, { RAEND }, nullptr, S_PLAGUE_DEATH, 0, 0 },
+    { "go home", { RAEND }, { RAEND }, nullptr, SCENE_END, 0, 0 },  // healed
+    { "go home", { RAEND }, { RAEND }, nullptr, SCENE_END, 0, 0 },  // death
 };
 
 // ===========================================================================
@@ -331,6 +383,50 @@ static const SceneDef SCENES[SCENE_COUNT] = {
         "the villagers retreat to mourn the dead.", nullptr },
       "wild beasts attack the villagers", EFF_KILL_VILLAGERS, 10,
       { {R_FUR,100}, {R_MEAT,100}, {R_TEETH,10} }, {0,0,0}, B_BEAST, 1, 0 },
+
+    // ---- The Sick Man (Room; medicine>0) ----
+    { { "a man hobbles up, coughing.", "he begs for medicine.", nullptr, nullptr },
+      "a sick man hobbles up", EFF_NONE, 0, { RAEND }, {0,0,0}, B_SICK_START, 2, 1 },
+    { { "the man is thankful.", "he leaves a reward.",
+        "some weird metal he picked up on his travels.", nullptr },
+      nullptr, EFF_NONE, 0, { {R_ALIEN_ALLOY,1}, {RA_END,0}, {RA_END,0} }, {0,0,0},
+      B_SICK_ALLOY, 1, 0 },
+    { { "the man is thankful.", "he leaves a reward.",
+        "some weird glowing boxes he picked up on his travels.", nullptr },
+      nullptr, EFF_NONE, 0, { {R_ENERGY_CELL,3}, {RA_END,0}, {RA_END,0} }, {0,0,0},
+      B_SICK_CELLS, 1, 0 },
+    { { "the man is thankful.", "he leaves a reward.",
+        "all he has are some scales.", nullptr },
+      nullptr, EFF_NONE, 0, { {R_SCALES,5}, {RA_END,0}, {RA_END,0} }, {0,0,0},
+      B_SICK_SCALES, 1, 0 },
+    { { "the man expresses his thanks and hobbles off.", nullptr, nullptr, nullptr },
+      nullptr, EFF_NONE, 0, { RAEND }, {0,0,0}, B_SICK_NOTHING, 1, 0 },
+
+    // ---- Sickness (Outside; 10<pop<50, medicine>0) ----
+    { { "a sickness is spreading through the village.",
+        "medicine is needed immediately.", nullptr, nullptr },
+      "some villagers are ill", EFF_NONE, 0, { RAEND }, {0,0,0}, B_SICKNESS_START, 2, 1 },
+    { { "the sickness is cured in time.", nullptr, nullptr, nullptr },
+      "sufferers are healed", EFF_NONE, 0, { RAEND }, {0,0,0}, B_SICKNESS_HEALED, 1, 0 },
+    { { "the sickness spreads through the village.",
+        "the days are spent with burials.",
+        "the nights are rent with screams.", nullptr },
+      "sufferers are left to die", EFF_KILL_POP_HALF, 0, { RAEND }, {0,0,0},
+      B_SICKNESS_DEATH, 1, 0 },
+
+    // ---- Plague (Outside; pop>50, medicine>0) ----
+    { { "a terrible plague is fast spreading through the village.",
+        "medicine is needed immediately.", nullptr, nullptr },
+      "a plague afflicts the village", EFF_NONE, 0, { RAEND }, {0,0,0}, B_PLAGUE_START, 3, 2 },
+    { { "the plague is kept from spreading.", "only a few die.",
+        "the rest bury them.", nullptr },
+      "epidemic is eradicated eventually", EFF_KILL_RANGE, (2 << 16) | 5, { RAEND }, {0,0,0},
+      B_PLAGUE_HEALED, 1, 0 },
+    { { "the plague rips through the village.",
+        "the nights are rent with screams.",
+        "the only hope is a quick death.", nullptr },
+      "population is almost exterminated", EFF_KILL_RANGE, (10 << 16) | 80, { RAEND }, {0,0,0},
+      B_PLAGUE_DEATH, 1, 0 },
 };
 
 #undef RA1
@@ -350,6 +446,9 @@ static const EventDef EVENTS[EVENT_COUNT] = {
     { "A Ruined Trap",           AV_OUT_TRAP,       0,  0, S_RT_START },
     { "Fire",                    AV_OUT_HUT_POP,   50,  0, S_FIRE_START },
     { "A Beast Attack",          AV_OUT_POP,        0,  0, S_BEAST_START },
+    { "The Sick Man",            AV_ROOM_MED,          0,  0, S_SICK_START },
+    { "Sickness",                AV_OUT_POP_RANGE_MED, 10, 50, S_SICKNESS_START },
+    { "Plague",                  AV_OUT_POP_MED,      50,  0, S_PLAGUE_START },
 };
 
 }  // namespace adr

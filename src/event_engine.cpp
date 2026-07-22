@@ -50,6 +50,17 @@ static bool isAvailable(int eventId) {
                    (int32_t)gs->population > e.availArg1;
         case AV_OUT_POP:
             return gs->outsideUnlocked && (int32_t)gs->population > e.availArg1;
+        case AV_ROOM_MED:
+            return gs->stores[R_MEDICINE] > 0;
+        case AV_OUT_POP_RANGE_MED:
+            return gs->outsideUnlocked &&
+                   (int32_t)gs->population > e.availArg1 &&
+                   (int32_t)gs->population < e.availArg2 &&
+                   gs->stores[R_MEDICINE] > 0;
+        case AV_OUT_POP_MED:
+            return gs->outsideUnlocked &&
+                   (int32_t)gs->population > e.availArg1 &&
+                   gs->stores[R_MEDICINE] > 0;
     }
     return false;
 }
@@ -88,13 +99,31 @@ static void applyEffect(const SceneDef& sc) {
             gs->killVillagers(n);
             break;
         }
+        case EFF_KILL_POP_HALF: {                        // Sickness death
+            int half = (int)gs->population / 2;
+            int n = randBelow(half) + 1;                 // 1..floor(pop/2)
+            gs->killVillagers(n);
+            break;
+        }
+        case EFF_KILL_RANGE: {                           // Plague healed/death
+            int base = (int)((uint32_t)sc.effectArg >> 16);
+            int span = (int)((uint32_t)sc.effectArg & 0xFFFFu);
+            int n = randBelow(span) + base;              // base..base+span-1
+            gs->killVillagers(n);
+            break;
+        }
         default: break;
     }
 }
 
 static void addStores(const ResAmt* list) {
-    for (int i = 0; i < 3 && list[i].res != RA_END; i++)
+    for (int i = 0; i < 3 && list[i].res != RA_END; i++) {
         gs->stores[list[i].res] += list[i].amt * FP;
+        // An event reward means the resource has now been "owned" (upstream
+        // $SM.add defines the store key), which unlocks its craft/buy gates —
+        // e.g. the Sick Man's scales/alloy/cell, the Plague's bought medicine.
+        if (list[i].amt > 0) gs->markSeen(list[i].res);
+    }
 }
 
 // Enter a scene: onLoad effect, notification, reward, delayed-echo arm.

@@ -67,15 +67,26 @@ int main() {
     printf("== settle 1h: builder chain + warm room ==\n");
     advance(gs, now, 3600);
     CHECK(gs.outsideUnlocked, "forest unlocked (stranger needed wood)");
-    CHECK(gs.temp >= TEMP_WARM, "room warmed to >= warm");
+    // v0.4.3 fix 1: the fire now cools while AWAKE (it used to be frozen). Over
+    // this passive 1h settle (no manual stoking) a burning fire is auto-stoked
+    // down to flickering by the Helping builder, so the room settles to mild.
+    // It DID pass through warm early on — that transient warmth is exactly what
+    // advanced the builder up the 1->2->3 chain to Helping (asserted below).
+    CHECK(gs.temp >= TEMP_MILD, "room settled to >= mild (awake fire cooled to flickering)");
     CHECK(gs.builderLevel == 4, "builder now helping (level 4)");
     CHECK(gs.craftablesUnlocked, "craftables unlocked");
-    // v0.3.1 feedback 1: adjustTemp() notifies on every temp change too
-    // (room.js parity) — several fire during the warmup, survives the ring.
+    // v0.3.1 feedback 1: adjustTemp() notifies on every temp change (room.js
+    // parity). v0.4.3: the 1h-settled ring above is now dominated by the awake
+    // fire-cool churn ("builder stokes the fire" / "the fire is {0}"), which
+    // evicts the early temp lines — so verify the temp notification on a short
+    // fresh settle where it still sits in the ring.
     {
+        GameState gt; gt.init(); uint32_t tt = 111000; gt.settle(tt);
+        gt.lightFire(tt);                          // fire -> burning (free first light)
+        for (int k = 0; k < 6; k++) { tt += 30; gt.settle(tt); }   // temp drifts up
         bool sawTempLog = false;
-        for (int i = 0; i < gs.logCount; i++)
-            if (strcmp(gs.log[i].enKey, "the room is {0}") == 0 && gs.log[i].hasArg)
+        for (int i = 0; i < gt.logCount; i++)
+            if (strcmp(gt.log[i].enKey, "the room is {0}") == 0 && gt.log[i].hasArg)
                 sawTempLog = true;
         CHECK(sawTempLog, "adjustTemp pushes \"the room is {0}\" on change");
     }
@@ -494,6 +505,326 @@ int main() {
         events::dismissDefault();
         CHECK(!events::active() && events::nextEventAt() > due,
               "dismiss ends it and reschedules the next");
+    }
+
+    // =====================================================================
+    // v0.4.3 fix 1 — awake fire cooling (room.js coolFire) vs offline freeze.
+    // Fire cools by real 5-min steps ONLY while awake (settle offline=false);
+    // an offline catch-up (offline=true) leaves fire AND its tFireCool timer
+    // frozen (research.md §5.3). FIRE_COOL_S = 300s = 30 income ticks.
+    // =====================================================================
+    printf("== [v0.4.3] awake fire cooling: Roaring -> Burning in 5 min ==\n");
+    {
+        GameState fc; fc.init(); uint32_t tf = 200000; fc.settle(tf);
+        fc.fire = FIRE_ROARING; fc.temp = TEMP_HOT;
+        fc.builderLevel = 4;                 // Helping; roaring is above the auto-stoke line
+        fc.stores[R_WOOD] = 0;
+        fc.tFireCool = FIRE_COOL_S;
+        advance(fc, tf, 300);                // 5 min AWAKE (offline=false)
+        CHECK(fc.fire == FIRE_BURNING, "awake 5min: Roaring -> Burning (one level)");
+    }
+
+    printf("== [v0.4.3] offline freeze: fire + cool timer untouched ==\n");
+    {
+        GameState fo; fo.init(); uint32_t to = 210000; fo.settle(to);
+        fo.fire = FIRE_ROARING; fo.temp = TEMP_HOT;
+        fo.builderLevel = -1;
+        fo.tFireCool = FIRE_COOL_S;
+        fo.settle(to + 3600, /*offline=*/true);   // 1h deep-sleep catch-up
+        CHECK(fo.fire == FIRE_ROARING, "offline 1h: fire frozen (no cooling)");
+        CHECK(fo.tFireCool == FIRE_COOL_S, "offline: fire cool timer frozen too");
+    }
+
+    printf("== [v0.4.3] builder auto-stoke holds a low fire (Helping + wood) ==\n");
+    {
+        GameState fs; fs.init(); uint32_t ts = 220000; fs.settle(ts);
+        fs.fire = FIRE_FLICKERING; fs.temp = TEMP_MILD;
+        fs.builderLevel = 4;                 // Helping: produces wood + auto-stokes
+        fs.stores[R_WOOD] = 5 * FP;
+        fs.tFireCool = FIRE_COOL_S;
+        advance(fs, ts, 300);                // 5 min AWAKE -> one cool cycle
+        CHECK(fs.fire == FIRE_FLICKERING,
+              "Helping builder auto-stokes: fire held at flickering (stoke +1, cool -1)");
+        bool sawStoke = false;
+        for (int i = 0; i < fs.logCount; i++)
+            if (strcmp(fs.log[i].enKey, "builder stokes the fire") == 0) sawStoke = true;
+        CHECK(sawStoke, "auto-stoke pushes \"builder stokes the fire\"");
+    }
+
+    printf("== [v0.4.3] no builder -> low fire cools, no auto-stoke ==\n");
+    {
+        GameState fd; fd.init(); uint32_t td = 230000; fd.settle(td);
+        fd.fire = FIRE_FLICKERING; fd.temp = TEMP_MILD;
+        fd.builderLevel = -1;                // no builder: no income, no auto-stoke
+        fd.stores[R_WOOD] = 0;
+        fd.tFireCool = FIRE_COOL_S;
+        advance(fd, td, 300);                // 5 min AWAKE
+        CHECK(fd.fire == FIRE_SMOLDERING,
+              "awake 5min, no builder: Flickering -> Smoldering (cools, no stoke)");
+    }
+
+    // =====================================================================
+    // v0.4.3 fix 2 — craftables progressive unlock (room.js craftUnlocked):
+    // builder Helping + (workshop for tools) + >=50% of the wood cost + every
+    // other cost material "seen"; first satisfaction pushes the availableMsg
+    // exactly once and latches craftShown.
+    // =====================================================================
+    printf("== [v0.4.3] craft progressive unlock + availableMsg ==\n");
+    {
+        GameState g; g.init(); uint32_t t = 240000; g.settle(t);
+        g.builderLevel = 4; g.craftablesUnlocked = true;
+        // lodge: wood 200, fur 10, meat 5 (building; no workshop gate).
+        g.stores[R_WOOD] = 50 * FP;                    // < 100 (50% of 200)
+        g.seen = (1u << R_FUR) | (1u << R_MEAT);
+        CHECK(!g.craftUnlocked(C_LODGE), "lodge locked: wood < 50% of cost");
+
+        g.stores[R_WOOD] = 100 * FP;                   // >= 50% now
+        g.seen = (1u << R_FUR);                         // meat NOT seen yet
+        CHECK(!g.craftUnlocked(C_LODGE), "lodge locked: a cost material unseen (meat)");
+
+        g.seen = (1u << R_FUR) | (1u << R_MEAT);        // all non-wood materials seen
+        CHECK(g.craftUnlocked(C_LODGE), "lodge unlocks: wood>=50% and materials seen");
+        bool sawMsg = false;
+        for (int i = 0; i < g.logCount; i++)
+            if (strcmp(g.log[i].enKey, "villagers could help hunt, given the means") == 0)
+                sawMsg = true;
+        CHECK(sawMsg, "first unlock pushes the lodge availableMsg");
+        CHECK((g.craftShown & (1u << C_LODGE)) != 0, "craftShown latched for lodge");
+
+        int logAfter = g.logCount;
+        CHECK(g.craftUnlocked(C_LODGE), "lodge stays unlocked (memoized)");
+        CHECK(g.logCount == logAfter, "availableMsg pushed exactly once, not re-emitted");
+
+        // Not-Helping short-circuits regardless of resources.
+        GameState gn; gn.init(); gn.settle(t);
+        gn.builderLevel = 3;                            // Sleeping, not Helping
+        gn.stores[R_WOOD] = 1000 * FP;
+        gn.seen = 0xFFFFFFFF;
+        CHECK(!gn.craftUnlocked(C_LODGE), "locked while builder < Helping");
+
+        // Workshop gate for tools (torch needs workshop).
+        GameState gw; gw.init(); gw.settle(t);
+        gw.builderLevel = 4; gw.craftablesUnlocked = true;
+        gw.stores[R_WOOD] = 1000 * FP; gw.seen = 0xFFFFFFFF;
+        CHECK(!gw.craftUnlocked(C_TORCH), "tool locked without workshop");
+        gw.buildings[B_WORKSHOP] = 1;
+        CHECK(gw.craftUnlocked(C_TORCH), "tool unlocks once workshop stands");
+
+        // seen + craftShown round-trip through save/load (v3).
+        CHECK(g.save(), "save v3 (seen/craftShown) ok");
+        GameState gl2; gl2.init();
+        CHECK(gl2.load(), "load v3 ok");
+        CHECK(gl2.seen == g.seen, "seen bitset round-trips through save/load");
+        CHECK(gl2.craftShown == g.craftShown, "craftShown bitset round-trips");
+    }
+
+    printf("== [v0.4.3] seen bit latches on a real stores gain (gatherWood) ==\n");
+    {
+        GameState g; g.init(); uint32_t t = 250000; g.settle(t);
+        g.outsideUnlocked = true;
+        CHECK((g.seen & (1u << R_WOOD)) == 0, "wood not yet seen");
+        CHECK(g.gatherWood(t) == RC_OK, "gather wood ok");
+        CHECK((g.seen & (1u << R_WOOD)) != 0, "gatherWood latches the wood seen bit");
+    }
+
+    printf("== [v0.4.3] v2 save migration: seen derived from stores, craftShown 0 ==\n");
+    {
+        // A v2 JSON (no "seen"/"cshow" keys) with fur>0, meat=0.
+        char v2[4096]; size_t o = 0;
+        o += (size_t)snprintf(v2 + o, sizeof v2 - o,
+            "{\"v\":2,\"ts\":123,\"rng\":42,\"fire\":3,\"temp\":3,\"bl\":4,\"pop\":0,"
+            "\"fl\":7,\"cd\":[0,0,0],\"tm\":[30,30,15,300,90],"
+            "\"nev\":0,\"echo\":[255,0,0],\"stores\":[");
+        for (int i = 0; i < RES_COUNT; i++)
+            o += (size_t)snprintf(v2 + o, sizeof v2 - o, "%s%d",
+                                  i ? "," : "", i == R_FUR ? 100 * FP : 0);
+        o += (size_t)snprintf(v2 + o, sizeof v2 - o, "],\"bld\":[");
+        for (int i = 0; i < BLD_COUNT; i++)
+            o += (size_t)snprintf(v2 + o, sizeof v2 - o, "%s0", i ? "," : "");
+        o += (size_t)snprintf(v2 + o, sizeof v2 - o, "],\"itm\":[");
+        for (int i = 0; i < ITEM_COUNT; i++)
+            o += (size_t)snprintf(v2 + o, sizeof v2 - o, "%s0", i ? "," : "");
+        o += (size_t)snprintf(v2 + o, sizeof v2 - o, "],\"wrk\":[");
+        for (int i = 0; i < JOB_COUNT; i++)
+            o += (size_t)snprintf(v2 + o, sizeof v2 - o, "%s0", i ? "," : "");
+        o += (size_t)snprintf(v2 + o, sizeof v2 - o, "],\"log\":[]}");
+        (void)o;
+
+        GameState e; e.init();
+        CHECK(e.fromJson(v2), "v2 save loads (fromJson accepts v==2)");
+        CHECK((e.seen & (1u << R_FUR)) != 0, "v2 migration: seen derived (fur>0 -> seen)");
+        CHECK((e.seen & (1u << R_MEAT)) == 0, "v2 migration: unseen stays unseen (meat=0)");
+        CHECK(e.craftShown == 0, "v2 migration: craftShown defaults to 0");
+    }
+
+    printf("== [v0.4.4] init() factory-resets EVERY field (GM adr:reset) ==\n");
+    {
+        // Dirty every persistent field, then init() must scrub them all — the
+        // GM reset (main.cpp adr:reset) leans on this to wipe a game in place.
+        GameState d; d.init();
+        for (int i = 0; i < RES_COUNT; i++) d.stores[i] = 999 * FP;
+        for (int i = 0; i < BLD_COUNT; i++) d.buildings[i] = 5;
+        for (int i = 0; i < ITEM_COUNT; i++) d.items[i] = 5;
+        for (int i = 0; i < JOB_COUNT; i++) d.workers[i] = 3;
+        d.population = 42; d.fire = FIRE_ROARING; d.temp = TEMP_HOT;
+        d.builderLevel = 4;
+        d.outsideUnlocked = d.craftablesUnlocked = d.woodSeen = d.seenForest = true;
+        d.seen = 0xFFFFFFFF; d.craftShown = 0xFFFFFFFF;
+        d.cdFire = d.cdGather = d.cdTraps = 12345;
+        d.needWoodActive = true; d.lastSettleTs = 55555;
+        d.nextEventAt = 7777; d.armDelayedEcho(R_FUR, 300, 8888);
+        d.pushLog("the wind howls outside");
+
+        d.init();
+        bool storesZ = true, bldZ = true, itmZ = true, wrkZ = true;
+        for (int i = 0; i < RES_COUNT; i++) if (d.stores[i] != 0) storesZ = false;
+        for (int i = 0; i < BLD_COUNT; i++) if (d.buildings[i] != 0) bldZ = false;
+        for (int i = 0; i < ITEM_COUNT; i++) if (d.items[i] != 0) itmZ = false;
+        for (int i = 0; i < JOB_COUNT; i++) if (d.workers[i] != 0) wrkZ = false;
+        CHECK(storesZ && bldZ && itmZ && wrkZ, "init: stores/buildings/items/workers zeroed");
+        CHECK(d.population == 0 && d.fire == FIRE_DEAD && d.temp == TEMP_FREEZING,
+              "init: fresh dark room (pop 0, fire dead, freezing)");
+        CHECK(d.builderLevel == -1, "init: builder absent (-1)");
+        CHECK(!d.outsideUnlocked && !d.craftablesUnlocked && !d.woodSeen && !d.seenForest,
+              "init: feature flags cleared");
+        CHECK(d.seen == 0 && d.craftShown == 0, "init: v0.4.3 seen/craftShown bitsets cleared");
+        CHECK(d.cdFire == 0 && d.cdGather == 0 && d.cdTraps == 0, "init: cooldowns cleared");
+        CHECK(!d.needWoodActive && d.lastSettleTs == 0, "init: needWood + settle clock reset");
+        CHECK(d.nextEventAt == 0 && d.echoRes == ECHO_NONE, "init: event scheduler + echo cleared");
+        CHECK(d.logCount == 0, "init: log ring emptied");
+    }
+
+    printf("== [v0.4.8] B4: trade goods gated on trading post + seen (buyOfferable) ==\n");
+    {
+        GameState t; t.init(); uint32_t tt = 260000; t.settle(tt);
+        // No trading post yet: nothing offerable, not even compass.
+        CHECK(!t.buyOfferable(T_COMPASS), "no post -> compass not offered");
+        CHECK(!t.buyOfferable(T_SCALES),  "no post -> scales not offered");
+
+        t.buildings[B_TRADING_POST] = 1;
+        // Post stands, but no resource seen yet: only compass is offered
+        // (always, so the World can be unlocked); scales/teeth/iron hidden.
+        CHECK(t.buyOfferable(T_COMPASS), "post up: compass always offered");
+        CHECK(!t.buyOfferable(T_SCALES), "post up but scales unseen -> hidden");
+        CHECK(!t.buyOfferable(T_IRON),   "post up but iron unseen -> hidden");
+
+        // Seeing scales (e.g. a trap catch) reveals the scales buy band.
+        t.seen |= (1u << R_SCALES);
+        CHECK(t.buyOfferable(T_SCALES), "scales seen -> scales buy band appears");
+        CHECK(!t.buyOfferable(T_TEETH), "teeth still unseen -> still hidden");
+
+        // Compass caps at 1 (room.js goodsMax): once owned it leaves the list,
+        // and a second buy is rejected — with NO maxMsg (upstream trade goods
+        // define none; the notify no-ops on undefined), so the log stays clean.
+        // Fund the actual compass cost (fur 400 / scales 20 / teeth 10).
+        t.stores[R_FUR]    = 1000 * FP;
+        t.stores[R_SCALES] =  100 * FP;
+        t.stores[R_TEETH]  =  100 * FP;
+        int logBefore = t.logCount;
+        CHECK(t.buy(T_COMPASS) == RC_OK, "buy compass ok");
+        CHECK(t.whole(R_COMPASS) == 1, "compass owned == 1");
+        CHECK(!t.buyOfferable(T_COMPASS), "compass at max -> leaves the buy list");
+        CHECK(t.buy(T_COMPASS) == RC_ERR_MAX, "second compass buy -> RC_ERR_MAX");
+        // The two buy() calls log nothing on success/max (buy() has no notify);
+        // assert no stray max-notification key crept in.
+        CHECK(t.logCount == logBefore, "compass at max pushes no maxMsg (upstream parity)");
+    }
+
+    printf("== [v0.4.9] The Sick Man: trigger medicine>0, help consumes + reward branch ==\n");
+    {
+        GameState e; e.init(); uint32_t t = 270000; e.settle(t);
+        events::bind(&e);
+        CHECK(!events::startEvent(EV_SICK_MAN, t), "Sick Man needs medicine > 0");
+        e.stores[R_MEDICINE] = 2 * FP;
+        e.rng = 1;                                   // first rand1000()==369 -> scales branch
+        CHECK(events::startEvent(EV_SICK_MAN, t), "Sick Man activates (medicine>0)");
+        CHECK(strcmp(events::eventTitleKey(), "The Sick Man") == 0, "title == The Sick Man");
+        int medB = e.whole(R_MEDICINE), scB = e.whole(R_SCALES);
+        CHECK(events::choose(0) == RC_OK, "give 1 medicine ok");
+        CHECK(e.whole(R_MEDICINE) == medB - 1, "help consumes exactly 1 medicine");
+        CHECK(e.whole(R_SCALES) == scB + 5 && events::currentScene() == (int)S_SICK_SCALES,
+              "rng=1 -> scales reward branch (+5 scales)");
+        // v0.4.9 follow-up: an event reward latches the seen bit (addStores ->
+        // markSeen), exactly as upstream $SM.add defines the store key — so the
+        // rewarded resource now unlocks its craft/buy gate.
+        CHECK(e.hasSeen(R_SCALES), "event reward latches seen (addStores -> markSeen)");
+        events::choose(0);                           // say goodbye
+        CHECK(!events::active(), "goodbye ends the Sick Man");
+    }
+
+    printf("== [v0.4.9] markSeen: reward/give injection marks a resource seen ==\n");
+    {
+        // The GM adr:give path (main.cpp applyPendingGameCmd, out of host scope)
+        // calls the same GameState::markSeen after injecting stores — so a
+        // GM-given resource is treated as "owned" and unlocks its craft/buy gate.
+        // Exercise the shared primitive here.
+        GameState g; g.init();
+        CHECK(!g.hasSeen(R_MEDICINE), "medicine unseen on a fresh game");
+        g.stores[R_MEDICINE] += 5 * FP;              // mirrors adr:give's stores write
+        g.markSeen(R_MEDICINE);                      // ...and its markSeen call
+        CHECK(g.hasSeen(R_MEDICINE), "give-style injection marks the resource seen");
+        g.buildings[B_TRADING_POST] = 1;
+        CHECK(g.buyOfferable(T_MEDICINE), "seen medicine now offered at the trading post");
+    }
+
+    printf("== [v0.4.9] Sickness: pop-gated, heal consumes 1 medicine, ignore kills ==\n");
+    {
+        GameState e; e.init(); uint32_t t = 271000; e.settle(t);
+        e.outsideUnlocked = true; e.stores[R_MEDICINE] = 1 * FP;
+        e.population = 5;                            // outside (10,50) range
+        events::bind(&e);
+        CHECK(!events::startEvent(EV_SICKNESS, t), "Sickness needs population in (10,50)");
+        e.population = 20;
+        CHECK(events::startEvent(EV_SICKNESS, t), "Sickness activates (pop 20, medicine>0)");
+        int medB = e.whole(R_MEDICINE);
+        CHECK(events::choose(0) == RC_OK, "heal (1 medicine) ok");
+        CHECK(e.whole(R_MEDICINE) == medB - 1, "heal consumes 1 medicine");
+        CHECK(e.population == 20, "healed in time -> no villagers lost");
+        events::choose(0);
+        CHECK(!events::active(), "go home ends Sickness (healed)");
+
+        // fresh instance: ignore -> the sickness kills [1..floor(pop/2)] villagers
+        GameState d; d.init(); d.settle(t);
+        d.outsideUnlocked = true; d.stores[R_MEDICINE] = 1 * FP; d.population = 20; d.rng = 1;
+        events::bind(&d);
+        CHECK(events::startEvent(EV_SICKNESS, t), "Sickness activates again");
+        int popB = d.population;
+        CHECK(events::choose(1) == RC_OK, "ignore it ok");
+        CHECK(d.population < popB, "ignoring the sickness kills villagers");
+        CHECK(d.population >= popB - 10, "deaths bounded by floor(pop/2)=10");
+    }
+
+    printf("== [v0.4.9] Plague: pop>50, buy medicine (SCENE_STAY), heal 5, do-nothing kills ==\n");
+    {
+        GameState e; e.init(); uint32_t t = 272000; e.settle(t);
+        e.outsideUnlocked = true; e.stores[R_MEDICINE] = 5 * FP; e.population = 30;
+        events::bind(&e);
+        CHECK(!events::startEvent(EV_PLAGUE, t), "Plague needs population > 50");
+        e.population = 60;
+        e.stores[R_SCALES] = 200 * FP; e.stores[R_TEETH] = 200 * FP;
+        CHECK(events::startEvent(EV_PLAGUE, t), "Plague activates (pop>50, medicine>0)");
+        CHECK(events::btnCount() == 3, "plague start offers buy/heal/do-nothing");
+        int medB = e.whole(R_MEDICINE), scB = e.whole(R_SCALES), teB = e.whole(R_TEETH);
+        CHECK(events::choose(0) == RC_OK, "buy medicine ok");
+        CHECK(e.whole(R_MEDICINE) == medB + 1 && e.whole(R_SCALES) == scB - 70 &&
+              e.whole(R_TEETH) == teB - 50, "buy medicine: -70 scales -50 teeth +1 medicine");
+        CHECK(events::active() && events::currentScene() == (int)S_PLAGUE_START,
+              "buy medicine stays on the start scene (SCENE_STAY)");
+        e.rng = 1;
+        int popB = e.population, medC = e.whole(R_MEDICINE);
+        CHECK(events::choose(1) == RC_OK, "heal (5 medicine) ok");
+        CHECK(e.whole(R_MEDICINE) == medC - 5, "heal consumes 5 medicine");
+        CHECK(e.population < popB && e.population >= popB - 6, "plague healed still loses [2..6]");
+
+        // fresh instance: do nothing -> plague rips through [10..89]
+        GameState d; d.init(); d.settle(t);
+        d.outsideUnlocked = true; d.stores[R_MEDICINE] = 1 * FP; d.population = 100; d.rng = 1;
+        events::bind(&d);
+        CHECK(events::startEvent(EV_PLAGUE, t), "Plague activates (pop 100)");
+        int popB2 = d.population;
+        CHECK(events::choose(2) == RC_OK, "do nothing ok");
+        CHECK(d.population < popB2, "plague death kills villagers");
+        CHECK(d.population >= popB2 - 89, "deaths bounded by [10..89]");
     }
 
     printf("\n==== %d passed, %d failed ====\n", g_pass, g_fail);

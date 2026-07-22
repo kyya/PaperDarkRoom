@@ -189,13 +189,17 @@ void logText(const LogEntry& e, char* out, size_t cap) {
     else             snprintf(out, cap, "%s", base);
 }
 
-// Is craftable id offerable now (unlocked, workshop-gated, under maximum)? Cost
-// is NOT checked — an unaffordable button still shows and beeps low on press,
-// matching the upstream "greyed but visible" affordance.
+// Is craftable id offerable now? Delegates the progressive-unlock decision to
+// the engine (room.js craftUnlocked: builder Helping + workshop + >=50% wood
+// cost + all other materials seen; pushes the availableMsg once on first
+// unlock), then applies the firmware UI's own maximum gate (hide at max rather
+// than show disabled). Cost is NOT checked — an unaffordable-but-unlocked button
+// still shows and beeps low on press, matching the "greyed but visible"
+// affordance. g_game.craftUnlocked mutates (latch + log), so this is called from
+// the layout/tick path, never a pure const context.
 bool craftOfferable(uint8_t id) {
+    if (!g_game.craftUnlocked(id)) return false;
     const Craftable& c = CRAFT[id];
-    if (craftNeedsWorkshop(c.type) && g_game.buildings[B_WORKSHOP] == 0)
-        return false;
     bool bld = craftIsBuilding(id);
     uint8_t slot = craftSlot(id);
     int count = bld ? g_game.buildings[slot] : g_game.items[slot];
