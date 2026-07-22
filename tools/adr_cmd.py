@@ -15,6 +15,7 @@ the device beeps + repaints on success, so there's no ack to wait for:
 Usage (venv python — bleak):
   ~/.ai-desk-card/venv/bin/python tools/adr_cmd.py give iron 300
   ~/.ai-desk-card/venv/bin/python tools/adr_cmd.py give-all 1000000
+  ~/.ai-desk-card/venv/bin/python tools/adr_cmd.py reset   # WIPE save, new game
 
 <res> is a RES_KEY english key from src/game_data.h (wood/fur/iron/coal/steel/
 scales/teeth/…). Multi-word keys are sent with '_' for the space
@@ -69,18 +70,27 @@ async def main() -> int:
     g.add_argument("amount", type=int, help=f"whole units, 1..{AMOUNT_MAX}")
     ga = sub.add_parser("give-all", help="inject every resource")
     ga.add_argument("amount", type=int, help=f"whole units, 1..{AMOUNT_MAX}")
+    sub.add_parser("reset", help="GM factory wipe — delete save + start over "
+                                 "(IRREVERSIBLE, no confirmation)")
     args = ap.parse_args()
 
-    if not 1 <= args.amount <= AMOUNT_MAX:
-        print(f"[cmd] amount out of range (1..{AMOUNT_MAX}): {args.amount}")
-        return 2
-
-    # Build the (res, amount) work list; normalize any space/underscore in a
-    # single `give` res to the underscore wire form.
-    if args.verb == "give-all":
-        work = [(res, args.amount) for res in RES_KEYS]
+    # Build the work list: each item is a raw ASCII command line to write.
+    if args.verb == "reset":
+        # No args. Fire-and-forget wipe: the firmware deletes the save, resets to
+        # a fresh dark room, beeps, and jumps to the Room. IRREVERSIBLE — the user
+        # asked for it, so no interactive confirm, just a loud heads-up.
+        print("[cmd] !! adr:reset — this WIPES the save and starts a NEW game. "
+              "This cannot be undone. Sending now.")
+        work = ["adr:reset"]
     else:
-        work = [(args.res.replace(" ", "_"), args.amount)]
+        if not 1 <= args.amount <= AMOUNT_MAX:
+            print(f"[cmd] amount out of range (1..{AMOUNT_MAX}): {args.amount}")
+            return 2
+        # Normalize any space/underscore in a single `give` res to the wire form.
+        if args.verb == "give-all":
+            work = [f"adr:give {res} {args.amount}" for res in RES_KEYS]
+        else:
+            work = [f"adr:give {args.res.replace(' ', '_')} {args.amount}"]
 
     dev = await scan(NAME, args.scan)
     if not dev:
@@ -90,8 +100,7 @@ async def main() -> int:
 
     try:
         async with BleakClient(dev, timeout=20.0) as client:
-            for i, (res, amount) in enumerate(work):
-                cmd = f"adr:give {res} {amount}"
+            for i, cmd in enumerate(work):
                 await client.write_gatt_char(CTRL, cmd.encode("ascii"),
                                              response=True)
                 print(f"[cmd] ({i + 1}/{len(work)}) sent '{cmd}'")

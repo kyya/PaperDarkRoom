@@ -17,9 +17,21 @@ v0.3.5-adarkroom 引入。用于运行中通过 BLE 直接给游戏注入资源�
 & "$env:USERPROFILE\.ai-desk-card\venv\Scripts\python.exe" tools\adr_cmd.py give iron 300
 # 一次给所有 19 种资源各注入 100 万：
 & "$env:USERPROFILE\.ai-desk-card\venv\Scripts\python.exe" tools\adr_cmd.py give-all 1000000
+# 清空存档、从头开始（不可撤销）：
+& "$env:USERPROFILE\.ai-desk-card\venv\Scripts\python.exe" tools\adr_cmd.py reset
 ```
 
 `give` 会扫描设备名、连接、写入 `adr:give iron 300` 到 CTRL 特征后立即退出（fire-and-forget，见下）。`give-all` 在一次连接里遍历全部 `RES_KEY` 逐条写入，每条之间停约 0.3s 让固件 save+刷屏跟上。
+
+### 动词一览
+
+| 动词 | 线上命令 | 参数 | 作用 |
+|---|---|---|---|
+| `give` | `adr:give <res> <amount>` | 资源键 + 1..1000000 | 注入单种资源 |
+| `give-all` | `adr:give <res> <amount>`（逐条） | 1..1000000 | 一次连接注入全部 19 种资源 |
+| `reset` | `adr:reset` | 无 | **GM 清档**：删除存档 + 恢复出厂新局 + 跳回生火间。**不可撤销**，host 端不做交互确认（用户明确要求时才用） |
+
+`reset` 由固件删掉 SD 上的存档文件（含 `.tmp` 兜底）、`g_game.init()` 复位全部字段（stores/buildings/builder、v0.4.3 的 seen/craftShown、事件调度槽位一并清零）、高音 beep，然后显式跳回生火间（清档后野外/贸易/分工都会隐藏，不能刷新当前页）。**刻意不 save()**：保持"无存档"状态，与设备首次开机一致，下一次玩家动作自然落盘；期间断电只会重新开新局，结果一致。
 
 ## 3. 协议细节
 

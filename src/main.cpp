@@ -37,10 +37,11 @@
 #include "game_state.h"
 #include "event_engine.h"
 #include "event_modal.h"
+#include "assign_page.h"        // assign_page::isOpen/close (adr:reset re-hides it)
 #include <time.h>
 
 #ifndef CARD_VERSION
-#define CARD_VERSION "0.4.2-adarkroom"
+#define CARD_VERSION "0.5.0-adarkroom"
 #endif
 #ifndef WAKE_INTERVAL_SECS
 #define WAKE_INTERVAL_SECS 900
@@ -169,16 +170,40 @@ static void applyPendingTimeConfig() {
 }
 
 // Apply a pending debug game command (the BLE CTRL "adr:" intercept — see
-// ble_link CtrlCb). One verb for now, `adr:give <res> <amount>`: inject <amount>
-// whole units of the RES_KEY-named resource (a dev/testing aid — "蓝牙直接推铁").
-// A multi-word RES_KEY ("cured meat") is sent with '_' for the space
-// ("cured_meat") and un-escaped back here before matching, so every resource is
-// reachable. Same capture-in-callback / act-in-loop split as
-// applyPendingTimeConfig; the engine write + save + repaint all live here, off
-// the BLE callback.
+// ble_link CtrlCb). Verbs: `adr:give <res> <amount>` injects <amount> whole
+// units of the RES_KEY-named resource (a dev/testing aid — "蓝牙直接推铁"); a
+// multi-word RES_KEY ("cured meat") is sent with '_' for the space
+// ("cured_meat") and un-escaped back here before matching. `adr:reset` (no args)
+// is the GM wipe — factory reset for a fresh playthrough. Same capture-in-
+// callback / act-in-loop split as applyPendingTimeConfig; the engine write +
+// save + repaint all live here, off the BLE callback.
 static void applyPendingGameCmd() {
     if (!ble_link::rx.gameCmdPending) return;
     ble_link::rx.gameCmdPending = false;
+
+    // adr:reset — GM factory wipe. Delete the save (+ any stray atomic-write
+    // tmp) and reset the model to a brand-new dark room. init() covers EVERY
+    // persistent field (stores/buildings/items/workers, fire/temp/builder, the
+    // v0.4.3 seen/craftShown bitsets, and the event scheduler fields), so no
+    // stale state survives. Deliberately NO save(): we leave "no save file" so
+    // the device sits in the same state a first-ever boot would, and the next
+    // player action lands the first fresh write. A power loss before then just
+    // boots a new game — identical outcome, so the un-saved window is safe.
+    // Reset hides Outside/Trade/Assign (outsideUnlocked=false), so we can't
+    // refresh the current page — jump explicitly to the always-visible Room.
+    if (strcmp(ble_link::rx.gameCmd, "adr:reset") == 0) {
+        SD.remove(ADR_SAVE_PATH);            // primary save file
+        SD.remove(ADR_SAVE_PATH ".tmp");     // stray tmp from a torn atomic write
+        g_game.init();                       // factory state (all fields)
+        events::reset();                     // drop any RAM-only on-screen event latch
+        if (assign_page::isOpen()) assign_page::close();   // its ring slot re-hides
+        M5.Speaker.tone(1800, 80);
+        int room = pager::ringIndexByName("room");
+        if (room >= 0) pager::showPage(room, false);
+        Serial.println("[cmd] reset -> save wiped, new game, jumped to room");
+        return;
+    }
+
     char res[24]; int amount = 0;
     // %23s stops at whitespace; the host sends multi-word keys with '_' for the
     // space (so they stay one token), un-escaped just below before the strcmp.
@@ -205,6 +230,7 @@ static void applyPendingGameCmd() {
     }
     g_game.stores[r] += amount * adr::FP;         // stores are fixed-point × FP
     if (g_game.stores[r] < 0) g_game.stores[r] = 0;   // never leave it negative
+    g_game.markSeen((uint8_t)r);   // injected == "owned": unlock its craft/buy gates
     g_game.save();
     M5.Speaker.tone(1800, 80);
     pager::showPage(pager::currentRingIndex(), false);
@@ -387,7 +413,7 @@ void setup() {
         Serial.println("[game] new game (no save)");
     }
     uint32_t nowE = epochNow();
-    uint32_t steps = g_game.settle(nowE);
+    uint32_t steps = g_game.settle(nowE, /*offline=*/true);   // deep-sleep catch-up: fire frozen (§5.3)
     Serial.printf("[game] settled %lu step(s); fire=%d temp=%d builder=%d pop=%u wood=%ld\n",
                   (unsigned long)steps, g_game.fire, g_game.temp,
                   g_game.builderLevel, g_game.population, (long)g_game.whole(adr::R_WOOD));
