@@ -32,6 +32,14 @@ docs/            调研文档 + 版权 NOTICE
 & "$env:USERPROFILE\.ai-desk-card\venv\Scripts\python.exe" -m platformio run -e adarkroom
 ```
 
+### 打包 dist 镜像（M5Burner 上架用）
+
+```powershell
+& "$env:USERPROFILE\.ai-desk-card\venv\Scripts\python.exe" tools\make_dist.py
+```
+
+`tools/make_dist.py` 会先跑一遍构建（已构建过可加 `--skip-build` 跳过），再用 esptool `merge_bin` 把 bootloader、分区表、`boot_app0`、`firmware.bin` 按各自的 flash 偏移拼成一份完整镜像 `dist/adarkroom-<版本>-merged.bin`（版本号取自 `platformio.ini` 的 `-DCARD_VERSION`），并自动校验产物合法性。M5Burner/烧录时该文件整体写入 **0x0**，无需再分四份地址烧录。
+
 ## 刷机
 
 **首刷 / 救砖走 USB：**
