@@ -39,6 +39,43 @@ def parse_strings_js(path: str) -> dict[str, str]:
     return json.loads(m.group(1))
 
 
+# ---- §8.3 glyph-closure overrides -----------------------------------------
+# A handful of upstream zh values use characters the 12px source font has NO
+# glyph for (Fusion Pixel AND its OFL sibling Ark Pixel both genuinely lack them
+# at 12px, in every variant / the latest release — verified). Rendered on-device
+# they would ship as .notdef "tofu" boxes, breaking the §8.3 glyph-closure iron
+# law. Since no OFL 12px Simplified-Chinese pixel font carries these glyphs, the
+# affected official translations are MINIMALLY reworded to an equivalent phrasing
+# whose every character IS in the font — done HERE at the pipeline source so
+# strings_zh.h stays a pure generated artifact (never hand-edited). Keyed by
+# en_key so an override tracks its upstream row; a key that no longer exists
+# upstream hard-errors (guards against silent drift). Keep this list as small as
+# possible and rerun gen_cjk_font.py afterward — it fail-closes on any remaining
+# tofu, proving the closure is whole.
+#   辘 (U+8F98) in 饥肠辘辘  ·  藓 (U+85D3) in 苔藓
+STRING_OVERRIDES = {
+    # "she looks hungry." — 饥肠辘辘 -> 很饿 (also closer to the literal English)
+    "builder finishes the smokehouse. she looks hungry.":
+        "建造者造好了熏肉房。她看起来很饿。",
+    # moss = 苔藓 -> 青苔 (an exact synonym, both chars in the font)
+    "deep in the swamp is a moss-covered cabin.":
+        "沼泽深处现出一栋覆满青苔的小屋",
+    "the walls are moist and moss-covered":
+        "岩壁潮湿，覆盖着青苔",
+}
+
+
+def apply_overrides(pairs: dict[str, str]) -> int:
+    """Replace glyph-closure-adapted zh values in place; return count applied."""
+    for en in STRING_OVERRIDES:
+        if en not in pairs:
+            raise SystemExit(
+                f"override en_key absent from upstream table (drifted?): {en!r}")
+    for en, zh in STRING_OVERRIDES.items():
+        pairs[en] = zh
+    return len(STRING_OVERRIDES)
+
+
 def c_escape(s: str) -> str:
     """Escape a UTF-8 string as a C string body (keeps multibyte bytes raw)."""
     out = []
@@ -111,13 +148,15 @@ def main():
     args = ap.parse_args()
 
     pairs = parse_strings_js(args.inp)
+    n_over = apply_overrides(pairs)      # §8.3 glyph-closure adaptations
     header = emit(pairs)
     os.makedirs(os.path.dirname(args.out) or ".", exist_ok=True)
     with open(args.out, "w", encoding="utf-8", newline="\n") as f:
         f.write(header)
     total_zh = sum(len(v) for v in pairs.values())
     print(f"wrote {args.out}: {len(pairs)} entries, {total_zh} zh chars "
-          f"({sum(len(v.encode('utf-8')) for v in pairs.values())} UTF-8 bytes)")
+          f"({sum(len(v.encode('utf-8')) for v in pairs.values())} UTF-8 bytes); "
+          f"{n_over} glyph-closure override(s) applied")
 
 
 if __name__ == "__main__":

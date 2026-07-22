@@ -8,7 +8,7 @@
 // binary search in tr(). zh values are UTF-8, rendered by the CJK font
 // (src/cjk_font12.h). Include this header from exactly ONE .cpp
 // (cjk_text.cpp) — it carries the whole table.
-// 786 entries · 6617 zh chars · 19523 UTF-8 bytes of translation text.
+// 786 entries · 6615 zh chars · 19517 UTF-8 bytes of translation text.
 #pragma once
 #include <stddef.h>
 
@@ -246,7 +246,7 @@ static const AdrString ADR_STRINGS[] = {
     { "broken streetlights stand, rusting. light hasn't graced this place in a long time.", "早就损坏的街灯屹立着，锈迹斑斑。光明已经很久没有眷顾这里" },
     { "build:", "建筑物:" },
     { "builder", "建造者" },
-    { "builder finishes the smokehouse. she looks hungry.", "建造者造好了熏肉房。她看起来饥肠辘辘。" },
+    { "builder finishes the smokehouse. she looks hungry.", "建造者造好了熏肉房。她看起来很饿。" },
     { "builder just shivers", "建造者还在瑟瑟发抖" },
     { "builder puts up a hut, out in the forest. says word will get around.", "建造者在林中建起一栋小屋，她说消息很快就会流传出去" },
     { "builder says it'd be useful to have a steady source of bullets", "建造者说拥有稳定的弹药来源很有必要" },
@@ -303,7 +303,7 @@ static const AdrString ADR_STRINGS[] = {
     { "damage", "伤害" },
     { "dangerous to be this far from the village without proper protection", "没有妥善防护离开村子，远行很危险" },
     { "dead", "熄灭了" },
-    { "deep in the swamp is a moss-covered cabin.", "沼泽深处现出一栋覆满苔藓的小屋" },
+    { "deep in the swamp is a moss-covered cabin.", "沼泽深处现出一栋覆满青苔的小屋" },
     { "descend", "进入地铁站" },
     { "desert rat", "荒漠跳鼠" },
     { "do nothing", "置之不理" },
@@ -728,7 +728,7 @@ static const AdrString ADR_STRINGS[] = {
     { "the villagers haul a filthy man out of the store room.", "村民们从仓库里拽出来一个脏兮兮的家伙" },
     { "the villagers retreat to mourn the dead.", "村民撤了回来，悼念那些死去的人" },
     { "the wagon can carry a lot of supplies", "篷车能够携带许多物资" },
-    { "the walls are moist and moss-covered", "岩壁潮湿，覆盖着苔藓" },
+    { "the walls are moist and moss-covered", "岩壁潮湿，覆盖着青苔" },
     { "the walls are scorched from an old battle.", "这些墙壁在一场古老的战争中被烧焦了" },
     { "the wanderer leaves, cart loaded with furs", "流浪者带着满载毛皮的货车离开了" },
     { "the wanderer leaves, cart loaded with wood", "流浪者带着满载木头的货车离开了" },

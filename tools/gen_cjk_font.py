@@ -107,9 +107,32 @@ def _fmt_bytes(data, per_line=16, indent="    "):
     return "\n".join(lines)
 
 
+# §8.3 GUARD — a codepoint the source TTF has no glyph for is mapped by FreeType
+# to glyph 0 (.notdef), which pixel faces render as a hollow "tofu" box. The old
+# generator stored that box under the codepoint, so the missing char shipped as a
+# visible box on-device (the 饥肠辘辘 "辘" bug). detect_missing() renders a
+# guaranteed-unmapped noncharacter (U+FFFF) to capture the exact .notdef bitmap,
+# then flags every closure glyph whose bitmap is byte-identical to it — no real
+# CJK glyph is a bare hollow rectangle, so this has no false positives.
+def _notdef_ref(font, baseline):
+    data, w, h, _adv, _xo, _yo = build_glyph(font, "￿", PX, baseline)
+    return (w, h, bytes(data))
+
+
+def detect_missing(rows, bitmaps, notdef):
+    nd_w, nd_h, nd_bytes = notdef
+    nbytes = (nd_w * nd_h + 7) // 8
+    missing = []
+    for cp, off, w, h, *_ in rows:
+        if w == nd_w and h == nd_h and bytes(bitmaps[off:off + nbytes]) == nd_bytes:
+            missing.append(cp)
+    return missing
+
+
 def emit(name, ttf, cps):
     font = ImageFont.truetype(ttf, PX)
     baseline = measure_baseline(font, PX)
+    notdef = _notdef_ref(font, baseline)
 
     bitmaps = bytearray()
     rows = []   # (cp, off, w, h, xadv, xoff, yoff)
@@ -119,6 +142,8 @@ def emit(name, ttf, cps):
         bitmaps += data
         # int8 clamps (advance/size fit u8; offsets fit i8 for 12px glyphs).
         rows.append((cp, off, w, h, xadv, xoff, yoff))
+
+    missing = detect_missing(rows, bitmaps, notdef)
 
     b = []
     b.append(HEADER_NOTE.rstrip("\n"))
@@ -152,7 +177,7 @@ def emit(name, ttf, cps):
              f"sizeof({name}Glyphs) / sizeof({name}Glyphs[0]);")
     b.append(f"static const uint8_t {name}Px = {PX};")
     b.append("")
-    return "\n".join(b), bitmaps, rows, baseline
+    return "\n".join(b), bitmaps, rows, baseline, missing
 
 
 def emit_proof(path, name, bitmaps, rows, baseline):
@@ -195,10 +220,27 @@ def main():
     ap.add_argument("--name", default="cjkFont12")
     ap.add_argument("--out", required=True)
     ap.add_argument("--proof", default=None)
+    ap.add_argument("--allow-missing", action="store_true",
+                    help="write the table even if some glyphs are missing from "
+                         "the TTF (they ship as .notdef tofu — §8.3 violation). "
+                         "Default: fail-closed, do NOT write.")
     args = ap.parse_args()
 
     cps = glyph_closure(args.strings)
-    header, bitmaps, rows, baseline = emit(args.name, args.ttf, cps)
+    header, bitmaps, rows, baseline, missing = emit(args.name, args.ttf, cps)
+
+    if missing:
+        print(f"[MISSING] {len(missing)} glyph(s) absent from {args.ttf} — "
+              f"they render as .notdef tofu (§8.3 break):", file=sys.stderr)
+        for cp in missing:
+            print(f"    U+{cp:04X} {chr(cp)}", file=sys.stderr)
+        if not args.allow_missing:
+            print("[MISSING] refusing to write a tofu-carrying table. Source the "
+                  "missing glyphs from a font that has them (or reword the "
+                  "official strings), then rerun. Use --allow-missing to override.",
+                  file=sys.stderr)
+            return 2
+
     os.makedirs(os.path.dirname(args.out) or ".", exist_ok=True)
     with open(args.out, "w", encoding="utf-8", newline="\n") as f:
         f.write(header)
@@ -213,4 +255,4 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())
