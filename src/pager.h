@@ -33,6 +33,11 @@ int  ringCount();
 int  currentRingIndex();        // clamped to [0, ringCount)
 const char* currentName();      // the current page's name() ("srv:0", "pomo")
 
+// Ring index of the registered page named `name`, or -1 if none. Lets a client
+// page navigate to a sibling by identity (e.g. Outside 分工 -> "assign", the
+// assign 返回 -> "outside") without hardcoding a shiftable ring index.
+int  ringIndexByName(const char* name);
+
 // Drive the current page's tick() (time axis). Call once per loop().
 void tickCurrent(uint32_t nowMs);
 

@@ -171,6 +171,20 @@ static int resolveRingByName() {
     return 0;
 }
 
+// Resolve the ring index of the page whose name() matches `name`, or -1 if none
+// is registered under that name. Public sibling of resolveRingByName (which is
+// hard-wired to the persisted current name): client pages use it to navigate to
+// a sibling by identity — e.g. the Outside 分工 cell jumping to "assign", and the
+// AssignPage 返回 band jumping back to "outside" — without hardcoding a ring
+// index that server pages ahead of them would shift.
+int ringIndexByName(const char* name) {
+    for (int r = 0; r < ringCount(); r++) {
+        pages::Page* pg = pageAt(r);
+        if (pg && strcmp(pg->name(), name) == 0) return r;
+    }
+    return -1;
+}
+
 int currentRingIndex() {
     // Lazy reconcile: the server page count can change under s_curRing (first
     // sync 0->N, or a shrink) with no re-resolution — a user parked on "pomo"

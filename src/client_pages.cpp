@@ -2,6 +2,7 @@
 #include "room_page.h"
 #include "outside_page.h"
 #include "trade_page.h"
+#include "assign_page.h"
 #include "event_engine.h"
 
 // A Dark Room firmware: the ring is entirely game client pages (no host-pushed
@@ -19,7 +20,13 @@ namespace client_pages {
 static RoomPage s_room;
 static OutsidePage s_outside;
 static TradePage s_trade;
-static pages::Page* s_reg[] = { &s_room, &s_outside, &s_trade };
+// AssignPage (v0.4.0) is a non-tab sub-page reached from the Outside 分工 cell;
+// it stays hidden (draw() returns false) until opened, exactly like Outside/Trade
+// hide until their unlock — just latched on assign_page::isOpen() instead of a
+// game flag. Registered here so it occupies a stable ring slot (findable by name
+// for the open/return jumps, see pager::ringIndexByName).
+static AssignPage s_assign;
+static pages::Page* s_reg[] = { &s_room, &s_outside, &s_trade, &s_assign };
 
 int count() { return (int)(sizeof(s_reg) / sizeof(s_reg[0])); }
 
