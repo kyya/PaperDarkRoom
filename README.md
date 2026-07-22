@@ -28,14 +28,16 @@ docs/            调研文档 + 版权 NOTICE
 
 ## 构建
 
-```powershell
-& "$env:USERPROFILE\.ai-desk-card\venv\Scripts\python.exe" -m platformio run -e adarkroom
+> 前提：已安装 PlatformIO CLI（`pip install platformio`）与 Python。
+
+```
+pio run -e adarkroom
 ```
 
 ### 打包 dist 镜像（M5Burner 上架用）
 
-```powershell
-& "$env:USERPROFILE\.ai-desk-card\venv\Scripts\python.exe" tools\make_dist.py
+```
+python tools/make_dist.py            # 已构建过可加 --skip-build 跳过构建
 ```
 
 `tools/make_dist.py` 会先跑一遍构建（已构建过可加 `--skip-build` 跳过），再用 esptool `merge_bin` 把 bootloader、分区表、`boot_app0`、`firmware.bin` 按各自的 flash 偏移拼成一份完整镜像 `dist/adarkroom-<版本>-merged.bin`（版本号取自 `platformio.ini` 的 `-DCARD_VERSION`），并自动校验产物合法性。M5Burner/烧录时该文件整体写入 **0x0**，无需再分四份地址烧录。
@@ -44,14 +46,14 @@ docs/            调研文档 + 版权 NOTICE
 
 **首刷 / 救砖走 USB：**
 
-```powershell
-& "$env:USERPROFILE\.ai-desk-card\venv\Scripts\python.exe" -m platformio run -e adarkroom -t upload
+```
+pio run -e adarkroom -t upload
 ```
 
 **日常更新走 BLE OTA**（设备需已唤醒并完成过一次配对）：
 
-```powershell
-& "$env:USERPROFILE\.ai-desk-card\venv\Scripts\python.exe" tools\ble_ota.py
+```
+python tools/ble_ota.py
 ```
 
 `tools/ble_ota.py` 复用与 dashboard-fw dashboard 固件（`dashboard-env` env）完全相同的 BLE GATT UUID 集合与 OTA 协议（8 字节头 `<II total|crc32>` + DATA 特征分块流 + STAT 特征通知），因此同一台设备上两个固件**可反复互刷**：本仓库的 `adarkroom.bin` 可以刷给一台正跑 dashboard-fw dashboard 固件的设备，反之亦然，物理前提是双方共用同一份 A/B 分区表（`partitions.csv`）。
@@ -64,11 +66,11 @@ docs/            调研文档 + 版权 NOTICE
 
 ```powershell
 # 1) 官方中文翻译表 -> C 头（需要本地克隆一份上游 adarkroom 仓库，见下方致谢链接）
-& "$env:USERPROFILE\.ai-desk-card\venv\Scripts\python.exe" tools\gen_adr_strings.py `
+python tools\gen_adr_strings.py `
     --in path\to\adarkroom\lang\zh_cn\strings.js --out src\strings_zh.h
 
 # 2) 从中文表提取字形闭包 -> 稀疏点阵 CJK 字体
-& "$env:USERPROFILE\.ai-desk-card\venv\Scripts\python.exe" tools\gen_cjk_font.py `
+python tools\gen_cjk_font.py `
     --ttf fonts\fusion-pixel-12px-proportional-zh_hans.ttf `
     --strings src\strings_zh.h --out src\cjk_font12.h
 ```
