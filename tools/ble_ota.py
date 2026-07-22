@@ -8,10 +8,9 @@ Streams a firmware .bin to the device over the existing BLE link, no USB:
   mtu-3 chunks (write-without-response) -> watch STATUS for `ota=ok` -> the
   device reboots into the new image -> rescan and confirm STATUS `fw=` changed.
 
-The game firmware and the dashboard-fw dashboard firmware (dashboard-env) share
-the same BLE GATT UUID set and OTA slot layout on purpose, so this script can
-also cross-flash a dashboard-fw dashboard build onto the same device and back —
-see docs/research.md §3.2.
+The game firmware and the companion dashboard firmware share the same BLE GATT
+UUID set and OTA slot layout on purpose, so this script can also cross-flash a
+dashboard build onto the same device and back.
 
 Usage (venv python — bleak):
   ~/.ai-desk-card/venv/bin/python tools/ble_ota.py [--fw PATH] [--scan 30]

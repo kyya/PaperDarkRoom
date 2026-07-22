@@ -1,4 +1,4 @@
-# dashboard-fw dashboard-env — big-nvs 16MB layout.
+# big-nvs 16MB layout.
 #
 # WHY: the BLE bond lives in the `nvs` partition (namespace bt_config.conf).
 # The stock nvs is only 0x5000 (20 KB = 5 pages), SHARED with PHY calibration

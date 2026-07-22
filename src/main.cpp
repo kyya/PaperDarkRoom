@@ -2,7 +2,7 @@
 //
 // A port of the open-source game "A Dark Room" (Doublespeak Games, MPL-2.0)
 // to the M5PaperS3 e-ink card. This is a STANDALONE firmware: unlike the
-// dashboard-fw dashboard build it has no host that pushes pages — the ring is
+// dashboard build it has no host that pushes pages — the ring is
 // entirely firmware-rendered game pages (client_pages). What it keeps from the
 // dashboard firmware, byte for byte, is the deep-sleep model and the BLE GATT
 // service (OTA / STAT / rollback / TIME_CONFIG), so `tools/ble_ota.py` can
