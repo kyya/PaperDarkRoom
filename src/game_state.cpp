@@ -47,6 +47,17 @@ void GameState::init() {
 // ===================== log ring ===========================================
 
 void GameState::pushLog(const char* enKey, int32_t arg, bool hasArg) {
+    // v0.3.1: a repeat of the newest entry (same key + arg/hasArg — e.g. a
+    // cost-disabled band pressed over and over, or the fire settling at
+    // roaring under repeated stoking) collapses into that entry's counter
+    // instead of scrolling a duplicate line into the ring.
+    if (logCount > 0) {
+        LogEntry& last = log[logCount - 1];
+        if (strcmp(last.enKey, enKey) == 0 && last.arg == arg && last.hasArg == hasArg) {
+            if (last.count < 99) last.count++;
+            return;
+        }
+    }
     if (logCount >= LOG_CAP) {        // drop oldest, shift down
         memmove(&log[0], &log[1], sizeof(LogEntry) * (LOG_CAP - 1));
         logCount = LOG_CAP - 1;
@@ -55,6 +66,7 @@ void GameState::pushLog(const char* enKey, int32_t arg, bool hasArg) {
     snprintf(e.enKey, LOG_KEY_MAX, "%s", enKey);
     e.arg = arg;
     e.hasArg = hasArg;
+    e.count = 1;
 }
 
 // ===================== deterministic PRNG (xorshift32) ====================
@@ -161,9 +173,20 @@ void GameState::applyIncomeSource(uint8_t job, int count) {
         stores[d.items[i].res] += d.items[i].dfp * count;
 }
 
+// room.js adjustTemp(): notify on EVERY temperature change (not just when the
+// stranger's warmth threshold is crossed) — v0.3.1 feedback 1: the fire/temp
+// state used to live in a persistent header line; now that the line is gone
+// (room_page.cpp), a change is the only way the user ever sees it, exactly
+// matching upstream's behavior.
 void GameState::adjustTemp() {
-    if (temp > TEMP_FREEZING && temp > fire) temp--;
-    if (temp < TEMP_HOT && temp < fire) temp++;
+    if (temp > TEMP_FREEZING && temp > fire) {
+        temp--;
+        pushLog("the room is {0}", temp, true);
+    }
+    if (temp < TEMP_HOT && temp < fire) {
+        temp++;
+        pushLog("the room is {0}", temp, true);
+    }
 }
 
 void GameState::advanceBuilder() {
@@ -223,6 +246,10 @@ void GameState::increasePopulation() {
 // ===================== fire actions =======================================
 
 void GameState::onFireChange() {
+    // room.js onFireChange(): notify on EVERY fire change (v0.3.1 feedback 1 —
+    // see adjustTemp() above for why this now has to be the sole way the fire
+    // state reaches the user).
+    pushLog("the fire is {0}", fire, true);
     if (fire > FIRE_SMOLDERING && builderLevel < 0) {   // fire.value > 1
         builderLevel = 0;
         tBuilder = BUILDER_STATE_S;
@@ -331,11 +358,20 @@ Result GameState::makeCraftable(uint8_t craftId) {
     int count = bld ? buildings[slot] : items[slot];
     if (c.maximum >= 0 && count >= c.maximum) return RC_ERR_MAX;
 
-    // cost (trap/hut scale wood by existing count)
+    // cost (trap/hut scale wood by existing count). room.js build()/craft():
+    // notify "not enough " + the FIRST short resource's key (loop breaks there,
+    // same as this one) — v0.3.1 feedback 2: a disabled build/craft band used to
+    // fail silently; RES_KEY[] carries the exact upstream store key, and every
+    // resource ever costed here has a "not enough <key>" translation.
     for (int i = 0; i < 3 && c.cost[i].res != RA_END; i++) {
         int need = c.cost[i].amt;
         if (c.cost[i].res == R_WOOD) need += (int)c.woodIncrPerN * count;
-        if (stores[c.cost[i].res] < need * FP) return RC_ERR_COST;
+        if (stores[c.cost[i].res] < need * FP) {
+            char key[40];
+            snprintf(key, sizeof(key), "not enough %s", RES_KEY[c.cost[i].res]);
+            pushLog(key);
+            return RC_ERR_COST;
+        }
     }
     for (int i = 0; i < 3 && c.cost[i].res != RA_END; i++) {
         int need = c.cost[i].amt;
@@ -358,11 +394,28 @@ Result GameState::buy(uint8_t tradeId) {
     const TradeGood& g = TRADE[tradeId];
     int have = whole(g.product); if (have < 0) have = 0;
     if (g.maximum >= 0 && have >= g.maximum) return RC_ERR_MAX;
-    for (int i = 0; i < 3 && g.cost[i].res != RA_END; i++)
-        if (stores[g.cost[i].res] < g.cost[i].amt * FP) return RC_ERR_COST;
+    // room.js buy(): Notifications.notify(Room, _("not enough " + k)) on the
+    // FIRST short cost resource (loop breaks there) — same v0.3.1 feedback-2
+    // pattern makeCraftable() already carries for build/craft; a cost-disabled
+    // trade band used to fail silently, exactly like the pre-0.3.1 build/craft
+    // bug this mirrors.
+    for (int i = 0; i < 3 && g.cost[i].res != RA_END; i++) {
+        if (stores[g.cost[i].res] < g.cost[i].amt * FP) {
+            char key[40];
+            snprintf(key, sizeof(key), "not enough %s", RES_KEY[g.cost[i].res]);
+            pushLog(key);
+            return RC_ERR_COST;
+        }
+    }
     for (int i = 0; i < 3 && g.cost[i].res != RA_END; i++)
         stores[g.cost[i].res] -= g.cost[i].amt * FP;
     stores[g.product] += 1 * FP;
+    // room.js buy(): Notifications.notify(Room, good.buildMsg) on success — but
+    // Room.TradeGoods entries carry no buildMsg property (only type/cost/audio),
+    // so good.buildMsg is undefined, and Notifications.notify() no-ops on an
+    // undefined message (notifications.js: "if (typeof text == 'undefined')
+    // return;"). Upstream's buy() therefore has NO success notification —
+    // matched exactly here: no pushLog on the RC_OK path.
     return RC_OK;
 }
 
@@ -516,12 +569,15 @@ size_t GameState::toJson(char* out, size_t cap) const {
     for (int i = 0; i < ITEM_COUNT; i++) AP("%s%d", i ? "," : "", items[i]);
     AP("],\"wrk\":[");
     for (int i = 0; i < JOB_COUNT; i++) AP("%s%u", i ? "," : "", workers[i]);
+    // log entries: ["key",arg,hasArg,count]. count is a v0.3.1 addition,
+    // always written from here on; fromJson() treats it as OPTIONAL on read
+    // (defaults to 1) so saves written by pre-0.3.1 firmware still load.
     AP("],\"log\":[");
     for (int i = 0; i < logCount; i++) {
         if (i) AP(",");
         AP("[");
         apStr(out, cap, o, log[i].enKey);
-        AP(",%ld,%d]", (long)log[i].arg, log[i].hasArg ? 1 : 0);
+        AP(",%ld,%d,%d]", (long)log[i].arg, log[i].hasArg ? 1 : 0, log[i].count);
     }
     AP("]}");
 #undef AP
@@ -567,7 +623,11 @@ bool GameState::fromJson(const char* j) {
     readIntArr(afterKey(j, "wrk"), tmp, JOB_COUNT);
     for (int i = 0; i < JOB_COUNT; i++) workers[i] = (uint16_t)tmp[i];
 
-    // log: array of ["key",arg,h]
+    // log: array of ["key",arg,h] (pre-0.3.1) or ["key",arg,h,count] (0.3.1+).
+    // count is OPTIONAL on read: after hasArg, strtol leaves p at whatever
+    // follows the digit(s) — ']' for the old 3-field form (default count=1,
+    // lossless read of an already-published v2 save), ',' when a 4th field
+    // follows.
     logCount = 0;
     const char* p = afterKey(j, "log");
     if (p) {
@@ -585,6 +645,13 @@ bool GameState::fromJson(const char* j) {
                 e.arg = (int32_t)strtol(p, (char**)&p, 10);
                 while (*p && *p != ',') p++; if (*p == ',') p++;
                 e.hasArg = strtol(p, (char**)&p, 10) != 0;
+                e.count = 1;
+                while (*p == ' ') p++;
+                if (*p == ',') {
+                    p++;
+                    long c = strtol(p, (char**)&p, 10);
+                    if (c >= 1 && c <= 255) e.count = (uint8_t)c;
+                }
                 logCount++;
                 const char* nb = strchr(p, ']');   // close this entry
                 if (nb) p = nb + 1;

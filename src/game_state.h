@@ -36,11 +36,16 @@ enum Result : uint8_t {
 // argument (e.g. villagers arrived) the renderer may splice into a {0} slot.
 // The key is copied into a fixed buffer, not held as a literal pointer, so the
 // log survives deep sleep (literal addresses shift across a reflash/reboot).
+// count (v0.3.1): pushLog() collapses a repeat of the newest entry (same
+// enKey + arg/hasArg) into this counter instead of scrolling a duplicate line
+// — e.g. repeatedly long-pressing a cost-disabled band no longer floods the
+// log with "not enough wood", it becomes one line ticking up to "...x3".
 constexpr int LOG_KEY_MAX = 96;
 struct LogEntry {
     char    enKey[LOG_KEY_MAX];
     int32_t arg;
     bool    hasArg;
+    uint8_t count;    // 1 for a fresh entry; capped at 99
 };
 
 constexpr int   LOG_CAP    = 8;
