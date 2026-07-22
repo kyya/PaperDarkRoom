@@ -375,7 +375,21 @@ void setup() {
     Serial.begin(115200);
     delay(400);
     g_bootMs = millis();
-    g_wokeByTimer = wokeByRtcTimer();
+    g_wokeByTimer = wokeByRtcTimer();       // reads the RTC IRQ flag FIRST (wake reason)
+
+    // Cancel any BM8563 (PCF8563) countdown timer still armed from the previous
+    // timerSleep(). timerSleep() arms a REPEATING countdown (RTC_Class::
+    // setAlarmIRQ(int) -> setTimerIRQ -> reg 0x0E TE bit); wokeByRtcTimer()'s
+    // clearIRQ() above clears only the fired FLAG (reg 0x01 bits 0x0C), leaving
+    // the timer running. So after a MANUAL power-off (power button while awake)
+    // the battery-backed timer keeps counting and fires again ~WAKE_INTERVAL_SECS
+    // later, pulling the device back on — the "关机后约 15 分钟自动开机" bug.
+    // disableIRQ() fully disarms timer+alarm+INT-enable. MUST run AFTER the
+    // getIRQstatus read above (先判断后撤销). The scheduled-sleep path re-arms it
+    // every sleep (Power::timerSleep -> disableIRQ+clearIRQ+setAlarmIRQ), so
+    // periodic wakes are unaffected; only a hand power-off now stays off.
+    M5.Rtc.disableIRQ();
+
     Serial.printf("[boot] adarkroom v%s interval=%ds reset=%d\n",
                   CARD_VERSION, WAKE_INTERVAL_SECS, (int)esp_reset_reason());
 
