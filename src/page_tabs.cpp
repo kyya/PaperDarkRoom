@@ -2,13 +2,13 @@
 // License, v. 2.0. If a copy of the MPL was not distributed with this
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 //
-// Two-tab header renderer — see page_tabs.h for the model. Titles are 36px
+// Header renderer — see page_tabs.h for the model. Titles are 36px
 // (cjk::drawText scale=3), left-aligned from PAD, separated by a vertical rule;
 // the active tab carries a 3px underline the width of its own text. Every string
 // goes through tr() so the sparse 12px CJK face only ever sees the official
-// translation (the §8.3 glyph-closure iron law). All eight title glyph sets
-// (小黑屋/生火间/静谧森林/孤独小屋/小型村落/中型村落/大型村落/喧嚣小镇) are in the
-// strings_zh.h closure the font is generated from, so none render as tofu.
+// translation (the §8.3 glyph-closure iron law). All nine title glyph sets
+// (小黑屋/生火间/静谧森林/孤独小屋/小型村落/中型村落/大型村落/喧嚣小镇/贸易站) are
+// in the strings_zh.h closure the font is generated from, so none render as tofu.
 #include "page_tabs.h"
 #include "cjk_text.h"
 #include "pomo_page.h"          // PAD (shared layout authority)
@@ -49,6 +49,13 @@ const char* outsideTitle() {
 }
 }  // namespace
 
+// Draw a vertical divider rule at divX; returns the x where the next tab title
+// starts (past the rule and its right-side whitespace).
+static int drawDivider(m5gfx::M5Canvas& c, int divX) {
+    c.fillRect(divX, TAB_Y + 2, DIV_W, TAB_GLYPH - 4, TFT_BLACK);
+    return divX + DIV_W + DIV_GAP;
+}
+
 void page_tabs::draw(m5gfx::M5Canvas& c, int activeTab) {
     // Tab 0 — Room (always present).
     const char* t0 = roomTitle();
@@ -56,16 +63,27 @@ void page_tabs::draw(m5gfx::M5Canvas& c, int activeTab) {
     int w0 = cjk::textWidth(t0, TAB_SCALE);
     cjk::drawText(c, x0, TAB_Y, t0, TAB_SCALE);
     if (activeTab == 0) c.fillRect(x0, UL_Y, w0, UL_H, TFT_BLACK);
+    int penEnd = x0 + w0;               // right edge of the last drawn tab
 
     // Tab 1 — Outside, only once the forest is a reachable page.
     if (g_game.outsideUnlocked) {
-        int divX = x0 + w0 + DIV_GAP;
-        c.fillRect(divX, TAB_Y + 2, DIV_W, TAB_GLYPH - 4, TFT_BLACK);
-
-        int x1 = divX + DIV_W + DIV_GAP;
+        int x1 = drawDivider(c, penEnd + DIV_GAP);
         const char* t1 = outsideTitle();
         int w1 = cjk::textWidth(t1, TAB_SCALE);
         cjk::drawText(c, x1, TAB_Y, t1, TAB_SCALE);
         if (activeTab == 1) c.fillRect(x1, UL_Y, w1, UL_H, TFT_BLACK);
+        penEnd = x1 + w1;
+    }
+
+    // Tab 2 — Trade, only once the trading post stands (Outside-tab precedent:
+    // a tab appears with its page). The trading post is a forest-gated craft, so
+    // Outside is always unlocked by the time this draws — the three tabs never
+    // exceed the 492px content width (see page_tabs.h).
+    if (g_game.buildings[B_TRADING_POST] > 0) {
+        int x2 = drawDivider(c, penEnd + DIV_GAP);
+        const char* t2 = tr("trading post");
+        int w2 = cjk::textWidth(t2, TAB_SCALE);
+        cjk::drawText(c, x2, TAB_Y, t2, TAB_SCALE);
+        if (activeTab == 2) c.fillRect(x2, UL_Y, w2, UL_H, TFT_BLACK);
     }
 }

@@ -10,15 +10,15 @@
 // 查看陷阱, an 80px band-row migrated off the Room page — upstream outside.js
 // actions; each cell long-presses to gatherWood/checkTraps, dashed + a draining
 // bar while cooling, 查看陷阱 drawn only when a trap stands) · worker assignment
-// bands, two per row (one 80px long-press band per UNLOCKED job, each split into
-// a −/＋ pair; paged with a "更多" band when they overflow 8). A worker band
-// whose stepper is a total no-op (no worker to remove AND no idle villager to
-// add) draws a dashed single-ring frame instead of the normal solid double ring
-// — see jobBandDisabled() in outside_page.cpp.
-// Every band is a type=1 Region -> onLocalAction(param, x): the action row
+// bands, two per row (one 80px long-press band per UNLOCKED job; a left label
+// zone + a right vertical ▲/▼ stepper (v0.3.3); paged with a "更多" band when
+// they overflow 8). A worker band whose stepper is a total no-op (no worker to
+// remove AND no idle villager to add) draws a dashed single-ring frame instead
+// of the normal solid double ring — see jobBandDisabled() in outside_page.cpp.
+// Every band is a type=1 Region -> onLocalAction(param, x, y): the action row
 // (param=PARAM_ACTIONS) maps the press column to gatherWood/checkTraps, while a
-// worker row (param=row) resolves the column and −/＋ half to assignWorker(job,
-// ±1). The page draws nothing until outsideUnlocked
+// worker row (param=row) resolves the column from x and the ▲/▼ half from y to
+// assignWorker(job, ±1). The page draws nothing until outsideUnlocked
 // (draw() returns false so the pager skips it in the ring). tick() settles
 // the offline economy and repaints on change.
 #pragma once
@@ -29,7 +29,7 @@ public:
     const char* name() const override { return "outside"; }
     bool draw(m5gfx::M5Canvas& canvas) override;
     const pages::Region* regions(int* n) const override;
-    void onLocalAction(uint8_t param, int x) override;  // param=row, x picks col + −/＋
+    void onLocalAction(uint8_t param, int x, int y) override;  // param=row, x picks col, y picks ▲/▼
     void tick(uint32_t nowMs) override;
     // wantsAwake stays false: the economy accrues offline via settle() on wake.
 

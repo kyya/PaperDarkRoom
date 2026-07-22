@@ -11,7 +11,7 @@
 #include "outside_page.h"
 #include "cjk_text.h"
 #include "pomo_page.h"          // PAD (shared layout authority)
-#include "page_tabs.h"          // shared two-tab header (生火间 │ 小型村落)
+#include "page_tabs.h"          // shared tab header (生火间 │ 村落 │ 贸易站)
 #include "pager.h"
 #include "game_state.h"
 #include <M5Unified.h>
@@ -34,7 +34,7 @@ constexpr int MAX_COLS  = 2;                 // two-column worker grid
 constexpr int MAX_SLOTS = MAX_ROWS * MAX_COLS;   // 8 worker cells / page
 
 // ---- vertical budget (§9.4), all measured to clear the 32px status bar. The
-// two-tab header (page_tabs::TAB_H = 72px) owns the top band, so the info block
+// shared tab header (page_tabs::TAB_H = 72px) owns the top band, so the info block
 // reflows below it and the page ends with a merged-in inventory section (the
 // standalone Inventory page was folded here, fw 0.2.2). fw 0.2.3 inserts a野外
 // action row (伐木 / 查看陷阱, migrated off the Room page — they are upstream
@@ -46,7 +46,8 @@ constexpr int MAX_SLOTS = MAX_ROWS * MAX_COLS;   // 8 worker cells / page
 //   header(0..72) · population(80) · buildings(120, <=4x2) · action row
 //   (258, 1x80: 伐木 | 查看陷阱) · worker bands (348, <=4x80) ·
 //   inventory (bordered box 720..916, legend "库存" embedded in the top
-//   border at 708..732, up to 6x2 rows inside).
+//   border at 708..732, up to 6x3 rows inside — v0.3.2: 2 cols -> 3 cols,
+//   the resource set outgrew 12 cells (trading post unlocks 6 more goods)).
 // ----------------------------------------------------------------------------
 constexpr int POP_Y     = 80;                // population row (below the header)
 constexpr int BLD_TOP   = 120;               // building summary top
@@ -69,12 +70,18 @@ constexpr int BAND_GAP  = 10;                // vertical gap between rows
 // A Dark Room's fieldset-style stores panel: a 1px rect (x 24..516) with the
 // "库存" legend embedded in the top border line (the line breaks around the
 // text, a few px of gap on each side — same idea as an HTML <fieldset>). Inside,
-// non-zero stores (whole units) then non-zero items fill a two-column grid,
-// each cell "name ... qty" with the name left-aligned and the quantity
-// right-aligned (two ends of the column, not a single flush-left string). 6
-// rows x 2 = 12 cells fit before the bottom border at 916 (< 928 status bar); a
-// 13th+ entry collapses the last cell to "…" (U+2026 is in the glyph closure).
-// Phase 1's usual non-zero count fits without the ellipsis.
+// non-zero stores (whole units) then non-zero items fill a THREE-column grid
+// (v0.3.2: was 2 cols — the trading post's 6 new buyable resources routinely
+// push the non-zero count past 12), each cell "name ... qty" with the name
+// left-aligned and the quantity right-aligned (two ends of the column, not a
+// single flush-left string). 6 rows x 3 = 18 cells fit before the bottom
+// border at 916 (< 928 status bar); a 19th+ entry collapses the last cell to
+// "…" (U+2026 is in the glyph closure). Column budget check (scratchpad/
+// measure_inv3.cpp): the widest name ("energy cell"/"alien alloy" -> 4 CJK
+// glyphs, 96px at scale=2) plus a worst-case abbreviated qty (v0.3.3 fmtAmount:
+// "999K" = 50px / "1.2M" = 48px, and real stockpiles hit the thousands) is
+// ~146px, inside the 148px column with a couple px to spare — every RES_KEY/
+// ITEM_KEY name clears its abbreviated quantity with no overlap.
 constexpr int INV_LABEL_Y     = 708;         // legend text top (glyph top)
 constexpr int INV_BOX_X0      = PAD;         // 24 — box left edge
 constexpr int INV_BOX_X1      = 540 - PAD;   // 516 — box right edge
@@ -96,27 +103,53 @@ constexpr int INV_ROW_GAP       = 12;        // clearance below the legend glyph
 constexpr int INV_ROW_TOP     = INV_LEGEND_BOTTOM + INV_ROW_GAP;  // 744 — first row top
 constexpr int INV_ROWH        = 28;          // per inventory cell row height
 constexpr int INV_ROWS        = 6;           // 744 + 6*28 = 912 (< INV_BOX_Y1 916)
-constexpr int INV_CELLS       = INV_ROWS * 2;   // 12 cells before overflow
-constexpr int INV_COL_GAP     = 16;          // gutter between the two columns
+constexpr int INV_COLS        = 3;           // v0.3.2: 2 -> 3 (trading post goods)
+constexpr int INV_CELLS       = INV_ROWS * INV_COLS;   // 18 cells before overflow
+constexpr int INV_COL_GAP     = 12;          // gutter between columns (v0.3.2: 16 -> 12
+                                              // to make room for a 3rd column)
 constexpr int INV_CONTENT_X0  = INV_BOX_X0 + INV_PAD_SIDE;   // 36
 constexpr int INV_CONTENT_X1  = INV_BOX_X1 - INV_PAD_SIDE;   // 504
-constexpr int INV_COL_W       = (INV_CONTENT_X1 - INV_CONTENT_X0 - INV_COL_GAP) / 2; // 226
-constexpr int INV_COLX[2] = { INV_CONTENT_X0, INV_CONTENT_X0 + INV_COL_W + INV_COL_GAP };  // {36, 278}
-// Two 240px columns with a 12px gutter fill the 492px content width. Each band
-// is a stepper: a centered "名 xN" label flanked by a big minus (left half) and
-// plus (right half); the widest measured label (144px) clears both glyphs. The
-// press x picks the column (COL_MID) and then the −/＋ half within that band.
+// 468px content / 3 cols with 2 gutters: (468 - 2*12) / 3 = 148 exactly
+// (3*148 + 2*12 == 468, so the 3rd column's right edge lands exactly on
+// INV_CONTENT_X1 — no leftover slack).
+constexpr int INV_COL_W       = (INV_CONTENT_X1 - INV_CONTENT_X0
+                                  - (INV_COLS - 1) * INV_COL_GAP) / INV_COLS; // 148
+constexpr int INV_COLX[INV_COLS] = {
+    INV_CONTENT_X0,                                       // 36
+    INV_CONTENT_X0 + (INV_COL_W + INV_COL_GAP),            // 196
+    INV_CONTENT_X0 + 2 * (INV_COL_W + INV_COL_GAP),        // 356
+};
+// Two 240px columns with a 12px gutter fill the 492px content width. Each worker
+// band (v0.3.3) is a left label zone + a right vertical stepper: "名 xN" left-
+// aligned in the label zone, and a stepper zone on the right with ▲ (increment,
+// upper half) over ▼ (decrement, lower half), split by a horizontal rule, the
+// zone itself set off by a vertical rule. The press x picks the column
+// (COL_MID); the press y then picks the stepper half (upper = +1, lower = −1) —
+// replacing v0.3.2's left−/right＋ x-split. The widest shown worker label
+// ("炼钢工人 x80" = 144px @24px, scratchpad/measure_jobs) clears the 148px label
+// zone, so the label and stepper never collide.
 constexpr int COL_GAP   = 12;
 constexpr int COL_W     = (CONTENT_W - COL_GAP) / 2;         // 240
 constexpr int COL_X0[MAX_COLS] = { PAD, PAD + COL_W + COL_GAP };   // {24, 276}
 constexpr int COL_MID   = 540 / 2;           // 270: x < MID => left column
 
-// Geometric −/＋ bars (no font dependency), positioned by local x within a band.
-// Minus centers in the left (decrement) half, plus in the right (increment) half.
-constexpr int SYM_LEN   = 40;                // bar long axis
-constexpr int SYM_TH    = 10;                // bar thickness
-constexpr int MINUS_LX  = 24;                // − center, local x in band
-constexpr int PLUS_LX   = COL_W - 24;        // + center, local x in band (216)
+// Worker-band stepper geometry (local x within a COL_W band). The label zone
+// takes the left ~150px; a vertical rule then a 66px stepper zone (12px right
+// inset) holds the two triangles. Triangles are drawn geometrically (fillTriangle)
+// — ▲/▼ are not guaranteed in the sparse 12px face, so never render them as text.
+constexpr int STEP_INSET = 12;                       // stepper zone right inset
+constexpr int STEP_W     = 66;                       // stepper zone width
+constexpr int STEP_X0    = COL_W - STEP_INSET - STEP_W;   // 162 — stepper zone left
+constexpr int STEP_DIV_X = STEP_X0 - 4;              // 158 — vertical rule x
+constexpr int LABEL_X    = 8;                        // label left pad in the band
+constexpr int TRI_HALF_W = 11;                       // triangle half base
+constexpr int TRI_HALF_H = 9;                        // triangle half height
+
+// Action-row buttons (伐木/查看陷阱) use a 36px label (v0.3.3, 原作「框大字小」),
+// unlike the worker bands which stay 24px (compound stepper controls, space is
+// tight beside the ▲▼ zone).
+constexpr int BTN_SCALE = 3;                 // 12px grid x3 = 36px (action label)
+constexpr int BTN_GLYPH = 12 * BTN_SCALE;    // 36px line box
 
 // "更多" pagination sentinel; real params are Job ids (J_HUNTER..J_ARMOURER).
 constexpr uint8_t A_MORE = 0xFF;
@@ -255,15 +288,15 @@ void drawBuildings(m5gfx::M5Canvas& c) {
 // One inventory cell: name left-aligned at the column's left edge, quantity
 // right-aligned at the column's right edge (two-ends alignment, matching
 // upstream's fieldset stores panel — not a single flush-left "name qty" run).
-// Row-major: idx -> row idx/2, column idx%2 (the old Inventory page's order).
+// Row-major: idx -> row idx/INV_COLS, column idx%INV_COLS (v0.3.2: 3 cols).
 void drawInvCell(m5gfx::M5Canvas& c, int idx, const char* name, long qty) {
-    int col = idx % 2, row = idx / 2;
+    int col = idx % INV_COLS, row = idx / INV_COLS;
     int x0 = INV_COLX[col];
     int y  = INV_ROW_TOP + row * INV_ROWH;
     cjk::drawText(c, x0, y, name, SCALE);
 
-    char qtyStr[16];
-    snprintf(qtyStr, sizeof(qtyStr), "%ld", qty);
+    char qtyStr[8];
+    fmtAmount((int32_t)qty, qtyStr, sizeof(qtyStr));   // v0.3.3: 1.2K/56K/1.2M
     int qw = cjk::textWidth(qtyStr, SCALE);
     cjk::drawText(c, x0 + INV_COL_W - qw, y, qtyStr, SCALE);
 }
@@ -292,9 +325,9 @@ void drawInventoryBox(m5gfx::M5Canvas& c) {
 
 // The merged-in inventory section: the bordered box + legend, then every
 // non-zero resource (whole units) followed by every non-zero crafted item,
-// two columns, name-left/qty-right. Past the 12-cell grid the last cell
-// collapses to "…" (Phase 1's usual count fits, so the ellipsis is a rare tail
-// guard); an empty inventory shows "空".
+// three columns (v0.3.2), name-left/qty-right. Past the 18-cell grid the last
+// cell collapses to "…" (Phase 1's usual count fits, so the ellipsis is a rare
+// tail guard); an empty inventory shows "空".
 void drawInventory(m5gfx::M5Canvas& c) {
     drawInventoryBox(c);
 
@@ -314,7 +347,7 @@ void drawInventory(m5gfx::M5Canvas& c) {
             drawInvCell(c, shown++, tr(ITEM_KEY[i]), (long)g_game.items[i]);
 
     if (overflow) {
-        int col = (INV_CELLS - 1) % 2, row = (INV_CELLS - 1) / 2;
+        int col = (INV_CELLS - 1) % INV_COLS, row = (INV_CELLS - 1) / INV_COLS;
         cjk::drawText(c, INV_COLX[col], INV_ROW_TOP + row * INV_ROWH, "…", SCALE);
     } else if (shown == 0) {
         cjk::drawText(c, INV_COLX[0], INV_ROW_TOP, tr("none"), SCALE);   // "空"
@@ -337,15 +370,6 @@ void drawDashedRect(m5gfx::M5Canvas& c, int x0, int y0, int w, int h) {
     }
 }
 
-// Cooldown fill colour: main.cpp runs the sprite at canvas.setColorDepth(
-// grayscale_8bit), and the panel underneath (ED047TC1) is a real 16-level
-// grayscale EPD (see platformio.ini) — not 1bpp. An RGB565 grey constant
-// converts cleanly through M5GFX's colour pipeline into a genuine mid-grey
-// pixel value, so a real light-grey fill (not a checkerboard dither) is the
-// right tool here. TFT_SILVER (0xC618 / 192,192,192) stays clearly lighter
-// than the 24px black label drawn on top of it.
-constexpr uint32_t COOL_FILL = TFT_SILVER;
-
 // A job band is disabled when NEITHER stepper half can act: no worker in the
 // job to pull back to idle (minus) AND no idle villager to add (plus).
 // assignWorker() has no cost/prerequisite gate of its own — a band never
@@ -358,14 +382,15 @@ bool jobBandDisabled(uint8_t job) {
 }
 
 // One half-width worker band at column origin x0: enabled = 2px frame (two
-// concentric rects); disabled (see jobBandDisabled) = a single 1px dashed
-// outer frame, no inner ring — the label stays normal 24px either way. A
-// centered "名 xN" label, a big minus bar in the left (decrement) half and a
-// big plus in the right (increment) half — a standard [− value +] stepper. No
-// divider: the ± glyphs at the edges convey the two tap zones, and the label
-// centers clear of both (widest measured label 144px << the room between the
-// glyphs). Press behavior is unchanged either way — a disabled band's press
-// still resolves to an engine no-op (low beep), same as it already did.
+// concentric rects); disabled (see jobBandDisabled) = a single 1px dashed outer
+// frame, no inner ring — the label stays normal 24px either way. Left: the
+// "名 xN" label, left-aligned in the label zone, vertically centered. Right: a
+// vertical stepper — a vertical rule sets off the stepper zone, a horizontal
+// rule splits it into an upper ▲ (increment) and lower ▼ (decrement) half, each
+// triangle drawn with fillTriangle (~22px, no font dependency). Press behavior:
+// a disabled band's press still resolves to an engine no-op (low beep), same as
+// before; the ▲/▼ are hit by the press y-half, not the exact triangle pixels
+// (see onLocalAction).
 void drawJobBand(m5gfx::M5Canvas& c, int x0, int top, const char* label,
                   bool disabled) {
     if (disabled) {
@@ -375,17 +400,25 @@ void drawJobBand(m5gfx::M5Canvas& c, int x0, int top, const char* label,
         c.drawRect(x0 + 1, top + 1, COL_W - 2, BAND_H - 2, TFT_BLACK);
     }
 
-    int cy = top + BAND_H / 2;
-    int lw = cjk::textWidth(label, SCALE);
-    cjk::drawText(c, x0 + (COL_W - lw) / 2, top + (BAND_H - GLYPH) / 2 - 4,
-                  label, SCALE);
+    // Label — left-aligned, vertically centered (24px).
+    cjk::drawText(c, x0 + LABEL_X, top + (BAND_H - GLYPH) / 2 - 4, label, SCALE);
 
-    int mx = x0 + MINUS_LX, px = x0 + PLUS_LX;
-    // minus (left/decrement half)
-    c.fillRect(mx - SYM_LEN / 2, cy - SYM_TH / 2, SYM_LEN, SYM_TH, TFT_BLACK);
-    // plus (right/increment half)
-    c.fillRect(px - SYM_LEN / 2, cy - SYM_TH / 2, SYM_LEN, SYM_TH, TFT_BLACK);
-    c.fillRect(px - SYM_TH / 2, cy - SYM_LEN / 2, SYM_TH, SYM_LEN, TFT_BLACK);
+    // Stepper zone: vertical rule + horizontal split rule.
+    int midY = top + BAND_H / 2;
+    c.drawFastVLine(x0 + STEP_DIV_X, top + 10, BAND_H - 20, TFT_BLACK);
+    c.drawFastHLine(x0 + STEP_X0, midY, STEP_W, TFT_BLACK);
+
+    int cx   = x0 + STEP_X0 + STEP_W / 2;     // stepper column center
+    int cyUp = top + BAND_H / 4;              // ▲ center (upper half)
+    int cyDn = top + 3 * BAND_H / 4;          // ▼ center (lower half)
+    // ▲ increment (apex up)
+    c.fillTriangle(cx, cyUp - TRI_HALF_H,
+                   cx - TRI_HALF_W, cyUp + TRI_HALF_H,
+                   cx + TRI_HALF_W, cyUp + TRI_HALF_H, TFT_BLACK);
+    // ▼ decrement (apex down)
+    c.fillTriangle(cx, cyDn + TRI_HALF_H,
+                   cx - TRI_HALF_W, cyDn - TRI_HALF_H,
+                   cx + TRI_HALF_W, cyDn - TRI_HALF_H, TFT_BLACK);
 }
 
 // The trailing "更多" cell: half-width frame, centered label, no −/＋ (either
@@ -400,13 +433,13 @@ void drawMoreBand(m5gfx::M5Canvas& c, int x0, int top, const char* label) {
 
 // One half-width野外 action cell (伐木 / 查看陷阱) at column origin x0 — the
 // same frame language the Room page uses (drawBand): enabled = solid double
-// ring; unavailable/cooling = 1px dashed outer frame. A live cooldown fills
-// the band's interior with a full-height grey block growing in from the left
-// (width = the fraction of the cooldown remaining, so it drains back to 0 as
-// time passes) — the upstream A Dark Room button-cooldown affordance — with the
-// 24px label painted on top so it stays legible. Geometry is identical to a
-// worker band; only the −/＋ glyphs and the stepper semantics are absent — this
-// is a single long-press verb.
+// ring; unavailable/cooling = 1px dashed outer frame. A live cooldown draws a
+// thin progress bar hugging the band's inner bottom edge (v0.3.3: reverted from
+// v0.3.2's whole-button grey fill, which read as too heavy on the panel — Room
+// drawBand parity): an 8px-tall outlined bar inset 12px, its inner fill width =
+// the fraction of the cooldown remaining, draining left-anchored to 0. The 36px
+// label centers in the band, clear above the bar. Geometry is identical to a
+// worker band; only the stepper is absent — this is a single long-press verb.
 void drawActionBand(m5gfx::M5Canvas& c, int x0, int top, const char* label,
                     bool enabled, int coolLeft, int coolTotal) {
     if (enabled) {
@@ -416,16 +449,18 @@ void drawActionBand(m5gfx::M5Canvas& c, int x0, int top, const char* label,
         drawDashedRect(c, x0, top, COL_W, ACT_H);
     }
 
-    if (coolTotal > 0 && coolLeft > 0) {                      // draining cooldown
-        int fx0 = x0 + 2, fy0 = top + 2;
-        int fwMax = COL_W - 4, fh = ACT_H - 4;
-        int fw = (int)((int64_t)fwMax * coolLeft / coolTotal);   // drains to 0
-        if (fw > 0) c.fillRect(fx0, fy0, fw, fh, COOL_FILL);
-    }
+    int lw = cjk::textWidth(label, BTN_SCALE);
+    cjk::drawText(c, x0 + (COL_W - lw) / 2, top + (ACT_H - BTN_GLYPH) / 2 - 4,
+                  label, BTN_SCALE);
 
-    int lw = cjk::textWidth(label, SCALE);
-    cjk::drawText(c, x0 + (COL_W - lw) / 2, top + (ACT_H - GLYPH) / 2 - 4,
-                  label, SCALE);
+    if (coolTotal > 0 && coolLeft > 0) {                      // draining cooldown
+        int barX0 = x0 + 12, barX1 = x0 + COL_W - 12;
+        int barY = top + ACT_H - 16, barH = 8;
+        c.drawRect(barX0, barY, barX1 - barX0, barH, TFT_BLACK);
+        int inner = barX1 - barX0 - 4;
+        int fw = (int)((int64_t)inner * coolLeft / coolTotal);   // drains L-anchored
+        if (fw > 0) c.fillRect(barX0 + 2, barY + 2, fw, barH - 4, TFT_BLACK);
+    }
 }
 
 // Paint the whole action row. Left column = 伐木 (gather wood): always offered
@@ -486,7 +521,7 @@ const pages::Region* OutsidePage::regions(int* n) const {
 bool OutsidePage::draw(m5gfx::M5Canvas& c) {
     if (!g_game.outsideUnlocked) return false;
     c.fillSprite(TFT_WHITE);
-    page_tabs::draw(c, 1);           // two-tab header, Outside active
+    page_tabs::draw(c, 1);           // shared tab header, Outside active
     drawPopRow(c);
     drawBuildings(c);
 
@@ -507,12 +542,17 @@ bool OutsidePage::draw(m5gfx::M5Canvas& c) {
     return true;
 }
 
-// Long-press on a band -> assign/unassign a villager. x resolves the column and
-// then the band half: the left half decrements, the right increments. Any real
-// change high-beeps, persists, and repaints; a no-op (no idle population to add,
-// or already 0) low beeps. "更多" flips to the next batch of jobs. save() lives
-// here (the engine action does not persist itself — single write, no double-save).
-void OutsidePage::onLocalAction(uint8_t param, int x) {
+// Long-press on a band -> assign/unassign a villager. x resolves the column;
+// then, within the hit band, the press y picks the stepper half — upper half
+// (▲) increments, lower half (▼) decrements (v0.3.3, replacing the old left−/
+// right＋ x-split). Each half is a ~40px sub-target: below §9.3's 65px pointer-
+// target guideline, but the direction is trivially reversible (added one too
+// many? press ▼) and the whole band still clears the 80px long-press floor — an
+// accepted trade for the clearer stepper look. Any real change high-beeps,
+// persists, and repaints; a no-op (no idle population to add, or already 0) low
+// beeps. "更多" flips to the next batch of jobs. save() lives here (the engine
+// action does not persist itself — single write, no double-save).
+void OutsidePage::onLocalAction(uint8_t param, int x, int y) {
     // 野外 action row (伐木 / 查看陷阱) — the migrated Room verbs. Same GameState
     // path and feedback as the Room page: the press column picks the verb, a
     // success high-beeps + persists + repaints, a rejected/blank press low-beeps.
@@ -539,8 +579,8 @@ void OutsidePage::onLocalAction(uint8_t param, int x) {
     }
 
     // param is the worker ROW index; the press x resolves the column (x < COL_MID
-    // = left) and then, inside the hit band, the −/＋ half. An empty cell (odd
-    // count's trailing column) low-beeps and does nothing.
+    // = left), the press y the stepper half (below). An empty cell (odd count's
+    // trailing column) low-beeps and does nothing.
     int row  = param;
     int col  = (x < COL_MID) ? 0 : 1;
     int slot = row * MAX_COLS + col;
@@ -557,8 +597,10 @@ void OutsidePage::onLocalAction(uint8_t param, int x) {
     if (job == J_GATHERER || job >= JOB_COUNT) { M5.Speaker.tone(600, 120); return; }
 
     int before = (int)g_game.workers[job];
-    // −/＋ against the hit band's own midline (left half decrements).
-    int delta = (x < COL_X0[col] + COL_W / 2) ? -1 : +1;
+    // Stepper direction from the press y-half against the hit band's midline:
+    // upper half (▲) increments, lower half (▼) decrements.
+    int bandTop = BAND_TOP + row * (BAND_H + BAND_GAP);
+    int delta = (y < bandTop + BAND_H / 2) ? +1 : -1;
     g_game.assignWorker(job, delta);
 
     if ((int)g_game.workers[job] != before) {   // a villager actually moved

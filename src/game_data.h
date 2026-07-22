@@ -12,6 +12,7 @@
 #pragma once
 #include <stdint.h>
 #include <stddef.h>
+#include <stdio.h>
 
 namespace adr {
 
@@ -248,6 +249,26 @@ static const uint8_t JOB_REQ_BLD[JOB_COUNT] = {
 
 // Builder wood income once Helping (level 4): +2 wood / 10s (room.js onArrival).
 constexpr int32_t BUILDER_WOOD_DFP = 2 * FP;
+
+// ---- Compact quantity formatter (v0.3.3) ----------------------------------
+// Real play stockpiles wood/fur into the thousands, and the Outside inventory
+// box's 3-column grid + the Trade balance row have no room for a 5-6 digit run.
+// Abbreviate above 1000, ASCII only (shares the existing mixed CJK/ASCII draw
+// path): v<1000 verbatim; 1000..9999 -> "1.2K" (one decimal, TRUNCATED, never
+// rounded up past a digit — 1999 stays "1.9K"); 10000..999999 -> "12K".."999K"
+// (integer K); 1e6..9.99e6 -> "1.2M" (one decimal, truncated); >=1e7 -> "12M"
+// (integer M). Output is at most 5 chars + NUL. Narrative log text and the
+// population / building counts stay full-number (small values, never abbreviate).
+inline void fmtAmount(int32_t v, char* out, size_t cap) {
+    if (v < 0) v = 0;
+    if (v < 1000)          { snprintf(out, cap, "%ld", (long)v); return; }
+    if (v < 10000)         { snprintf(out, cap, "%ld.%ldK",
+                                      (long)(v / 1000), (long)((v % 1000) / 100)); return; }
+    if (v < 1000000)       { snprintf(out, cap, "%ldK", (long)(v / 1000)); return; }
+    if (v < 10000000)      { snprintf(out, cap, "%ld.%ldM",
+                                      (long)(v / 1000000), (long)((v % 1000000) / 100000)); return; }
+    snprintf(out, cap, "%ldM", (long)(v / 1000000));
+}
 
 // ---- Trap drops (outside.js TrapDrops) ------------------------------------
 struct TrapDrop { int32_t rollUnderMilli; uint8_t res; const char* msg; };

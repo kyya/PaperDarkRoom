@@ -26,33 +26,44 @@ extern M5Canvas canvas;
 using namespace adr;
 
 namespace {
-constexpr int SCALE     = 2;                 // 12px grid x2 = 24px CJK
+constexpr int SCALE     = 2;                 // 12px grid x2 = 24px CJK (log stream)
+constexpr int BTN_SCALE = 3;                 // 12px grid x3 = 36px CJK (button labels,
+                                             // v0.3.3: 原作「框大字小」— see drawBand)
 constexpr int CONTENT_W = 540 - 2 * PAD;     // 492px usable (§9.2)
-constexpr int GLYPH     = 12 * SCALE;        // 24px line box
+constexpr int BTN_GLYPH = 12 * BTN_SCALE;    // 36px line box (button label)
 constexpr int MAX_ROWS  = 5;                 // matches RoomPage::MAX_BANDS (rows)
 constexpr int MAX_COLS  = 2;                 // two-column button grid
 constexpr int MAX_SLOTS = MAX_ROWS * MAX_COLS;   // 10 action cells / page
 
 // ---- vertical budget (§9.4): the two-tab header (page_tabs::TAB_H = 72px) owns
-// the top band, so the fire/temp state line + log stream reflow BELOW it. Long-
-// press bands shrank from 92 to 80px (§9.3's hard floor — do not go lower) to
-// answer "buttons too big"; the 68px this frees (5*92+4*12=508 -> 5*80+4*10=440)
-// goes entirely to the log: LOG_LINES 8 -> 10 (+60px) and the log/button gap
-// 16 -> 24px (+8px), so BTN_TOP moves from 372 to 440 and the grid still ends at
-// 880 (< 928 status bar) — the bottom margin is unchanged. Resource/inventory
-// summary lives on the Outside page's lower band. ---------------------------
-constexpr int STATE_Y   = page_tabs::CONTENT_TOP + 4;   // fire/temp line (76)
-constexpr int LOG_TOP   = STATE_Y + 40;      // log stream top (116)
+// the top band, so the log stream reflows BELOW it. Long-press bands shrank
+// from 92 to 80px (§9.3's hard floor — do not go lower) to answer "buttons too
+// big"; the 68px this frees (5*92+4*12=508 -> 5*80+4*10=440) goes entirely to
+// the log: LOG_LINES 8 -> 10 (+60px) and the log/button gap 16 -> 24px (+8px),
+// so BTN_TOP moves from 372 to 440 and the grid still ends at 880 (< 928 status
+// bar) — the bottom margin is unchanged. Resource/inventory summary lives on
+// the Outside page's lower band.
+// v0.3.1 feedback 1 ("火堆熊熊燃烧 房间很热不应该常驻 原作也没有常驻"): the
+// persistent fire/temp state line that used to open this band (STATE_Y, 76..
+// 116) is gone — upstream never shows it as a fixed header either, only as a
+// notification on change (see game_state.cpp onFireChange/adjustTemp, which
+// now push "the fire is {0}" / "the room is {0}" into the log on every
+// change). The log reclaims that band: it moves up to LOG_TOP=76 and gains the
+// freed line back (LOG_LINES 10 -> 11), landing well clear of BTN_TOP (440)
+// with room to spare. --------------------------------------------------------
+constexpr int LOG_TOP   = page_tabs::CONTENT_TOP + 4;   // log stream top (76)
 constexpr int LOG_LINEH = 30;
-constexpr int LOG_LINES = 10;                // 10 x 30 = 300px band -> ends 416,
-                                             // 24px clear of BTN_TOP
+constexpr int LOG_LINES = 11;                // 11 x 30 = 330px band -> ends 406,
+                                             // 34px clear of BTN_TOP
 constexpr int BTN_TOP   = 440;               // first action row top (was 372)
 constexpr int ROOM_BTN_H = 80;               // long-press band (§9.3: >=80px, floor)
 constexpr int BTN_GAP   = 10;                // vertical gap between rows
 // Two columns of 240px with a 12px gutter fill the 492px content width; each
-// band's 24px label centers in its column (widest measured label 96px << the
-// ~232px column text budget, so every action fits — pure two-column, no
-// full-width exceptions). x < COL_MID picks the left column (onLocalAction).
+// band's 36px label (v0.3.3) centers in its column. Widest measured label at
+// 36px is "更多 (n/n)" = 180px and any 4-glyph craft name (狩猎小屋 = 144px),
+// both << the ~232px column text budget (scratchpad/measure_labels), so every
+// action fits at the larger size — pure two-column, no full-width exceptions.
+// x < COL_MID picks the left column (onLocalAction).
 constexpr int COL_GAP   = 12;
 constexpr int COL_W     = (CONTENT_W - COL_GAP) / 2;         // 240
 constexpr int COL_X0[MAX_COLS] = { PAD, PAD + COL_W + COL_GAP };   // {24, 276}
@@ -61,7 +72,10 @@ constexpr int BTN_AREA_BOTTOM = BTN_TOP + (MAX_ROWS - 1) * (ROOM_BTN_H + BTN_GAP
                                 + ROOM_BTN_H;   // 880 (5 rows, clears status bar)
 
 // Action codes carried in a Region param (uint8). 0..4 are the fixed verbs;
-// A_CRAFT_BASE+craftId means "build/craft that craftable".
+// A_CRAFT_BASE+craftId means "build/craft that craftable". Craft ids run
+// [10, 10+24) = 34. (Trading-post buying moved to its own page in v0.3.3 — see
+// trade_page.cpp — so the Room stays build/craft-focused; the A_TRADE_BASE code
+// range this page carried in v0.3.2 is gone with it.)
 enum : uint8_t {
     A_LIGHT  = 0, A_STOKE = 1, A_GATHER = 2, A_TRAPS = 3, A_MORE = 4,
     A_CRAFT_BASE = 10
@@ -147,15 +161,32 @@ int wrapLineCount(const char* utf8, int w, int scale) {
 }
 
 // Render one log entry's en_key into `out` as official zh, splicing its arg if
-// the template carries a {0} (population lines pass a count).
+// the template carries a {0}. Most {0} templates take a number (population
+// lines pass a count) but "the fire is {0}" / "the room is {0}" (v0.3.1
+// feedback 1: pushed by game_state.cpp on every fire/temp change now that the
+// persistent state line is gone) pass a Fire/Temp enum value instead — look
+// that up in FIRE_TEXT/TEMP_TEXT and splice the translated status word.
+// A repeated entry (v0.3.1: GameState::pushLog collapses a repeat of the
+// newest line instead of scrolling a duplicate — see game_state.h LogEntry::
+// count) gets an ASCII " x<count>" suffix, same "CJK label x%u" mixed-script
+// convention outside_page.cpp already uses for worker band labels.
 void logText(const LogEntry& e, char* out, size_t cap) {
     const char* zh = tr(e.enKey);
-    if (e.hasArg && strstr(zh, "{0}")) {
+    char base[160];
+    if (e.hasArg && strcmp(e.enKey, "the fire is {0}") == 0) {
+        uint8_t idx = (e.arg >= 0 && e.arg < 5) ? (uint8_t)e.arg : 0;
+        fmt1(base, sizeof(base), zh, tr(FIRE_TEXT[idx]));
+    } else if (e.hasArg && strcmp(e.enKey, "the room is {0}") == 0) {
+        uint8_t idx = (e.arg >= 0 && e.arg < 5) ? (uint8_t)e.arg : 0;
+        fmt1(base, sizeof(base), zh, tr(TEMP_TEXT[idx]));
+    } else if (e.hasArg && strstr(zh, "{0}")) {
         char num[16]; snprintf(num, sizeof(num), "%ld", (long)e.arg);
-        fmt1(out, cap, zh, num);
+        fmt1(base, sizeof(base), zh, num);
     } else {
-        snprintf(out, cap, "%s", zh);
+        snprintf(base, sizeof(base), "%s", zh);
     }
+    if (e.count > 1) snprintf(out, cap, "%s x%u", base, (unsigned)e.count);
+    else             snprintf(out, cap, "%s", base);
 }
 
 // Is craftable id offerable now (unlocked, workshop-gated, under maximum)? Cost
@@ -194,8 +225,8 @@ bool isActionEnabled(uint8_t code, uint32_t now) {
             return g_game.stores[R_WOOD] >= STOKE_FIRE_WOOD * FP;
         case A_GATHER: return g_game.cooldownLeft(1, now) == 0;
         case A_TRAPS:  return g_game.cooldownLeft(2, now) == 0;
-        default: {                                        // craftable id
-            uint8_t id = (uint8_t)(code - A_CRAFT_BASE);
+        default: {
+            uint8_t id = (uint8_t)(code - A_CRAFT_BASE);   // craftable id
             if (id >= CRAFT_COUNT) return false;
             const Craftable& c = CRAFT[id];
             if (g_game.temp <= TEMP_COLD) return false;   // "builder just shivers"
@@ -214,7 +245,8 @@ bool isActionEnabled(uint8_t code, uint32_t now) {
 
 // Ordered action list for the current game state: fire verb, then every
 // offerable craftable. Returns the count. (gather wood / check traps are野外
-// actions — upstream outside.js, not room.js — so they live on the Outside page.)
+// actions — upstream outside.js, not room.js — so they live on the Outside page;
+// trading-post buying moved to the Trade page in v0.3.3.)
 int buildActions(uint8_t* out, int cap) {
     int n = 0;
     if (n < cap) out[n++] = (g_game.fire == FIRE_DEAD) ? A_LIGHT : A_STOKE;
@@ -308,16 +340,7 @@ int layoutBands(pages::Region* regionsOut, uint8_t* slotCodes, BandView* views,
 
 // ---- drawing pieces --------------------------------------------------------
 
-// Fire + temperature state line from the official templated strings.
-void drawStateLine(m5gfx::M5Canvas& c) {
-    char fire[64], room[64];
-    fmt1(fire, sizeof(fire), tr("the fire is {0}"), tr(FIRE_TEXT[g_game.fire]));
-    fmt1(room, sizeof(room), tr("the room is {0}"), tr(TEMP_TEXT[g_game.temp]));
-    int x = cjk::drawText(c, PAD, STATE_Y, fire, SCALE);
-    cjk::drawText(c, x + 2 * GLYPH, STATE_Y, room, SCALE);   // gap then room
-}
-
-// Log stream: newest on top, wrapped, filling the 10-line band. Picks how many
+// Log stream: newest on top, wrapped, filling the 11-line band. Picks how many
 // recent entries fit (via wrapLineCount) before drawing so nothing overruns.
 void drawLog(m5gfx::M5Canvas& c) {
     int start = g_game.logCount;   // lowest index that still fits
@@ -336,6 +359,21 @@ void drawLog(m5gfx::M5Canvas& c) {
     }
 }
 
+// The log band's partial-refresh target (buttonAreaRect parity): the whole log
+// rect plus a 2px bleed. Used to surface a failed long-press's reason (v0.3.1
+// feedback 2) immediately, instead of waiting up to 1s for the next tick.
+pages::Rect logAreaRect() {
+    return pages::Rect{ 0, LOG_TOP - 2, 540, LOG_LINES * LOG_LINEH + 4 };
+}
+
+// Clear the log rect and repaint it into `c` (for the partial-refresh path —
+// the surrounding full-page pixels already sit in the canvas).
+void repaintLog(m5gfx::M5Canvas& c) {
+    pages::Rect r = logAreaRect();
+    c.fillRect(r.x, r.y, r.w, r.h, TFT_WHITE);
+    drawLog(c);
+}
+
 // 1px dashed rectangle, 4px on / 4px off — the unavailable-button frame.
 void drawDashedRect(m5gfx::M5Canvas& c, int x, int y, int w, int h) {
     const int on = 4, per = 8;
@@ -348,24 +386,17 @@ void drawDashedRect(m5gfx::M5Canvas& c, int x, int y, int w, int h) {
                             c.drawPixel(xr, y + i, TFT_BLACK); }
 }
 
-// Cooldown fill colour: main.cpp runs the sprite at canvas.setColorDepth(
-// grayscale_8bit), and the panel underneath (ED047TC1) is a real 16-level
-// grayscale EPD (see platformio.ini) — not 1bpp. An RGB565 grey constant
-// converts cleanly through M5GFX's colour pipeline into a genuine mid-grey
-// pixel value, so a real light-grey fill (not a checkerboard dither) is the
-// right tool here. TFT_SILVER (0xC618 / 192,192,192) stays clearly lighter
-// than the 24px black label drawn on top of it.
-constexpr uint32_t COOL_FILL = TFT_SILVER;
-
 // One half-width action band at column origin x0. Frame carries the availability
 // cue: enabled = the two solid rings (2px); unavailable (condition not met /
 // cooling) = a single 1px dashed outer frame, no inner ring. A cooling band
-// fills its interior with a full-height grey block growing in from the left —
-// width = the fraction of the cooldown remaining, so it drains back to 0 as
-// time passes (the upstream A Dark Room button-cooldown affordance). The 24px
-// label paints on top of the fill so it stays legible either way. All geometry
-// is clipped to this column's [x0, x0+COL_W) so the two columns never bleed
-// into each other.
+// draws a thin progress bar hugging the band's inner bottom edge (v0.3.3: the
+// whole-button grey fill of v0.3.2 read as too heavy on the real panel — reverted
+// to the earlier thin-bar affordance, geometry matching commit 6304244~1's
+// drawBand): an 8px-tall outlined bar inset 12px, its inner fill width = the
+// fraction of the cooldown remaining, draining left-anchored back to 0 as time
+// passes. The 36px label centers in the band, clear above the bar (label ink
+// ends ~top+54, bar sits at top+64 — no overlap). All geometry is clipped to
+// this column's [x0, x0+COL_W) so the two columns never bleed into each other.
 void drawBand(m5gfx::M5Canvas& c, int x0, int top, const char* label,
               bool enabled, int coolLeft, int coolTotal) {
     if (enabled) {
@@ -375,16 +406,18 @@ void drawBand(m5gfx::M5Canvas& c, int x0, int top, const char* label,
         drawDashedRect(c, x0, top, COL_W, ROOM_BTN_H);
     }
 
-    if (coolTotal > 0 && coolLeft > 0) {                      // draining cooldown
-        int fx0 = x0 + 2, fy0 = top + 2;
-        int fwMax = COL_W - 4, fh = ROOM_BTN_H - 4;
-        int fw = (int)((int64_t)fwMax * coolLeft / coolTotal);   // drains to 0
-        if (fw > 0) c.fillRect(fx0, fy0, fw, fh, COOL_FILL);
-    }
+    int lw = cjk::textWidth(label, BTN_SCALE);
+    cjk::drawText(c, x0 + (COL_W - lw) / 2, top + (ROOM_BTN_H - BTN_GLYPH) / 2 - 4,
+                  label, BTN_SCALE);
 
-    int lw = cjk::textWidth(label, SCALE);
-    cjk::drawText(c, x0 + (COL_W - lw) / 2, top + (ROOM_BTN_H - GLYPH) / 2 - 4,
-                  label, SCALE);
+    if (coolTotal > 0 && coolLeft > 0) {                      // draining cooldown
+        int barX0 = x0 + 12, barX1 = x0 + COL_W - 12;
+        int barY = top + ROOM_BTN_H - 16, barH = 8;
+        c.drawRect(barX0, barY, barX1 - barX0, barH, TFT_BLACK);
+        int inner = barX1 - barX0 - 4;
+        int fw = (int)((int64_t)inner * coolLeft / coolTotal);   // drains L-anchored
+        if (fw > 0) c.fillRect(barX0 + 2, barY + 2, fw, barH - 4, TFT_BLACK);
+    }
 }
 
 // Paint the whole button area (clears it first) from the given slot views,
@@ -410,9 +443,8 @@ const pages::Region* RoomPage::regions(int* n) const {
 
 bool RoomPage::draw(m5gfx::M5Canvas& c) {
     c.fillSprite(TFT_WHITE);
-    page_tabs::draw(c, 0);           // two-tab header, Room active
-    drawStateLine(c);                // fire/temp line, reflowed below the header
-    drawLog(c);
+    page_tabs::draw(c, 0);           // shared tab header, Room active
+    drawLog(c);                      // log stream, reflowed up into the header gap
     BandView views[MAX_SLOTS];
     m_regionCount = layoutBands(m_regions, m_slotCodes, views, m_page, epochNow(),
                                 &m_slotCount);
@@ -421,10 +453,18 @@ bool RoomPage::draw(m5gfx::M5Canvas& c) {
 }
 
 // Long-press on a band -> the mapped engine action. Success: high beep, persist,
-// full redraw; failure (cost/cooldown/locked): low beep, no redraw. "more" flips
-// to the next batch. save() lives here because the engine actions do not persist
-// themselves (single write — no double-save).
-void RoomPage::onLocalAction(uint8_t param, int x) {
+// full redraw. Failure branches by reason (v0.3.1 feedback 2 — "disabled 按钮
+// 长按要说明原因"): cost-insufficient (RC_ERR_COST) and room-too-cold
+// (RC_ERR_COLD) both already got their upstream-exact reason pushed into the
+// log by the engine itself (game_state.cpp lightFire/stokeFire/makeCraftable) —
+// this just repaints the log band immediately so it's visible without waiting up
+// to 1s for the next tick. A live cooldown (RC_ERR_COOLDOWN) stays silent: the
+// draining progress bar already explains itself, and re-notifying on every
+// cooling press would spam the log. "more" flips to the next batch. save()
+// lives here because the engine actions do not persist themselves (single
+// write — no double-save). (y is unused — the Room grid resolves columns by x.)
+void RoomPage::onLocalAction(uint8_t param, int x, int y) {
+    (void)y;
     uint32_t now = epochNow();
 
     // param is the ROW index; the press x resolves which of the row's two
@@ -461,9 +501,12 @@ void RoomPage::onLocalAction(uint8_t param, int x) {
         M5.Speaker.tone(1800, 80);
         g_game.save();
         pager::showPage(pager::currentRingIndex(), false);
+    } else if (r == RC_ERR_COST || r == RC_ERR_COLD) {
+        M5.Speaker.tone(600, 120);
+        repaintLog(canvas);
+        pager::partialRefresh(logAreaRect(), pages::RefreshMode::FAST);
     } else {
-        M5.Speaker.tone(600, 120);   // the engine may have logged the reason;
-                                     // the low beep is the immediate cue
+        M5.Speaker.tone(600, 120);   // cooldown / locked / max — unchanged, silent
     }
 }
 
