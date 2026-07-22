@@ -5,6 +5,8 @@
 #include "client_pages.h"
 #include "preview.h"
 #include "event_modal.h"
+#include "page_tabs.h"
+#include "assign_page.h"
 #include <M5Unified.h>
 #include <climits>
 #include <cstring>
@@ -155,6 +157,33 @@ static pages::Page* pageAt(int ring) {
     if (ring < 0 || ring >= ringCount()) return nullptr;
     if (ring < nSrv) { s_serverPage.bind(ring); return &s_serverPage; }
     return client_pages::at(ring - nSrv);
+}
+
+// How many ring slots are currently displayable (Page::available() true) — the
+// status bar draws exactly this many page dots. A conditionally-hidden game page
+// (un-unlocked Outside/Trade, a closed AssignPage) is available()==false and
+// drops out, so the dot count matches what the user can actually page to. Reads
+// the same predicate draw() gates on, so a dot never lies about reachability.
+int visibleCount() {
+    int n = ringCount(), c = 0;
+    for (int r = 0; r < n; r++) {
+        pages::Page* pg = pageAt(r);
+        if (pg && pg->available()) c++;
+    }
+    return c;
+}
+
+// The given ring index's ordinal among visible pages (0-based) = how many
+// available() slots precede it. For the current page (always available — it just
+// drew) this is the solid dot's position. Ring indices past ringCount clamp to
+// the visible total.
+int visibleIndexOf(int ringIdx) {
+    int n = ringCount(), idx = 0;
+    for (int r = 0; r < ringIdx && r < n; r++) {
+        pages::Page* pg = pageAt(r);
+        if (pg && pg->available()) idx++;
+    }
+    return idx;
 }
 
 // Resolve the ring index of the page whose name() matches the persisted
@@ -326,6 +355,37 @@ void payGhostDebtIfDue() {
 // keeps the count at 3; a momentary dip to <3 restarts the timer — acceptable.
 static const uint32_t THREE_FINGER_MS = 600;
 
+// Hit-test the current page's region table at (tx,ty) and dispatch the matching
+// region exactly the way a long-press does: type=1 -> the page's firmware-local
+// onLocalAction; type=0 -> post a pending host tap (+ the confirm chime). Returns
+// true when a region was hit. Shared by the long-press AND the new short-tap path
+// (fw 0.4.x made a tap trigger the same action) so the two can never drift — the
+// press coords are content-frame (see the click-path note below); ty picks the
+// band, tx resolves the column/stepper the page cares about.
+static bool dispatchRegion(int ring, int tx, int ty) {
+    pages::Page* pg = pageAt(ring);
+    int rn = 0;
+    const pages::Region* tbl = pg ? pg->regions(&rn) : nullptr;
+    for (int k = 0; k < rn; k++) {
+        if (ty < tbl[k].y0 || ty >= tbl[k].y1) continue;
+        if (tbl[k].type == 1) {
+            pg->onLocalAction(tbl[k].param, tx, ty);
+            Serial.printf("[pager] local-action page=%d region=%d param=%u\n",
+                          ring, k, tbl[k].param);
+        } else {
+            s_tapSeq++;
+            s_pendingSeq  = s_tapSeq;
+            s_pendingPage = ring;
+            s_pendingItem = k;
+            M5.Speaker.tone(1800, 80);   // confirm the press landed on a region
+            Serial.printf("[pager] region-press page=%d region=%d seq=%lu\n",
+                          ring, k, (unsigned long)s_tapSeq);
+        }
+        return true;
+    }
+    return false;
+}
+
 bool handleTouch() {
     int tc = M5.Touch.getCount();
     uint32_t nowMs = millis();
@@ -339,18 +399,20 @@ bool handleTouch() {
     }
 
     // Event modal (research.md §4.1): while a random event is up it owns every
-    // touch. A single-finger long-press on a button band drives events::choose()
-    // (event_modal::handleHold does the hit-test, tones, repaint/exit). A short
-    // tap is swallowed (no page turn); a >=3-finger grip is swallowed too, so the
-    // preview switcher can't open over a live event. Sits before the three-finger
-    // branch precisely to win that race.
+    // touch. A single-finger press on a button band drives events::choose()
+    // (event_modal::handleHold does the hit-test, tones, repaint/exit) — fw 0.4.x
+    // accepts a SHORT TAP as well as a long-press, so the modal's choice buttons
+    // are tappable like everything else. Page turns and tab switches stay inert
+    // here (this branch consumes everything and never falls through); a >=3-finger
+    // grip is swallowed too, so the preview switcher can't open over a live event.
+    // Sits before the three-finger branch precisely to win that race.
     if (event_modal::active()) {
         for (int i = 0; tc <= 1 && i < tc; i++) {
             auto t = M5.Touch.getDetail(i);
-            if (!t.wasHold()) continue;
+            if (!t.wasHold() && !t.wasClicked()) continue;
             return event_modal::handleHold(t.x, t.y);   // coords already content-frame
         }
-        return true;                               // consume short taps / multi-touch
+        return true;                               // consume anything else / multi-touch
     }
 
     // Three-finger long-press detection (before any single-finger handling).
@@ -414,38 +476,11 @@ bool handleTouch() {
     for (int i = 0; tc <= 1 && i < tc; i++) {
         auto t = M5.Touch.getDetail(i);
         if (!t.wasHold()) continue;
-        // Coords reaching pager code are content-frame at rot 2 (full
-        // rationale on the click path below) — no correction needed.
-        int tx = t.x, ty = t.y;                        // ty picks the band; the
-                                                       // page resolves the column
-                                                       // (tx) and stepper half (ty)
-        int ring = currentRingIndex();
-        pages::Page* pg = pageAt(ring);
-        int rn = 0;
-        const pages::Region* tbl = pg ? pg->regions(&rn) : nullptr;
-        int idx = -1;
-        const pages::Region* hb = nullptr;
-        for (int k = 0; k < rn; k++)
-            if (ty >= tbl[k].y0 && ty < tbl[k].y1) { idx = k; hb = &tbl[k]; break; }
-        if (hb && hb->type == 1) {
-            // Firmware-local action (fw 0.9.6): consumed here, never reported
-            // to the host. The pager stays page-agnostic — it dispatches to the
-            // current page's onLocalAction (Page vfunc); the page owns what the
-            // action means and any feedback tones.
-            pg->onLocalAction(hb->param, tx, ty);
-            Serial.printf("[pager] local-action page=%d region=%d param=%u\n",
-                          ring, idx, hb->param);
-        } else if (hb) {
-            s_tapSeq++;
-            s_pendingSeq = s_tapSeq;
-            s_pendingPage = ring;
-            s_pendingItem = idx;
-            M5.Speaker.tone(1800, 80);   // same chime as the connect beep —
-                                         // confirms the long-press actually
-                                         // landed on a region, not just anywhere
-            Serial.printf("[pager] long-press page=%d region=%d seq=%lu\n",
-                          ring, idx, (unsigned long)s_tapSeq);
-        }
+        // Coords reaching pager code are content-frame at rot 2 (full rationale on
+        // the click path below) — no correction needed. dispatchRegion does the
+        // hit-test + action; a hold that lands outside every region selects nothing
+        // but still counts as interaction (return true either way).
+        dispatchRegion(currentRingIndex(), t.x, t.y);
         return true;
     }
     // Collect clicks across all slots; when a holding-hand graze and the
@@ -473,44 +508,66 @@ bool handleTouch() {
     // needed; trust the raw coords. tx feeds the edge grip band + the
     // left/right half test; ty feeds regionHit.
     int tx = t.x, ty = t.y;
+    int W = M5.Display.width();
     Serial.printf("[pager] tap x=%d y=%d w=%d cnt=%d idx=%d pages=%d\n",
-                  tx, ty, M5.Display.width(), tc, chosen, n);
+                  tx, ty, W, tc, chosen, n);
     // Edge grip band: a click within 24px of either edge is almost certainly the
-    // holding hand, not a paging intent — count it as interaction (the caller
-    // still opens the wake window) but never turn a page on it (left-edge graze =
-    // spurious backward turn).
-    if (tx < 24 || tx >= M5.Display.width() - 24) {
+    // holding hand, not intent — count it as interaction (the caller still opens
+    // the wake window) but take no action on it (a left-edge graze must not turn a
+    // page or trip a tab/region).
+    if (tx < 24 || tx >= W - 24) {
         Serial.printf("[pager] tap ignored edge x=%d\n", tx);
         return true;
     }
-    // Page-turn debounce: on this hard e-ink screen a single physical tap
-    // makes the user's finger rebound off the panel, and the cap-touch
-    // controller reports it as TWO wasClicked events (same half-screen,
-    // coords within ~20px, gap far below any deliberate double-tap) — serial
-    // logs measured this on ~25% of taps (5/22 sampled). Left unhandled, one
-    // tap turns two pages, and if an epd_quality full refresh (1s+ flash)
-    // lands on the pair, the intermediate page is swallowed entirely — reads
-    // to the user as "page order scrambled after a full refresh". epd_fast
-    // turns take ~300ms and a deliberate second turn comes no sooner than
-    // ~400ms, so 350ms catches only the bounce, never real intent.
-    static uint32_t s_lastTurnMs = 0;
-    if (s_lastTurnMs != 0 && nowMs - s_lastTurnMs < 350) return true;
+    // Tap debounce: on this hard e-ink screen a single physical tap makes the
+    // finger rebound and the controller reports TWO wasClicked events (~<350ms
+    // apart, far below any deliberate double-tap) — measured on ~25% of taps. This
+    // now guards ALL tap outcomes, not just page turns: unguarded, a bounce would
+    // double-turn a page OR double-fire a region action (e.g. gather twice). One
+    // tap = one action. (Long-presses don't bounce, so the hold path skips this.)
+    static uint32_t s_lastActMs = 0;
+    if (s_lastActMs != 0 && nowMs - s_lastActMs < 350) return true;
+
+    // New tap semantics (fw 0.4.x — "long-press to click was unintuitive"): a
+    // short tap now ACTS, falling back to a page turn only when it hits nothing.
+    // 1) Tab header (top band, on pages that draw tabs): jump straight to the
+    //    tapped tab's page. hitTab returns the page name of the tab under x; map it
+    //    to a ring via ringIndexByName. Leaving the AssignPage (a village sub-page)
+    //    closes its latch so its ring slot re-hides. Re-tapping the current page's
+    //    own tab is a no-op (skip the needless refresh).
+    if (ty < page_tabs::TAB_H) {
+        const char* tabName = page_tabs::hitTab(tx);
+        if (tabName) {
+            int ring = ringIndexByName(tabName);
+            if (ring >= 0 && ring != currentRingIndex()) {
+                if (assign_page::isOpen()) assign_page::close();
+                showPage(ring, false);
+            }
+            s_lastActMs = nowMs;
+            return true;               // a tab tap never falls through to a turn
+        }
+    }
+    // 2) Current-page regions (the SAME table a long-press uses): a hit runs the
+    //    identical action path (dispatchRegion). No page turn on a hit.
+    if (dispatchRegion(currentRingIndex(), tx, ty)) {
+        s_lastActMs = nowMs;
+        return true;
+    }
+    // 3) Nothing hit -> page-turn fallback (left half = prev, right half = next).
     if (n <= 1) return true;              // interaction, nothing to turn
     int cur = currentRingIndex();
-    bool left = tx < M5.Display.width() / 2;
+    bool left = tx < W / 2;
     int dir = left ? -1 : 1;
-    // Turns are epd_fast so the flash never lands on the user's own action —
-    // the debt is normally settled at sleep instead (payGhostDebtIfDue). Escape
-    // valve: past HIGH_WATER a marathon in-session run pays on this turn so
-    // ghosting can't grow unbounded. showPage repaints the bar itself, so no
-    // separate overlay redraw is needed here. Scan for the nearest available
-    // page in the tapped direction (see showPageOrNext) rather than one fixed
-    // target — a missing/corrupt neighbour used to soft-lock this direction
-    // until the host re-pushed. If nothing in that direction can be shown, leave
-    // the screen as-is; the tap still counted as interaction.
+    // Turns are epd_fast so the flash never lands on the user's own action — the
+    // debt is normally settled at sleep instead (payGhostDebtIfDue). Escape valve:
+    // past HIGH_WATER a marathon in-session run pays on this turn so ghosting can't
+    // grow unbounded. showPage repaints the bar itself. Scan for the nearest
+    // available page in the tapped direction (showPageOrNext) rather than one fixed
+    // target — a missing/corrupt neighbour used to soft-lock this direction. If
+    // nothing in that direction can be shown, leave the screen as-is.
     if (!showPageOrNext(cur, dir, s_fastCount >= HIGH_WATER))
         Serial.println("[pager] no displayable page");
-    s_lastTurnMs = nowMs;
+    s_lastActMs = nowMs;
     return true;
 }
 

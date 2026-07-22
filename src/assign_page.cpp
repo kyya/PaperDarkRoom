@@ -82,17 +82,6 @@ uint32_t epochNow() {
     return e > 0 ? (uint32_t)e : 0;
 }
 
-// The P1-assignable jobs currently unlocked (same building filter as the Outside
-// page's buildJobs — a job is offerable once its required building stands; miners
-// map to BLD_NONE, P2, so never appear). Returns the count (<= MAX_JOBS in P1).
-int buildJobs(uint8_t* out, int cap) {
-    int n = 0;
-    for (uint8_t j = J_HUNTER; j < JOB_COUNT && n < cap; j++) {
-        uint8_t reqB = JOB_REQ_BLD[j];
-        if (reqB != BLD_NONE && g_game.buildings[reqB] > 0) out[n++] = j;
-    }
-    return n;
-}
 
 // ---- drawing pieces --------------------------------------------------------
 
@@ -193,14 +182,23 @@ const pages::Region* AssignPage::regions(int* n) const {
 // Drawable only while open (and the forest is unlocked): returning false makes
 // showPageOrNext skip this ring slot, so the page is invisible + untappable
 // unless the Outside 分工 cell opened it — the same skip mechanism the un-unlocked
-// Outside/Trade pages use.
+// Outside/Trade pages use. available() holds that predicate once, shared by
+// draw() and the status bar's page-dot count so the two can't disagree.
+// hasUnlockedJob() is folded in for consistency with the Outside 分工 entry gate:
+// that gate already blocks opening this page when no job exists, so this is
+// defensive (a job building can't be lost in P1) — but it keeps ONE predicate
+// deciding "is there anything to assign", so an empty assign page can never show.
+bool AssignPage::available() const {
+    return assign_page::isOpen() && g_game.outsideUnlocked && g_game.hasUnlockedJob();
+}
+
 bool AssignPage::draw(m5gfx::M5Canvas& c) {
-    if (!assign_page::isOpen() || !g_game.outsideUnlocked) return false;
+    if (!available()) return false;
     c.fillSprite(TFT_WHITE);
     page_tabs::draw(c, 1);           // shared tab header, 村落 lit (this is its sub-page)
     drawInfoRow(c);
 
-    m_jobCount = buildJobs(m_jobs, MAX_JOBS);
+    m_jobCount = g_game.unlockedJobs(m_jobs, MAX_JOBS);
     for (int i = 0; i < m_jobCount; i++) {
         int top = BAND_TOP + i * (BAND_H + BAND_GAP);
         char sub[12];

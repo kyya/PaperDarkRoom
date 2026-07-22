@@ -191,15 +191,20 @@ static void drawTo(LovyanGFX* dst, int barTop, int otaPct = -1) {
         if (fw > 0) dst->fillRect(pbx + 2, cy - pbh / 2 + 2, fw, pbh - 4, TFT_BLACK);
         dst->drawString(buf, pbx + pbw + gap, cy);
     } else {
-        // iOS TabView-style page dots. Geometry is a SYNC CONTRACT with the iOS
-        // observer's FirmwareBarSim.swift, which mirrors this pixel-for-pixel:
-        // radius 4, pitch 16, dots centered on the band's mid-line. Current page
-        // is a solid black disc; every other page is a 2px ring (black disc,
-        // white 2px core). Change one side -> change both. (The OTA and pomo
-        // center variants above are the deliberate exceptions — see their notes.)
-        int cnt = pager::ringCount();
-        int cur = pager::currentRingIndex();
-        if (cnt > 0) {             // nothing to draw when no pages are cached
+        // iOS TabView-style page dots. Geometry: radius 4, pitch 16, dots
+        // centered on the band's mid-line. Current page is a solid black disc;
+        // every other page is a 2px ring (black disc, white 2px core).
+        //
+        // Count only DISPLAYABLE pages (pager::visibleCount) — a conditionally
+        // hidden game page (un-unlocked Outside/Trade, closed AssignPage) is
+        // skipped by showPageOrNext and so must not get a dot, or the strip would
+        // advertise page turns that go nowhere. The solid dot sits at the current
+        // page's ordinal AMONG the visible pages (visibleIndexOf), not its raw
+        // ring index. With <=1 reachable page there is no page turn to show, so
+        // the whole dot group is suppressed (a lone dot reads as a stuck UI).
+        int cnt = pager::visibleCount();
+        int cur = pager::visibleIndexOf(pager::currentRingIndex());
+        if (cnt > 1) {             // >1 reachable page -> a turn worth advertising
             for (int i = 0; i < cnt; i++) {
                 int cx = W / 2 + (int)lroundf((i - (cnt - 1) / 2.0f) * 16);
                 int cyDot = cy;
@@ -297,25 +302,26 @@ void drawOtaProgress(uint32_t received, uint32_t total) {
     pushStrip(pct);
 }
 
-// Firmware version, self-drawn into the page HEADER's top-right whitespace so a
-// flashed build announces which image it is right on the panel (the STATUS
-// fw-string is identical across re-flashes of the same version — useless for
-// telling two builds apart). Geometry mirrors the host's card_render_pixel
-// _clock_block (scale s=2, pad = 12*s = 24): the weekday is drawn at y=pad+3*s
-// (=30) and the date at y=pad+16*s (=56), both right-aligned to CANVAS_W-pad
-// (=516); the divider only lands at y=112 (pad + _clock_h + head_gap). So the
-// band y≈72..112 under the date is blank on the host render — we drop the
-// version at y=78, right-aligned to the SAME margin (pad=24), so it sits
-// directly under the date without touching host content. Baked into the page
-// canvas by pager::showPage BEFORE its single pushSprite, so it rides the
-// page's own EPD update — no separate refresh. Same Minecraftia16 face as the
-// bar, black on the already-white header.
-static const int HDR_PAD   = 24;   // host render right margin (pad = 12 * scale)
-// Weekday top is at y=30 and the date top at y=56 (26px apart); keep the same
-// ~26px step below the date's ~72 bottom so the version reads as the next line,
-// not a cramped tail. y=90: text (~14px tall) bottom ~104, still clear of the
-// y=112 divider. Was 78 — that sat too tight under the date.
-static const int HDR_VER_Y = 90;   // top of version text (date bottom ~72, divider ~112)
+// Firmware version, self-drawn into the panel's TOP-RIGHT corner so a flashed
+// build announces which image it is right on the screen (the STATUS fw-string is
+// identical across re-flashes of the same version — useless for telling two
+// builds apart). Baked into the page canvas by pager::showPage BEFORE its single
+// pushSprite, so it rides the page's own EPD update — no separate refresh. Same
+// Minecraftia16 face as the bottom bar, black on the already-white header.
+//
+// GEOMETRY — this firmware's page-tab header (page_tabs.cpp), NOT the retired
+// PaperS3 host-dashboard layout the old y=90 coordinate came from. The tab titles
+// occupy y=TAB_Y..TAB_Y+36 (16..52) with a 3px underline at y≈58; the very top
+// band y=0..16 is whitespace above every tab. Minecraftia16 ink is ~14px tall, so
+// drawing the version at y=1 (ink ~1..15) keeps it entirely in that top gap,
+// above the tab row. Right-aligned to canvas.width()-HDR_PAD (540-24 = 516), the
+// same right margin the tabs grow AWAY from (tabs are left-anchored from PAD and
+// extend rightward on the y=16.. rows). Because the version lives in its own
+// horizontal band ABOVE the tab titles, it cannot collide with tab text no matter
+// how far the widest three-tab combination reaches — the separation is vertical,
+// not horizontal, so no left-edge budgeting is needed.
+static const int HDR_PAD   = 24;   // right margin (matches the tab header's PAD)
+static const int HDR_VER_Y = 1;    // top of version text — in the y=0..16 gap above the tabs
 
 void drawVersionOnto(m5gfx::M5Canvas& canvas) {
     // Drop the constant "-papers3ble" suffix (adds no info across builds); the

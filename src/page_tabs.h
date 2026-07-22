@@ -22,9 +22,9 @@
 // (buildings[B_TRADING_POST] > 0) — before that a tab would point nowhere. Even
 // all three at their widest (生火间 108 │ 喧嚣小镇 144 │ 贸易站 108, +2×42px
 // dividers = 444px) clear the 492px content width (scratchpad/measure_labels).
-// Tab switching needs no touch table: the pager's short-press page turn (left
-// half = prev, right half = next; the ring wraps) steps between them. See
-// page_tabs.cpp for the geometry.
+// A short tap on a tab jumps straight to its page (fw 0.4.x): draw() caches the
+// x-span + page name() of each tab it lays down, and hitTab(x) resolves a tap to
+// that page (the pager maps name -> ring via ringIndexByName). See page_tabs.cpp.
 #pragma once
 
 namespace m5gfx { class M5Canvas; }
@@ -38,6 +38,15 @@ constexpr int CONTENT_TOP = TAB_H;
 
 // Paint the header into the top band of `c`. activeTab: 0 = Room, 1 = Outside,
 // 2 = Trade. Reads g_game for the dynamic titles and the per-tab unlock gates.
+// Also refreshes the tab hit-test cache (see hitTab).
 void draw(m5gfx::M5Canvas& c, int activeTab);
+
+// Hit-test the header against the LAST draw()'s tab layout: returns the page
+// name() ("room"/"outside"/"trade") of the tab whose horizontal span contains x,
+// or nullptr when x falls outside every tab (empty header area -> the caller
+// treats it as a page turn). The caller gates the y band (< TAB_H) itself. The
+// number/positions of tabs track the unlock state of the last draw(), so a tab
+// that was not painted is never hittable.
+const char* hitTab(int x);
 
 }  // namespace page_tabs

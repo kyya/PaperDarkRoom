@@ -39,6 +39,16 @@ public:
     // client pages always return true.
     virtual bool draw(m5gfx::M5Canvas& canvas) = 0;
 
+    // Side-effect-free mirror of draw()'s top-of-function hide gate: true when
+    // draw() WOULD paint (showPageOrNext keeps this ring slot), false when it
+    // would bail out and be skipped. Lets the status bar count only reachable
+    // pages without a probe-draw (draw() has real side effects — fillSprite,
+    // region-table rebuilds — so it must never be called just to test
+    // reachability). draw() consults this itself at its top, so the hide
+    // condition lives in ONE place per page. Default true: server pages and
+    // always-visible client pages (e.g. the Room) never hide.
+    virtual bool available() const { return true; }
+
     // Touch table (y-bands). *n receives the count; nullptr/0 = no regions.
     virtual const Region* regions(int* n) const = 0;
 

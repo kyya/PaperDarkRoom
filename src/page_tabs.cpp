@@ -29,6 +29,16 @@ constexpr int UL_H      = 3;                  // underline thickness (58..61)
 constexpr int DIV_GAP   = 20;                 // whitespace each side of the rule
 constexpr int DIV_W     = 2;                  // vertical rule thickness
 
+// Tab hit-test cache — the x-span + page name of each tab the LAST draw() laid
+// down (see page_tabs::hitTab). Tab count is dynamic (unlock-gated), so draw()
+// rewrites this every paint. Each tab's clickable span runs from its own title x0
+// to the next tab's x0 (covering the divider gap after it); the last tab spans
+// only its own title width, so an empty header to its right is not a tab hit.
+struct TabSlot { int x0; const char* name; };
+TabSlot s_slots[3];
+int     s_slotCount = 0;
+int     s_rightX    = 0;   // right edge of the last drawn title
+
 // Room title: the fire's lit/unlit state as an official room-name (the tab's own
 // dimension — the page's state line still carries the literal fire intensity).
 const char* roomTitle() {
@@ -57,33 +67,52 @@ static int drawDivider(m5gfx::M5Canvas& c, int divX) {
 }
 
 void page_tabs::draw(m5gfx::M5Canvas& c, int activeTab) {
-    // Tab 0 — Room (always present).
+    s_slotCount = 0;                    // rewrite the hit cache each paint
+
+    // Tab 0 — Room (always present). Its page name() is "room".
     const char* t0 = roomTitle();
     int x0 = PAD;
     int w0 = cjk::textWidth(t0, TAB_SCALE);
     cjk::drawText(c, x0, TAB_Y, t0, TAB_SCALE);
     if (activeTab == 0) c.fillRect(x0, UL_Y, w0, UL_H, TFT_BLACK);
+    s_slots[s_slotCount++] = { x0, "room" };
     int penEnd = x0 + w0;               // right edge of the last drawn tab
 
-    // Tab 1 — Outside, only once the forest is a reachable page.
+    // Tab 1 — Outside ("outside"), only once the forest is a reachable page.
     if (g_game.outsideUnlocked) {
         int x1 = drawDivider(c, penEnd + DIV_GAP);
         const char* t1 = outsideTitle();
         int w1 = cjk::textWidth(t1, TAB_SCALE);
         cjk::drawText(c, x1, TAB_Y, t1, TAB_SCALE);
         if (activeTab == 1) c.fillRect(x1, UL_Y, w1, UL_H, TFT_BLACK);
+        s_slots[s_slotCount++] = { x1, "outside" };
         penEnd = x1 + w1;
     }
 
-    // Tab 2 — Trade, only once the trading post stands (Outside-tab precedent:
-    // a tab appears with its page). The trading post is a forest-gated craft, so
-    // Outside is always unlocked by the time this draws — the three tabs never
-    // exceed the 492px content width (see page_tabs.h).
+    // Tab 2 — Trade ("trade"), only once the trading post stands (Outside-tab
+    // precedent: a tab appears with its page). The trading post is a forest-gated
+    // craft, so Outside is always unlocked by the time this draws — the three tabs
+    // never exceed the 492px content width (see page_tabs.h).
     if (g_game.buildings[B_TRADING_POST] > 0) {
         int x2 = drawDivider(c, penEnd + DIV_GAP);
         const char* t2 = tr("trading post");
         int w2 = cjk::textWidth(t2, TAB_SCALE);
         cjk::drawText(c, x2, TAB_Y, t2, TAB_SCALE);
         if (activeTab == 2) c.fillRect(x2, UL_Y, w2, UL_H, TFT_BLACK);
+        s_slots[s_slotCount++] = { x2, "trade" };
+        penEnd = x2 + w2;
     }
+    s_rightX = penEnd;
+}
+
+// Resolve a header tap x to a tab's page name (see page_tabs.h). Each tab owns
+// [its x0, the next tab's x0); the last tab owns [its x0, s_rightX). Misses
+// (x left of tab 0, or right of the last title) return nullptr.
+const char* page_tabs::hitTab(int x) {
+    for (int i = 0; i < s_slotCount; i++) {
+        int start = s_slots[i].x0;
+        int end   = (i + 1 < s_slotCount) ? s_slots[i + 1].x0 : s_rightX;
+        if (x >= start && x < end) return s_slots[i].name;
+    }
+    return nullptr;
 }

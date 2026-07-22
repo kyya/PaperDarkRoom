@@ -34,18 +34,39 @@ constexpr int SCALE     = 2;                 // 12px grid x2 = 24px CJK
 constexpr int GLYPH     = 12 * SCALE;        // 24px line box
 constexpr int CONTENT_W = 540 - 2 * PAD;     // 492px usable (§9.2)
 
-// ---- vertical budget (§9.4), all measured to clear the 32px status bar (< 928).
-// v0.4.2 reflow: the standalone population row is GONE — its 人口/伐木者 line
-// folded INTO the 工人 fieldset — and 工人 moved to the FIRST section (right under
-// the tab header). The three content blocks are identical fieldset boxes (1px
-// border + a legend embedded in the top border + inset content, drawFieldset
-// below); the 野外 action row (伐木 | 查看陷阱 | 分工) stays sunk at the very
-// BOTTOM. Layout top->bottom (box y0=top border, y1=bottom border):
-//   header(0..72) · 工人 fieldset(box 96..232, legend "工人"@84: a 人口 X/Y line
-//   @120, then a 3-col grid @148 of 伐木者 + each unlocked job "名 xN" — 1+6=7
-//   cells -> 3 rows) · 建筑 fieldset(box 256..420, legend "建筑"@244, 5x2 cells) ·
-//   库存 fieldset(box 444..804, legend "库存"@432, 12x3 cells) · action row
-//   (836..916, 3 cells: 伐木 | 查看陷阱 | 分工).
+// ---- DYNAMIC vertical layout + worst-case budget (v0.4.5) --------------------
+// The three fieldset boxes (工人 / 建筑 / 库存) no longer sit at hardcoded y's;
+// each box's height follows its live content row count and the boxes FLOW down
+// from a fixed top anchor (WRK_LEGEND_Y=84, under the tab header) with a uniform
+// 12px gap. Only the y axis + row counts are dynamic — the x geometry (box edges,
+// column widths/positions) stays constant. The 野外 action AREA is bottom-anchored
+// (independent of the flow) as two 80px rows: row 1 伐木 | 查看陷阱, row 2 分工 | —.
+//
+// Per-box height (box y0=top border, y1=bottom border): a box that shows N
+// content rows spans boxY0..(rowTop + N*ROWH), where boxY0 = legendY + GLYPH/2 and
+// rowTop = legendY + GLYPH + FS_ROW_GAP (the legend glyph straddles the top border,
+// hanging GLYPH/2 below it, so row 0 clears legendY+GLYPH). The next box's
+// legendY = prevBoxY1 + FS_BOX_GAP. Row counts:
+//   工人: 1 pop line + ceil((1 gatherer + nJobs)/3) grid rows. nJobs<=6 (P1),
+//         so <=1+3 = 4 rows.
+//   建筑: ceil(nzBuildings/2) rows; HIDDEN ENTIRELY when nzBuildings==0 — a
+//         freshly-unlocked village has no buildings, and an empty box reads as a
+//         bug; the section appears with its first building (the same "unlocks into
+//         view" feel the Outside tab/page itself has). nz<=10 -> <=5 rows.
+//   库存: ceil(nzEntries/3) rows, min 1 (for the "空" empty state), CLAMPED to the
+//         space left above the action area (see overflow protection).
+//
+// WORST-CASE BUDGET (everything maximal, to prove no collision):
+//   工人 4 rows  -> box 96..232
+//   建筑 10 buildings -> 5 rows -> legend@244, box 256..420
+//   库存 starts rowTop=468. Space to the action area: INV_MAX_BOTTOM =
+//        ACT_ROW1_TOP - 12 = 734, so floor((734-468)/28) = 9 rows = 27 cells.
+//   Max 库存 entries = RES_COUNT(19) + ITEM_COUNT(14) = 33 > 27 -> the grid CLAMPS
+//   to 9 rows and the last cell collapses to "…" (the pre-existing tail-collapse,
+//   now driven by remaining-space rows instead of a fixed INV_ROWS constant).
+//   库存 box then ends 468+9*28 = 720 < 734, clearing the action row-1 top (746)
+//   by 26px. All region y's + the tick cooldown-refresh rect track the (static)
+//   action area, so they need no dynamic recompute.
 // ----------------------------------------------------------------------------
 
 // ---- shared fieldset geometry (all three boxes span the same x, PAD..540-PAD).
@@ -55,53 +76,30 @@ constexpr int FS_LEGEND_INSET = 8;           // left corner -> where the top bor
 constexpr int FS_LEGEND_GAP   = 4;           // gap each side of the legend text
 constexpr int FS_PAD_SIDE    = 12;           // box border -> column content inset
 constexpr int FS_ROW_GAP     = 12;           // clearance below the legend glyph -> row 0
+constexpr int FS_BOX_GAP     = 12;           // vertical gap between stacked boxes
 constexpr int FS_CONTENT_X0  = FS_BOX_X0 + FS_PAD_SIDE;   // 36
 constexpr int FS_CONTENT_X1  = FS_BOX_X1 - FS_PAD_SIDE;   // 504
-// The legend glyph straddles the top border (centered on box-y0, drawn at
-// legendY = boxY0 - GLYPH/2), so it hangs GLYPH/2 = 12px BELOW the border to
-// legendY+GLYPH — row 0 must clear THAT (both sit at content column-0's x=36),
-// hence ROW_TOP = legendY + GLYPH + FS_ROW_GAP (= boxY0 + GLYPH/2 + FS_ROW_GAP).
+constexpr int ROWH           = 28;           // one content row (shared by all boxes)
+// Minimum content rows a SHOWN fieldset reserves, so a sparse box (库存 "空", a
+// single-building 建筑) is not a cramped one-line sliver and the layout stops
+// jumping around as sections fill in during early unlocks. 2 rows = 56px of
+// content band — enough to read as a deliberate box, not a label strip. Content
+// below this still tops-aligns; the box just carries bottom whitespace. Does NOT
+// resurrect a hidden box (零建筑 stays hidden — see computeLayout). The 工人 box
+// already clears this floor intrinsically (its 人口 line + >=1 grid row = 2 rows).
+constexpr int FS_MIN_ROWS    = 2;
 
-// ---- 工人 fieldset (v0.4.2: now the FIRST section, and it absorbs the pop line).
-// A 人口 X/Y line spans the top (col-0 x); below it a 3-col two-ends grid lists
-// 伐木者 (idle gatherers — tr("gatherer"), naturally one more "job") in cell 0
-// then every UNLOCKED job "名 xN" (incl. x0). 1 + <=6 jobs = <=7 cells -> 3 rows.
-// Legend "工人" (both glyphs in the §8.3 closure via 炼钢工人 etc.). Shares the
-// inventory box's 3-column geometry (INV_COLX / INV_COL_W below).
+// Fixed top anchor: the 工人 fieldset's legend baseline, just under the tab header.
 constexpr int WRK_LEGEND_Y  = 84;
-constexpr int WRK_BOX_Y0    = WRK_LEGEND_Y + GLYPH / 2;             // 96
-constexpr int WRK_ROWH      = 28;
-constexpr int WRK_POP_Y     = WRK_LEGEND_Y + GLYPH + FS_ROW_GAP;    // 120 — 人口 line
-constexpr int WRK_GRID_TOP  = WRK_POP_Y + WRK_ROWH;                 // 148 — grid row 0
-constexpr int WRK_GRID_ROWS = 3;             // 1 gatherer + <=6 jobs = <=7 cells
-constexpr int WRK_BOX_Y1    = WRK_GRID_TOP + WRK_GRID_ROWS * WRK_ROWH;   // 232
 
-// ---- 建筑 fieldset: non-zero buildings as "名 数量", 2 columns. 10 P1 building
-// types fit exactly in 5x2 = 10 cells (no "..." drop). Legend "建筑" (建/筑 in
-// the §8.3 closure via 建造者/建筑).
-constexpr int BLD_LEGEND_Y  = 244;
-constexpr int BLD_BOX_Y0    = BLD_LEGEND_Y + GLYPH / 2;             // 256
-constexpr int BLD_ROW_TOP   = BLD_LEGEND_Y + GLYPH + FS_ROW_GAP;    // 280
-constexpr int BLD_ROWH      = 28;
-constexpr int BLD_ROWS      = 5;
-constexpr int BLD_BOX_Y1    = BLD_ROW_TOP + BLD_ROWS * BLD_ROWH;    // 420
+// ---- 建筑 fieldset x geometry: 2 columns ("名 数量").
 constexpr int BLD_COL_GAP   = 12;
 constexpr int BLD_COL_W     = (FS_CONTENT_X1 - FS_CONTENT_X0 - BLD_COL_GAP) / 2;  // 228
 constexpr int BLD_COLX[2]   = { FS_CONTENT_X0, FS_CONTENT_X0 + BLD_COL_W + BLD_COL_GAP };  // {36,276}
 
-// ---- 库存 fieldset: non-zero stores then non-zero items, 3-col two-ends grid.
-// The box runs down to just above the bottom action row: 12 rows x 3 = 36 cells,
-// past the 19 resources + P1 items ever non-zero, so the "…" tail-collapse is
-// effectively unreachable. Legend tr("stores") == "库存".
-constexpr int INV_LEGEND_Y  = 432;
-constexpr int INV_BOX_Y0    = INV_LEGEND_Y + GLYPH / 2;             // 444
-constexpr int INV_ROW_TOP   = INV_LEGEND_Y + GLYPH + FS_ROW_GAP;    // 468
-constexpr int INV_ROWH      = 28;
-constexpr int INV_ROWS      = 12;            // 468 + 12*28 = 804 (< action row @836)
-constexpr int INV_BOX_Y1    = INV_ROW_TOP + INV_ROWS * INV_ROWH;    // 804
+// ---- 库存 / 工人 grid x geometry: 3 columns, two-ends (name-left / qty-right).
 constexpr int INV_COLS      = 3;
 constexpr int INV_COL_GAP   = 12;
-// 468px content / 3 cols with 2 gutters: (468 - 2*12) / 3 = 148 exactly.
 constexpr int INV_COL_W     = (FS_CONTENT_X1 - FS_CONTENT_X0
                                 - (INV_COLS - 1) * INV_COL_GAP) / INV_COLS;   // 148
 constexpr int INV_COLX[INV_COLS] = {
@@ -109,32 +107,34 @@ constexpr int INV_COLX[INV_COLS] = {
     FS_CONTENT_X0 + (INV_COL_W + INV_COL_GAP),            // 196
     FS_CONTENT_X0 + 2 * (INV_COL_W + INV_COL_GAP),        // 356
 };
-constexpr int INV_CELLS     = INV_ROWS * INV_COLS;       // 36 cells before overflow
 
-// ---- 野外 action row (v0.4.1: sunk to the page bottom). 伐木 | 查看陷阱 | 分工,
-// evenly spread over the 492px content: col width (492 - 2*12)/3 = 156, x =
-// {24, 192, 360} (360 + 156 = 516 = right edge ✓). 36px labels: the widest,
-// "查看陷阱" = 4x36 = 144px < 156 ✓. The band bottom hugs 916: ACT_TOP = 916 -
-// 80 = 836, band 836..916 (< 928 status bar), 32px of air below the 库存 box.
-constexpr int ACT_H       = 80;              // long-press band (§9.3: >=80px floor)
-constexpr int ACT_TOP     = 916 - ACT_H;     // 836 — bottom-anchored
-constexpr int ACT_COL_GAP = 12;
-constexpr int ACT_COL_W   = (CONTENT_W - 2 * ACT_COL_GAP) / 3;    // 156
-constexpr int ACT_COLX[3] = { PAD, PAD + ACT_COL_W + ACT_COL_GAP,
-                              PAD + 2 * (ACT_COL_W + ACT_COL_GAP) };   // {24,192,360}
-// Column split boundaries for the press x (onLocalAction). x < 192 -> 伐木,
-// x < 360 -> 查看陷阱, else 分工.
-constexpr int ACT_DIV0    = ACT_COLX[1];     // 192
-constexpr int ACT_DIV1    = ACT_COLX[2];     // 360
+// ---- 野外 action AREA (v0.4.5): two 240px columns, two rows, bottom-anchored.
+// Row 2 (分工) bottom hugs 916 (< 928 status bar); row 1 (伐木 | 查看陷阱) sits a
+// 10px gap above it. Two columns: (492 - 12)/2 = 240px each, x = {24, 276} (276 +
+// 240 = 516 = right edge ✓). 36px labels have room to spare — the widest,
+// "查看陷阱" = 4x36 = 144px < 240 ✓.
+constexpr int ACT_H        = 80;             // long-press band (§9.3: >=80px floor)
+constexpr int ACT_ROW_GAP  = 10;
+constexpr int ACT_ROW2_TOP = 916 - ACT_H;                       // 836 — 分工 row (bottom)
+constexpr int ACT_ROW1_TOP = ACT_ROW2_TOP - ACT_ROW_GAP - ACT_H; // 746 — gather/traps row
+constexpr int ACT_COL_GAP  = 12;
+constexpr int ACT_COL_W    = (CONTENT_W - ACT_COL_GAP) / 2;      // 240
+constexpr int ACT_COLX[2]  = { PAD, PAD + ACT_COL_W + ACT_COL_GAP };  // {24, 276}
+constexpr int ACT_DIV      = ACT_COLX[1];    // 276 — press x < DIV -> left column
 
-// 36px labels (原作「框大字小」) for the action-row verbs, centered in their cells.
+// Overflow ceiling for the 库存 box: it must stop this far above the action area.
+constexpr int INV_MAX_BOTTOM = ACT_ROW1_TOP - FS_BOX_GAP;        // 734
+
+// 36px labels (原作「框大字小」) for the action verbs, centered in their cells.
 constexpr int BTN_SCALE = 3;                 // 12px grid x3 = 36px (verb label)
 constexpr int BTN_GLYPH = 12 * BTN_SCALE;    // 36px line box
 
-// The野外 action row is a single Region carrying this sentinel param — its three
-// cells route to gatherWood / checkTraps / open-assign by the press column
-// (ACT_DIV0/ACT_DIV1), so onLocalAction resolves the verb from x.
-constexpr uint8_t PARAM_ACTIONS = 0xFE;
+// One param per action ROW (the pager resolves the row from the press y = which
+// Region band it hit; onLocalAction then resolves the column from x).
+constexpr uint8_t PARAM_ROW1 = 0xFE;         // 伐木 | 查看陷阱
+constexpr uint8_t PARAM_ROW2 = 0xFD;         // 分工 | —
+
+int ceilDiv(int a, int b) { return (a + b - 1) / b; }
 
 // RTC -> Unix epoch, mirroring room_page/main.cpp's epochNow (only differences
 // matter to settle(), so the mktime timezone is irrelevant if consistent).
@@ -148,79 +148,126 @@ uint32_t epochNow() {
     return e > 0 ? (uint32_t)e : 0;
 }
 
-// The P1-assignable jobs currently unlocked: a job is offerable once its
-// required building stands (lodge -> hunter/trapper, tannery -> tanner, ...).
-// gatherer is derived (idle population) and never gets a row. Miners map to
-// BLD_NONE (P2 mines), so they never appear. Returns the count. Shared by the
-// read-only worker summary here and (identically) by AssignPage.
-int buildJobs(uint8_t* out, int cap) {
-    int n = 0;
-    for (uint8_t j = J_HUNTER; j < JOB_COUNT && n < cap; j++) {
-        uint8_t reqB = JOB_REQ_BLD[j];
-        if (reqB != BLD_NONE && g_game.buildings[reqB] > 0) out[n++] = j;
+// The flowed y-geometry of the three fieldset boxes for the CURRENT game state.
+// Recomputed each draw() (deterministic from live counts, so cheap); the action
+// area is static and not part of this.
+struct Layout {
+    int  wrkBoxY0, wrkBoxY1, wrkPopY, wrkGridTop;
+    bool bldShown;
+    int  bldBoxY0, bldBoxY1, bldRowTop, bldRows;
+    int  invBoxY0, invBoxY1, invRowTop, invRows;   // invRows = space-clamped cap
+};
+
+Layout computeLayout() {
+    Layout L{};
+
+    // 工人: 1 pop line + a 3-col grid of (1 gatherer + nJobs) cells.
+    uint8_t jobsTmp[JOB_COUNT];
+    int nJobs = g_game.unlockedJobs(jobsTmp, (int)sizeof(jobsTmp));
+    int wrkGridRows = ceilDiv(1 + nJobs, INV_COLS);
+    L.wrkBoxY0   = WRK_LEGEND_Y + GLYPH / 2;                    // 96
+    L.wrkPopY    = WRK_LEGEND_Y + GLYPH + FS_ROW_GAP;           // 120
+    L.wrkGridTop = L.wrkPopY + ROWH;                            // 148
+    L.wrkBoxY1   = L.wrkGridTop + wrkGridRows * ROWH;
+
+    int prevBottom = L.wrkBoxY1;
+
+    // 建筑: hidden when empty (see the budget note); else ceil(nz/2) rows.
+    int nzB = 0;
+    for (int b = 0; b < BLD_COUNT; b++) if (g_game.buildings[b] > 0) nzB++;
+    L.bldShown = nzB > 0;
+    if (L.bldShown) {
+        L.bldRows  = ceilDiv(nzB, 2);                          // nz<=10 -> <=5 rows
+        if (L.bldRows < FS_MIN_ROWS) L.bldRows = FS_MIN_ROWS;  // min-height floor
+        int legendY = prevBottom + FS_BOX_GAP;
+        L.bldBoxY0  = legendY + GLYPH / 2;
+        L.bldRowTop = legendY + GLYPH + FS_ROW_GAP;
+        L.bldBoxY1  = L.bldRowTop + L.bldRows * ROWH;
+        prevBottom  = L.bldBoxY1;
     }
-    return n;
+
+    // 库存: ceil(nz/3) rows (min 1 for "空"), clamped to the space above the
+    // action area — past the cap the last cell collapses to "…".
+    int nzI = 0;
+    for (int r = 0; r < RES_COUNT; r++)  if (g_game.whole((uint8_t)r) > 0) nzI++;
+    for (int i = 0; i < ITEM_COUNT; i++) if (g_game.items[i] > 0)          nzI++;
+    int legendY = prevBottom + FS_BOX_GAP;
+    L.invBoxY0  = legendY + GLYPH / 2;
+    L.invRowTop = legendY + GLYPH + FS_ROW_GAP;
+    int wantRows = nzI > 0 ? ceilDiv(nzI, INV_COLS) : 1;       // >=1: the "空" row
+    if (wantRows < FS_MIN_ROWS) wantRows = FS_MIN_ROWS;        // min-height floor
+    int availRows = (INV_MAX_BOTTOM - L.invRowTop) / ROWH;     // floor
+    if (availRows < 1) availRows = 1;
+    L.invRows  = wantRows < availRows ? wantRows : availRows;
+    L.invBoxY1 = L.invRowTop + L.invRows * ROWH;
+    return L;
 }
 
 // ---- drawing pieces --------------------------------------------------------
 
-// The shared fieldset box: a 1px rect (x FS_BOX_X0..FS_BOX_X1, y y0..y1) with
-// `legend` embedded in the top border line, HTML-<fieldset> style — the line
-// runs from the left edge to just before the text, breaks for the text (plus a
-// small gap each side), then resumes to the right edge; the other three sides
-// are plain rect edges. The legend straddles the top border (drawn GLYPH/2 above
-// it). Used by all three content blocks (建筑 / 工人 / 库存).
+// The shared fieldset box: a 2px border (two concentric strokes — an outer edge
+// plus an inner edge 1px inward, the SAME drawRect+drawRect language the enabled
+// action buttons use in drawActionBand, so the box and the buttons read as one
+// weight) with `legend` embedded in the TOP border, HTML-<fieldset> style — BOTH
+// top rows run from the left edge to just before the text, break for the text
+// (plus a small gap each side), then resume to the right edge; the other three
+// sides are solid 2px edges. The legend straddles the top border (drawn GLYPH/2
+// above it). The break is applied to BOTH top rows so the thicker border still
+// opens cleanly around the legend. No padding change was needed for the extra
+// stroke: content sits FS_PAD_SIDE=12px in from the box edge (the inner stroke at
+// +1px leaves ~11px) and each row carries a 4px bottom gap within its 28px slot,
+// both comfortably clearing 1 extra pixel. Used by all three blocks (建筑/工人/库存).
 void drawFieldset(m5gfx::M5Canvas& c, int y0, int y1, const char* legend) {
     int legendW = cjk::textWidth(legend, SCALE);
     int lineEnd = FS_BOX_X0 + FS_LEGEND_INSET;                   // 32
     int textX   = lineEnd + FS_LEGEND_GAP;                       // 36
     int resumeX = textX + legendW + FS_LEGEND_GAP;
 
-    c.drawFastHLine(FS_BOX_X0, y0, lineEnd - FS_BOX_X0, TFT_BLACK);
-    if (resumeX < FS_BOX_X1)
-        c.drawFastHLine(resumeX, y0, FS_BOX_X1 - resumeX, TFT_BLACK);
+    // Top border — 2px (rows y0 and y0+1), each broken at the legend gap.
+    for (int dy = 0; dy <= 1; dy++) {
+        c.drawFastHLine(FS_BOX_X0, y0 + dy, lineEnd - FS_BOX_X0, TFT_BLACK);
+        if (resumeX < FS_BOX_X1)
+            c.drawFastHLine(resumeX, y0 + dy, FS_BOX_X1 - resumeX, TFT_BLACK);
+    }
     cjk::drawText(c, textX, y0 - GLYPH / 2, legend, SCALE);
 
-    c.drawFastVLine(FS_BOX_X0, y0, y1 - y0, TFT_BLACK);
-    c.drawFastVLine(FS_BOX_X1, y0, y1 - y0, TFT_BLACK);
-    c.drawFastHLine(FS_BOX_X0, y1, FS_BOX_X1 - FS_BOX_X0 + 1, TFT_BLACK);
+    int h = y1 - y0;
+    // Left / right borders — 2px (cols X0,X0+1 and X1-1,X1).
+    c.drawFastVLine(FS_BOX_X0,     y0, h, TFT_BLACK);
+    c.drawFastVLine(FS_BOX_X0 + 1, y0, h, TFT_BLACK);
+    c.drawFastVLine(FS_BOX_X1 - 1, y0, h, TFT_BLACK);
+    c.drawFastVLine(FS_BOX_X1,     y0, h, TFT_BLACK);
+    // Bottom border — 2px (rows y1-1 and y1), full width.
+    c.drawFastHLine(FS_BOX_X0, y1 - 1, FS_BOX_X1 - FS_BOX_X0 + 1, TFT_BLACK);
+    c.drawFastHLine(FS_BOX_X0, y1,     FS_BOX_X1 - FS_BOX_X0 + 1, TFT_BLACK);
 }
 
-// 建筑 fieldset: the box + every non-zero building as "名 数量", 2 columns x up
-// to 5 rows (10 cells == BLD_COUNT, so the whole set shows; a defensive "..."
-// tail guard remains but is unreachable in P1).
-void drawBuildings(m5gfx::M5Canvas& c) {
-    drawFieldset(c, BLD_BOX_Y0, BLD_BOX_Y1, "建筑");   // 建/筑 closure-safe
+// 建筑 fieldset: the box + every non-zero building as "名 数量", 2 columns. The
+// box height already grew to fit every non-zero building (ceil(nz/2) rows), so
+// the whole set always shows — no tail-collapse. Never called when nz==0 (the
+// section is hidden then; see computeLayout / draw()).
+void drawBuildings(m5gfx::M5Canvas& c, const Layout& L) {
+    drawFieldset(c, L.bldBoxY0, L.bldBoxY1, "建筑");   // 建/筑 closure-safe
 
-    const int cap = BLD_ROWS * 2;               // 10 cells
-    int nz = 0;
-    for (int b = 0; b < BLD_COUNT; b++)
-        if (g_game.buildings[b] > 0) nz++;
-    bool overflow = nz > cap;
-    int limit = overflow ? cap - 1 : nz;
     int shown = 0;
-    for (int b = 0; b < BLD_COUNT && shown < limit; b++) {
+    for (int b = 0; b < BLD_COUNT; b++) {
         if (g_game.buildings[b] == 0) continue;
         int col = shown % 2, row = shown / 2;
         char line[48];
         snprintf(line, sizeof(line), "%s %u",
                  tr(BLD_KEY[b]), (unsigned)g_game.buildings[b]);
-        cjk::drawText(c, BLD_COLX[col], BLD_ROW_TOP + row * BLD_ROWH, line, SCALE);
+        cjk::drawText(c, BLD_COLX[col], L.bldRowTop + row * ROWH, line, SCALE);
         shown++;
-    }
-    if (overflow) {
-        int col = (cap - 1) % 2, row = (cap - 1) / 2;
-        cjk::drawText(c, BLD_COLX[col], BLD_ROW_TOP + row * BLD_ROWH, "...", SCALE);
     }
 }
 
 // One 工人 grid cell: name left-aligned at the column's left edge, "xN" count
 // right-aligned at the column's right edge (two-ends, 库存 cell parity). Row-major
-// over the shared 3-col grid, starting at WRK_GRID_TOP.
-void drawWorkerCell(m5gfx::M5Canvas& c, int idx, const char* name, unsigned n) {
+// over the shared 3-col grid, starting at gridTop.
+void drawWorkerCell(m5gfx::M5Canvas& c, int gridTop, int idx, const char* name, unsigned n) {
     int col = idx % INV_COLS, row = idx / INV_COLS;
     int x0 = INV_COLX[col];
-    int y  = WRK_GRID_TOP + row * WRK_ROWH;
+    int y  = gridTop + row * ROWH;
     cjk::drawText(c, x0, y, name, SCALE);
 
     char qty[12];
@@ -231,32 +278,33 @@ void drawWorkerCell(m5gfx::M5Canvas& c, int idx, const char* name, unsigned n) {
 
 // 工人 fieldset: the box + a 人口 X/Y line, then a 3-col two-ends grid listing
 // 伐木者 (idle gatherers — the derived count, shown as one more "job" in cell 0)
-// followed by every UNLOCKED job (buildJobs) "名 xN" (incl. x0). Read-only — no
-// touch region, no ▲/▼; assignment lives on AssignPage.
-void drawWorkerSummary(m5gfx::M5Canvas& c) {
-    drawFieldset(c, WRK_BOX_Y0, WRK_BOX_Y1, "工人");   // 工/人 closure-safe
+// followed by every UNLOCKED job (GameState::unlockedJobs) "名 xN" (incl. x0).
+// Read-only — no touch region, no ▲/▼; assignment lives on AssignPage.
+void drawWorkerSummary(m5gfx::M5Canvas& c, const Layout& L) {
+    drawFieldset(c, L.wrkBoxY0, L.wrkBoxY1, "工人");   // 工/人 closure-safe
 
     // 人口 X/Y line (official "人口 " label + population / max), spanning the top.
     char pop[40];
     snprintf(pop, sizeof(pop), "%s%u/%u", tr("pop "),
              (unsigned)g_game.population, (unsigned)g_game.maxPopulation());
-    cjk::drawText(c, FS_CONTENT_X0, WRK_POP_Y, pop, SCALE);
+    cjk::drawText(c, FS_CONTENT_X0, L.wrkPopY, pop, SCALE);
 
     // Grid cell 0 = 伐木者 (idle gatherers), then each unlocked job.
-    drawWorkerCell(c, 0, tr("gatherer"), (unsigned)g_game.numGatherers());
+    drawWorkerCell(c, L.wrkGridTop, 0, tr("gatherer"), (unsigned)g_game.numGatherers());
     uint8_t jobs[JOB_COUNT];
-    int n = buildJobs(jobs, (int)sizeof(jobs));
+    int n = g_game.unlockedJobs(jobs, (int)sizeof(jobs));
     for (int i = 0; i < n; i++)
-        drawWorkerCell(c, i + 1, tr(JOB_KEY[jobs[i]]), (unsigned)g_game.workers[jobs[i]]);
+        drawWorkerCell(c, L.wrkGridTop, i + 1, tr(JOB_KEY[jobs[i]]),
+                       (unsigned)g_game.workers[jobs[i]]);
 }
 
 // One inventory cell: name left-aligned at the column's left edge, quantity
 // right-aligned at the column's right edge (two-ends alignment). Row-major:
-// idx -> row idx/INV_COLS, column idx%INV_COLS.
-void drawInvCell(m5gfx::M5Canvas& c, int idx, const char* name, long qty) {
+// idx -> row idx/INV_COLS, column idx%INV_COLS, from rowTop.
+void drawInvCell(m5gfx::M5Canvas& c, int rowTop, int idx, const char* name, long qty) {
     int col = idx % INV_COLS, row = idx / INV_COLS;
     int x0 = INV_COLX[col];
-    int y  = INV_ROW_TOP + row * INV_ROWH;
+    int y  = rowTop + row * ROWH;
     cjk::drawText(c, x0, y, name, SCALE);
 
     char qtyStr[8];
@@ -266,33 +314,33 @@ void drawInvCell(m5gfx::M5Canvas& c, int idx, const char* name, long qty) {
 }
 
 // 库存 fieldset: the box + every non-zero resource (whole units) followed by
-// every non-zero crafted item, three columns, name-left/qty-right. Past the
-// 36-cell grid the last cell collapses to "…" (the grid holds the whole
-// resource+item set, so the ellipsis is a vestigial guard); an empty inventory
-// shows "空".
-void drawInventory(m5gfx::M5Canvas& c) {
-    drawFieldset(c, INV_BOX_Y0, INV_BOX_Y1, tr("stores"));   // "库存"
+// every non-zero crafted item, three columns, name-left/qty-right. The box holds
+// L.invRows*3 cells (space-clamped by computeLayout); past that the last cell
+// collapses to "…". An empty inventory shows "空".
+void drawInventory(m5gfx::M5Canvas& c, const Layout& L) {
+    drawFieldset(c, L.invBoxY0, L.invBoxY1, tr("stores"));   // "库存"
 
+    int cells = L.invRows * INV_COLS;
     int nz = 0;
     for (int r = 0; r < RES_COUNT; r++)  if (g_game.whole((uint8_t)r) > 0) nz++;
     for (int i = 0; i < ITEM_COUNT; i++) if (g_game.items[i] > 0)          nz++;
 
-    bool overflow = nz > INV_CELLS;
-    int limit = overflow ? INV_CELLS - 1 : nz;   // reserve the last cell for "…"
+    bool overflow = nz > cells;
+    int limit = overflow ? cells - 1 : nz;   // reserve the last cell for "…"
     int shown = 0;
     for (int r = 0; r < RES_COUNT && shown < limit; r++) {
         long q = (long)g_game.whole((uint8_t)r);
-        if (q > 0) drawInvCell(c, shown++, tr(RES_KEY[r]), q);
+        if (q > 0) drawInvCell(c, L.invRowTop, shown++, tr(RES_KEY[r]), q);
     }
     for (int i = 0; i < ITEM_COUNT && shown < limit; i++)
         if (g_game.items[i] > 0)
-            drawInvCell(c, shown++, tr(ITEM_KEY[i]), (long)g_game.items[i]);
+            drawInvCell(c, L.invRowTop, shown++, tr(ITEM_KEY[i]), (long)g_game.items[i]);
 
     if (overflow) {
-        int col = (INV_CELLS - 1) % INV_COLS, row = (INV_CELLS - 1) / INV_COLS;
-        cjk::drawText(c, INV_COLX[col], INV_ROW_TOP + row * INV_ROWH, "…", SCALE);
+        int col = (cells - 1) % INV_COLS, row = (cells - 1) / INV_COLS;
+        cjk::drawText(c, INV_COLX[col], L.invRowTop + row * ROWH, "…", SCALE);
     } else if (shown == 0) {
-        cjk::drawText(c, INV_COLX[0], INV_ROW_TOP, tr("none"), SCALE);   // "空"
+        cjk::drawText(c, INV_COLX[0], L.invRowTop, tr("none"), SCALE);   // "空"
     }
 }
 
@@ -343,40 +391,44 @@ void drawActionBand(m5gfx::M5Canvas& c, int x0, int top, const char* label,
     }
 }
 
-// Paint the whole action row (3 cells). Left = 伐木 (gather wood): always offered
-// here — the Room page gated it on outsideUnlocked, which is a precondition for
-// this page drawing at all. Middle = 查看陷阱 (check traps): drawn only when a
-// trap stands (buildings[B_TRAP] > 0); with none, the cell is left blank (无供给
-// 整格不画, not a disabled frame), matching the Room供给 condition. Right = 分工:
-// always drawn, opens AssignPage (no供给/cooldown gate). A live gather/traps
-// cooldown (channels 1/2) renders its cell dashed with a draining bar.
-void drawActionRow(m5gfx::M5Canvas& c, uint32_t now) {
+// Paint the two-row action area (v0.4.5). ROW 1 left = 伐木 (gather wood): always
+// offered here — the Room page gated it on outsideUnlocked, a precondition for
+// this page drawing at all. ROW 1 right = 查看陷阱 (check traps): drawn only when
+// a trap stands (buildings[B_TRAP] > 0); with none the cell is left blank (无供给
+// 整格不画, not a disabled frame), matching the Room 供给 condition. ROW 2 left =
+// 分工: opens AssignPage, but only once at least one job is unlocked — with none
+// there is nothing to assign, so the cell is left blank by the SAME 无供给 rule
+// (g_game.hasUnlockedJob(), the shared job filter). ROW 2 right is always blank.
+// A live gather/traps cooldown (channels 1/2) renders its cell dashed + draining.
+void drawActionArea(m5gfx::M5Canvas& c, uint32_t now) {
     int gcool = g_game.cooldownLeft(1, now);                 // gather channel
-    drawActionBand(c, ACT_COLX[0], ACT_TOP, tr("gather wood"),
+    drawActionBand(c, ACT_COLX[0], ACT_ROW1_TOP, tr("gather wood"),
                    gcool == 0, gcool, GATHER_DELAY_S);
     if (g_game.buildings[B_TRAP] > 0) {
         int tcool = g_game.cooldownLeft(2, now);             // traps channel
-        drawActionBand(c, ACT_COLX[1], ACT_TOP, tr("check traps"),
+        drawActionBand(c, ACT_COLX[1], ACT_ROW1_TOP, tr("check traps"),
                        tcool == 0, tcool, TRAPS_DELAY_S);
     }
-    // 分工 — opens the worker-assignment page. Hardcoded literal like the old
-    // "更多": 分/工 are in the §8.3 closure (分享 / 工人).
-    drawActionBand(c, ACT_COLX[2], ACT_TOP, "分工", true, 0, 0);
+    // 分工 — hardcoded literal like the old "更多": 分/工 are in the §8.3 closure
+    // (分享 / 工人). Blank until a job exists (parity with 查看陷阱's 无供给 blank).
+    if (g_game.hasUnlockedJob())
+        drawActionBand(c, ACT_COLX[0], ACT_ROW2_TOP, "分工", true, 0, 0);
 }
 
-// The action row's partial-refresh target (Room's buttonAreaRect parity): the
-// bottom-anchored row band plus a 2px bleed. tick() repaints just this rect while
-// a cooldown drains, instead of a full-page redraw.
-pages::Rect actionRowRect() {
-    return pages::Rect{ 0, ACT_TOP - 2, 540, ACT_H + 4 };
+// The cooldown partial-refresh target: only ROW 1 carries a draining bar (gather
+// /traps), so the tick repaints just that row's band (+ a 2px bleed) instead of a
+// full-page redraw — ROW 2 (分工) has no cooldown and never changes on a tick.
+pages::Rect actionCoolRect() {
+    return pages::Rect{ 0, ACT_ROW1_TOP - 2, 540, ACT_H + 4 };
 }
 
-// Clear the action row rect and repaint it into `c` (for the partial-refresh
-// path — the surrounding full-page pixels already sit in the canvas).
-void repaintActionRow(m5gfx::M5Canvas& c, uint32_t now) {
-    pages::Rect r = actionRowRect();
+// Repaint BOTH action rows into `c` for the partial-refresh path (the surrounding
+// full-page pixels already sit in the canvas). Only ROW 1 is pushed (actionCoolRect)
+// — redrawing ROW 2 identically is harmless and keeps one draw path.
+void repaintActionArea(m5gfx::M5Canvas& c, uint32_t now) {
+    pages::Rect r = actionCoolRect();
     c.fillRect(r.x, r.y, r.w, r.h, TFT_WHITE);
-    drawActionRow(c, now);
+    drawActionArea(c, now);
 }
 }  // namespace
 
@@ -389,48 +441,64 @@ const pages::Region* OutsidePage::regions(int* n) const {
 
 // Hidden until the forest opens: returning false makes showPageOrNext skip this
 // ring slot, so the page is invisible (and untappable) until outsideUnlocked.
+// The hide condition lives in available() — draw() and the status bar's page-dot
+// count share that one predicate (no drift between "skipped" and "no dot").
+bool OutsidePage::available() const { return g_game.outsideUnlocked; }
+
 bool OutsidePage::draw(m5gfx::M5Canvas& c) {
-    if (!g_game.outsideUnlocked) return false;
+    if (!available()) return false;
     c.fillSprite(TFT_WHITE);
     page_tabs::draw(c, 1);           // shared tab header, Outside active
-    drawWorkerSummary(c);            // 工人 fieldset (人口 line + read-only grid)
-    drawBuildings(c);                // 建筑 fieldset
-    drawInventory(c);                // 库存 fieldset
 
-    // 野外 action row — the page's only Region, bottom-anchored: one type=1 band
-    // carrying PARAM_ACTIONS; onLocalAction resolves 伐木 / 查看陷阱 / 分工 from x.
-    drawActionRow(c, epochNow());
-    m_regions[0].y0 = (uint16_t)ACT_TOP;
-    m_regions[0].y1 = (uint16_t)(ACT_TOP + ACT_H);
+    Layout L = computeLayout();      // flowed fieldset y-geometry for this state
+    drawWorkerSummary(c, L);         // 工人 fieldset (人口 line + read-only grid)
+    if (L.bldShown) drawBuildings(c, L);   // 建筑 fieldset (hidden when empty)
+    drawInventory(c, L);             // 库存 fieldset
+
+    // 野外 action area — two bottom-anchored rows, each a type=1 Region: row 1
+    // (伐木 | 查看陷阱, PARAM_ROW1) and row 2 (分工 | —, PARAM_ROW2). onLocalAction
+    // resolves the column from x within the row the pager already picked by y.
+    drawActionArea(c, epochNow());
+    m_regions[0].y0 = (uint16_t)ACT_ROW1_TOP;
+    m_regions[0].y1 = (uint16_t)(ACT_ROW1_TOP + ACT_H);
     m_regions[0].type  = 1;
-    m_regions[0].param = PARAM_ACTIONS;
-    m_regionCount = 1;
+    m_regions[0].param = PARAM_ROW1;
+    m_regions[1].y0 = (uint16_t)ACT_ROW2_TOP;
+    m_regions[1].y1 = (uint16_t)(ACT_ROW2_TOP + ACT_H);
+    m_regions[1].type  = 1;
+    m_regions[1].param = PARAM_ROW2;
+    m_regionCount = 2;
     return true;
 }
 
-// Long-press on the action row -> the press column picks the verb (x thirds at
-// ACT_DIV0/ACT_DIV1): 伐木 gatherWood, 查看陷阱 checkTraps (only when a trap
-// stands — else a blank cell, low beep), 分工 opens the worker-assignment page.
-// A success high-beeps + persists + repaints; a rejected/blank press low-beeps.
+// Long-press on an action row -> param picks the row, the press x picks the column
+// (x < ACT_DIV = left). ROW 1: 伐木 gatherWood | 查看陷阱 checkTraps (only when a
+// trap stands — else blank, low beep). ROW 2: 分工 opens AssignPage (only when a
+// job is unlocked — else blank, low beep) | blank right. A success high-beeps +
+// persists + repaints; a rejected/blank press low-beeps.
 void OutsidePage::onLocalAction(uint8_t param, int x, int y) {
     (void)y;
-    if (param != PARAM_ACTIONS) { M5.Speaker.tone(600, 120); return; }
 
-    // 分工 (right third): jump to AssignPage. open() flips its visibility gate;
-    // showPage draws it (its draw() now returns true) and persists it as current.
-    if (x >= ACT_DIV1) {
-        assign_page::open();
-        M5.Speaker.tone(1800, 80);
-        pager::showPage(pager::ringIndexByName("assign"), false);
+    if (param == PARAM_ROW2) {
+        // 分工 (left cell): jump to AssignPage — but only if a job exists (the
+        // entry gate the empty-assign fix hinges on). Right cell / no job = blank.
+        if (x < ACT_DIV && g_game.hasUnlockedJob()) {
+            assign_page::open();
+            M5.Speaker.tone(1800, 80);
+            pager::showPage(pager::ringIndexByName("assign"), false);
+        } else {
+            M5.Speaker.tone(600, 120);                // blank cell (no job / right)
+        }
         return;
     }
+    if (param != PARAM_ROW1) { M5.Speaker.tone(600, 120); return; }
 
     uint32_t now = epochNow();
     Result r;
-    if (x < ACT_DIV0) {
-        r = g_game.gatherWood(now);                   // 伐木 (left third)
+    if (x < ACT_DIV) {
+        r = g_game.gatherWood(now);                   // 伐木 (left cell)
     } else if (g_game.buildings[B_TRAP] > 0) {
-        r = g_game.checkTraps(now);                   // 查看陷阱 (middle third)
+        r = g_game.checkTraps(now);                   // 查看陷阱 (right cell)
     } else {
         M5.Speaker.tone(600, 120);                    // blank cell (no trap stands)
         return;
@@ -475,8 +543,8 @@ void OutsidePage::tick(uint32_t nowMs) {
     // but — unlike the content above — they are NOT in the content signature: the
     // wood/meat they yield is banked at press time, so nothing else changes while
     // they cool. Mirror the Room page: while either is live (or on the tick it
-    // clears) repaint JUST the action row, QUALITY on the clearing tick to wipe
-    // the bar ghost and restore the solid frame.
+    // clears) repaint JUST action row 1 (the cooldown row), QUALITY on the clearing
+    // tick to wipe the bar ghost and restore the solid frame.
     bool cooling = g_game.cooldownLeft(1, now) > 0 ||
                    (g_game.buildings[B_TRAP] > 0 && g_game.cooldownLeft(2, now) > 0);
 
@@ -488,9 +556,9 @@ void OutsidePage::tick(uint32_t nowMs) {
     }
 
     if (cooling || s_wasCooling) {
-        repaintActionRow(canvas, now);
+        repaintActionArea(canvas, now);
         bool cleared = (!cooling && s_wasCooling);
-        pager::partialRefresh(actionRowRect(),
+        pager::partialRefresh(actionCoolRect(),
                               cleared ? pages::RefreshMode::QUALITY
                                       : pages::RefreshMode::FAST);
     }

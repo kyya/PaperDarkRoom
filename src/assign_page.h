@@ -40,6 +40,7 @@ class AssignPage : public pages::Page {
 public:
     const char* name() const override { return "assign"; }
     bool draw(m5gfx::M5Canvas& canvas) override;   // false unless open + outsideUnlocked
+    bool available() const override;               // open + outsideUnlocked (see .cpp)
     const pages::Region* regions(int* n) const override;
     void onLocalAction(uint8_t param, int x, int y) override;  // param=band index; y picks ▲/▼
     void tick(uint32_t nowMs) override;
