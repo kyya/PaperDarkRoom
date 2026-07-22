@@ -1,6 +1,6 @@
 # PaperDarkRoom
 
-**A Dark Room**（Doublespeak Games，MPL-2.0）在 M5PaperS3 上的独立 e-ink 固件移植——官方简体中文文本首发。项目从 [dashboard-fw](https://github.com/) 的 `adarkroom` 分支迁出为独立仓库；固件本身与 dashboard-fw dashboard 固件共用同一块板级/分区/BLE 协议，可通过 BLE OTA 互相刷入同一台设备。
+**A Dark Room**（Doublespeak Games，MPL-2.0）在 M5PaperS3 上的独立 e-ink 固件移植——官方简体中文文本首发。
 
 非官方社区移植，与 Doublespeak Games 无隶属/背书关系。
 
@@ -19,7 +19,7 @@ Phase 2（Path + World 地图探索与战斗）、Phase 3（全事件池 + setpi
 
 ```
 platformio.ini   单一 env:adarkroom，src/ 即全部源码
-partitions.csv   A/B + big-nvs 分区表（与 dashboard-fw dashboard 固件同布局，OTA 互刷的前提）
+partitions.csv   A/B + big-nvs 分区表（BLE OTA 的分区前提）
 src/             固件源码
 tools/           构建期生成器 + BLE OTA 刷机脚本
 fonts/           CJK 字体源（fusion-pixel 12px，OFL-1.1）
@@ -56,7 +56,7 @@ pio run -e adarkroom -t upload
 python tools/ble_ota.py
 ```
 
-`tools/ble_ota.py` 复用与 dashboard-fw dashboard 固件（`dashboard-env` env）完全相同的 BLE GATT UUID 集合与 OTA 协议（8 字节头 `<II total|crc32>` + DATA 特征分块流 + STAT 特征通知），因此同一台设备上两个固件**可反复互刷**：本仓库的 `adarkroom.bin` 可以刷给一台正跑 dashboard-fw dashboard 固件的设备，反之亦然，物理前提是双方共用同一份 A/B 分区表（`partitions.csv`）。
+`tools/ble_ota.py` 使用固件内置的 BLE GATT OTA 协议（8 字节头 `<II total|crc32>` + DATA 特征分块流 + STAT 特征通知）推送镜像；A/B 双分区布局（`partitions.csv`）下 OTA 只写非活动 slot，失败可回滚。
 
 > **GATT 缓存陷阱**：新增/改动 BLE characteristic 后，Windows/WinRT 可能缓存旧的特征表，导致新特征"隐形"（`BleakCharacteristicNotFoundError`）。首次从 dashboard 固件互刷过来后，若 OTA 脚本报特征找不到，在 Windows 蓝牙设置里删除设备重新配对一次即可。不要在 tray/其它 BLE 中心设备仍连接着的情况下跑 `ble_ota.py`（一对多中心会冲突）。
 
