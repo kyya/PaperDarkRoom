@@ -32,6 +32,7 @@ public:
     bool available() const override;               // trading post stands (see .cpp)
     const pages::Region* regions(int* n) const override;
     void onLocalAction(uint8_t param, int x, int y) override;  // full-width: x/y unused
+    pages::Rect pressRect(const pages::Region& rg, int x, int y) const override;  // drawn frame, not the 540 default
     void tick(uint32_t nowMs) override;
     // wantsAwake stays false: the economy accrues offline via settle() on wake.
 

@@ -179,6 +179,41 @@ const pages::Region* AssignPage::regions(int* n) const {
     return m_regionCount ? m_regions : nullptr;
 }
 
+// Press feedback, mirroring onLocalAction's own decision exactly (both ignore
+// x — see below) rather than the Page default's full y-band/full-panel-width
+// flash, which read as "the whole row turned black" (the bug this fixes).
+// 返回 band: onLocalAction fires on ANY (x,y) inside the band's y-range — it
+// never reads x, and doesn't need to since the whole band is one action — so
+// there is no x/y split to mirror. The flash rect is the band's own drawn
+// frame (BAND_X/BAND_W/BAND_H — the exact rect drawReturnBand's two concentric
+// drawRect calls paint), not a label-hugging sub-rect: the whole button box
+// inverts, matching what the player actually sees as "the button".
+// Job bands: onLocalAction ALSO never reads x (explicitly (void)x'd) — the
+// press y alone picks +1/-1 across the FULL band width, including the name
+// label area, and it runs unconditionally (assignWorker no-ops silently, still
+// low-beeping, when the job band is disabled or already at a limit — it is
+// never skipped). So there is no x-gated or disabled-gated "don't flash" case
+// to mirror here either; every press this returns from truly does dispatch.
+// The rect is narrowed to the stepper zone anyway (matching the visual ▲/▼,
+// not the whole clickable row) purely so the flash reads as "this stepper
+// half fired" instead of blacking out the whole row like the return-band bug.
+pages::Rect AssignPage::pressRect(const pages::Region& rg, int x, int y) const {
+    (void)x;
+    if ((int)rg.param == m_jobCount) {                     // 返回 band
+        return pages::Rect{ BAND_X, rg.y0, BAND_W, BAND_H };  // drawReturnBand's own frame
+    }
+
+    // Job band: the stepper half the y-half selects (upper ▲ / lower ▼),
+    // x-span from just right of the divider rule to the band's right edge —
+    // the same STEP_DIV_X/BAND_W constants drawJobBand paints the divider and
+    // frame from.
+    int stepX0 = BAND_X + STEP_DIV_X + 1;
+    int stepW  = BAND_W - STEP_DIV_X - 1;
+    int half   = BAND_H / 2;
+    if (y < rg.y0 + half) return pages::Rect{ stepX0, rg.y0, stepW, half };
+    return pages::Rect{ stepX0, rg.y0 + half, stepW, BAND_H - half };
+}
+
 // Drawable only while open (and the forest is unlocked): returning false makes
 // showPageOrNext skip this ring slot, so the page is invisible + untappable
 // unless the Outside 分工 cell opened it — the same skip mechanism the un-unlocked

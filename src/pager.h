@@ -69,6 +69,13 @@ void payGhostDebtIfDue();
 // pager.cpp; used by client pages for seconds/minute counter repaints.
 void partialRefresh(const pages::Rect& r, pages::RefreshMode mode);
 
+// Invert-flash a button rect as press feedback (see pager.cpp): briefly shows
+// `r` in reverse video on the panel while leaving the canvas itself unchanged.
+// The dispatchRegion press path uses it internally; event_modal reuses it for its
+// own (non-dispatchRegion) choice buttons. The caller repaints over the flash, or
+// rebounds it with a partialRefresh of the same rect once the action is done.
+void flashPressRect(const pages::Rect& r);
+
 // Count of page-skip events since boot — each unavailable page showPageOrNext
 // had to step over (a cache hole). Surfaced in STATUS as skips= so a host can
 // see "unstable page order" (skipping onto nearest available pages) without

@@ -439,6 +439,23 @@ const pages::Region* OutsidePage::regions(int* n) const {
     return m_regionCount ? m_regions : nullptr;
 }
 
+// Press-flash target: each action ROW is two 240px columns, so flash only the
+// column cell that carries a real button — mirroring drawActionArea's 无供给
+// blanks (查看陷阱 only with a trap, 分工 only with a job, ROW 2 right always
+// blank). A blank cell returns w=0 so an empty half never flashes black.
+pages::Rect OutsidePage::pressRect(const pages::Region& rg, int x, int y) const {
+    (void)y;
+    bool left = x < ACT_DIV;
+    if (rg.param == PARAM_ROW1) {
+        if (left) return pages::Rect{ ACT_COLX[0], rg.y0, ACT_COL_W, ACT_H }; // 伐木
+        if (g_game.buildings[B_TRAP] > 0)
+            return pages::Rect{ ACT_COLX[1], rg.y0, ACT_COL_W, ACT_H };       // 查看陷阱
+    } else if (rg.param == PARAM_ROW2 && left && g_game.hasUnlockedJob()) {
+        return pages::Rect{ ACT_COLX[0], rg.y0, ACT_COL_W, ACT_H };           // 分工
+    }
+    return pages::Rect{ 0, rg.y0, 0, 0 };                                     // blank cell
+}
+
 // Hidden until the forest opens: returning false makes showPageOrNext skip this
 // ring slot, so the page is invisible (and untappable) until outsideUnlocked.
 // The hide condition lives in available() — draw() and the status bar's page-dot

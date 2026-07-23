@@ -43,6 +43,7 @@ public:
     bool available() const override;               // open + outsideUnlocked (see .cpp)
     const pages::Region* regions(int* n) const override;
     void onLocalAction(uint8_t param, int x, int y) override;  // param=band index; y picks ▲/▼
+    pages::Rect pressRect(const pages::Region& rg, int x, int y) const override;  // exact button
     void tick(uint32_t nowMs) override;
     // wantsAwake stays false: the economy accrues offline via settle() on wake.
 

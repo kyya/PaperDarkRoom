@@ -210,17 +210,25 @@ bool handleHold(int x, int y) {
     int b = hitButton(x, y);
     if (b < 0) { M5.Speaker.tone(600, 120); return true; }  // missed every band
 
+    // Press feedback: invert-flash the chosen choice band before resolving it
+    // (pager::flashPressRect leaves the canvas restored but the screen showing the
+    // inverted rect). An RC_OK repaint (repaint / closeAndRestore) paints over it;
+    // the non-repainting branches rebound the rect so the black flash bounces off.
+    pages::Rect pr{ BTN_X, btnTop(b, events::btnCount()), BTN_W, BTN_H };
+    pager::flashPressRect(pr);
+
     adr::Result r = events::choose(b);
-    if (r == adr::RC_ERR_COST) {
-        M5.Speaker.tone(600, 120);          // unaffordable: low beep, no change
-        return true;
-    }
     if (r == adr::RC_OK) {
         M5.Speaker.tone(1800, 80);          // settle chime (same as page actions)
         g_game.save();                      // events mutate stores; persist now
         if (events::active()) repaint();    // stayed (repeat trade / new scene)
         else                  closeAndRestore();  // event ended
+        return true;                        // the repaint overwrote the flash
     }
+    // No committing choice: nothing repaints the panel, so rebound the flashed
+    // band. Only RC_ERR_COST low-beeps (unchanged); a bare no-op stays silent.
+    if (r == adr::RC_ERR_COST) M5.Speaker.tone(600, 120);   // unaffordable
+    pager::partialRefresh(pr, pages::RefreshMode::FASTEST);
     return true;
 }
 

@@ -54,6 +54,15 @@ static uint16_t s_skipCount   = 0;
 
 static int s_curRing = 0;   // ring index of the page currently shown
 
+// Full-page push generation — bumped once per successful showPage() panel push
+// (NOT by partialRefresh). dispatchRegion's press-flash reads it to tell whether
+// the action already repainted the button (gen changed) or the black flash still
+// needs a manual rebound (gen unchanged — a host tap, a silent cooldown reject,
+// or an action whose only repaint was a partialRefresh that doesn't cover the
+// button, e.g. Room's RC_ERR_COST log-only refresh). Counting only whole-page
+// pushes is what lets that log-only partial still leave the button to be rebounded.
+static uint32_t s_showGen = 0;
+
 // Last server-page count observed by currentRingIndex(). s_curRing is a raw
 // live ring index, but frame_store's server count can change under it (first
 // sync 0->N, or a shrink) with no re-resolution; when this differs from the
@@ -264,6 +273,7 @@ bool showPage(int ring, bool quality) {
         status_bar::drawOnto(canvas);
         status_bar::drawVersionOnto(canvas);
         canvas.pushSprite(0, 0);
+        s_showGen++;   // whole-page push — press-flash rebound reads this (see above)
         if (quality) s_fastCount = 0; else s_fastCount++;
     }
     M5.Display.setEpdMode(epd_mode_t::epd_fast);
@@ -298,6 +308,31 @@ void partialRefresh(const pages::Rect& r, pages::RefreshMode mode) {
         case pages::RefreshMode::QUALITY:
             s_fastCount = 0;
             break;
+    }
+}
+
+// Invert-flash a button rect as press feedback: XOR-invert the canvas's
+// grayscale_8bit pixels inside `r` (1 byte/pixel, row stride = canvas width),
+// push just that rect under FASTEST (a quick DU flash), then invert the canvas
+// back — so the CANVAS ends up unchanged while the SCREEN briefly shows the rect
+// in reverse video. The caller either repaints over it (any showPage) or rebounds
+// it with a second partialRefresh of the now-restored rect. Rect is clamped to the
+// panel; an empty rect (pressRect's "don't flash" signal) never reaches here.
+void flashPressRect(const pages::Rect& r) {
+    const int W = canvas.width(), H = canvas.height();
+    int x0 = r.x < 0 ? 0 : r.x, y0 = r.y < 0 ? 0 : r.y;
+    int x1 = r.x + r.w, y1 = r.y + r.h;
+    if (x1 > W) x1 = W;
+    if (y1 > H) y1 = H;
+    if (x1 <= x0 || y1 <= y0) return;
+    uint8_t* buf = (uint8_t*)canvas.getBuffer();
+    if (!buf) return;
+    for (int pass = 0; pass < 2; pass++) {           // invert -> push -> invert back
+        for (int y = y0; y < y1; y++) {
+            uint8_t* row = buf + (size_t)y * W;
+            for (int x = x0; x < x1; x++) row[x] = (uint8_t)(255 - row[x]);
+        }
+        if (pass == 0) partialRefresh(r, pages::RefreshMode::FASTEST);
     }
 }
 
@@ -368,6 +403,14 @@ static bool dispatchRegion(int ring, int tx, int ty) {
     const pages::Region* tbl = pg ? pg->regions(&rn) : nullptr;
     for (int k = 0; k < rn; k++) {
         if (ty < tbl[k].y0 || ty >= tbl[k].y1) continue;
+        // Press feedback: invert-flash the exact button cell the press hit
+        // (pressRect resolves the sub-cell — a Room grid column, an Outside verb
+        // half — and returns w<=0 for an empty cell so it never flashes) BEFORE
+        // the action runs, so the black flash reads as "press registered".
+        pages::Rect pr = pg->pressRect(tbl[k], tx, ty);
+        bool flashed = pr.w > 0 && pr.h > 0;
+        if (flashed) flashPressRect(pr);
+        uint32_t gen = s_showGen;
         if (tbl[k].type == 1) {
             pg->onLocalAction(tbl[k].param, tx, ty);
             Serial.printf("[pager] local-action page=%d region=%d param=%u\n",
@@ -381,6 +424,13 @@ static bool dispatchRegion(int ring, int tx, int ty) {
             Serial.printf("[pager] region-press page=%d region=%d seq=%lu\n",
                           ring, k, (unsigned long)s_tapSeq);
         }
+        // Rebound the flash: if the action did NO full-page showPage (gen
+        // unchanged — a host tap, a silent cooldown reject, or a partial-only
+        // repaint like Room's RC_ERR_COST log refresh that leaves the button rect
+        // black), push the now-restored canvas rect back so the black flash bounces
+        // off. A showPage already repainted the button, so nothing to do then.
+        if (flashed && s_showGen == gen)
+            partialRefresh(pr, pages::RefreshMode::FASTEST);
         return true;
     }
     return false;

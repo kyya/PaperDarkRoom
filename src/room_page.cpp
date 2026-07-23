@@ -445,6 +445,19 @@ const pages::Region* RoomPage::regions(int* n) const {
     return m_regionCount ? m_regions : nullptr;
 }
 
+// Press-flash target: the row band (rg.param) + the press x pick the exact grid
+// cell — the SAME row*MAX_COLS+col slot onLocalAction resolves. A slot past the
+// filled cells (an odd action count's trailing column) returns w=0 so the empty
+// cell never flashes black.
+pages::Rect RoomPage::pressRect(const pages::Region& rg, int x, int y) const {
+    (void)y;
+    int row  = rg.param;
+    int col  = (x < COL_MID) ? 0 : 1;
+    int slot = row * MAX_COLS + col;
+    if (slot < 0 || slot >= m_slotCount) return pages::Rect{ 0, rg.y0, 0, 0 };
+    return pages::Rect{ COL_X0[col], rg.y0, COL_W, ROOM_BTN_H };
+}
+
 bool RoomPage::draw(m5gfx::M5Canvas& c) {
     c.fillSprite(TFT_WHITE);
     page_tabs::draw(c, 0);           // shared tab header, Room active

@@ -66,6 +66,18 @@ public:
         (void)param; (void)x; (void)y;
     }
 
+    // Press-feedback target: the exact button rect the pager should invert-flash
+    // when a press lands on `rg` at (x,y), BEFORE running the action (see
+    // pager::flashPressRect). Default = the whole y-band, full panel width —
+    // right for a page whose band IS a single button (Trade, the event modal).
+    // Pages with sub-cells in one band (the Room's two-column grid, the Outside
+    // verb columns) override to return just the pressed cell; a returned w<=0 or
+    // h<=0 means "don't flash this press" (e.g. an empty trailing grid cell).
+    virtual pages::Rect pressRect(const Region& rg, int x, int y) const {
+        (void)x; (void)y;
+        return pages::Rect{ 0, rg.y0, 540, rg.y1 - rg.y0 };
+    }
+
     // Time axis — called every loop() pass ONLY while this page is current
     // (pager::tickCurrent). May partial-refresh a sub-rect. Default: no-op.
     virtual void tick(uint32_t nowMs) { (void)nowMs; }

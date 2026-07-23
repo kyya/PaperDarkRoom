@@ -24,6 +24,7 @@ public:
     bool draw(m5gfx::M5Canvas& canvas) override;
     const pages::Region* regions(int* n) const override;
     void onLocalAction(uint8_t param, int x, int y) override;   // x picks the column; y unused
+    pages::Rect pressRect(const pages::Region& rg, int x, int y) const override;  // exact grid cell
     void tick(uint32_t nowMs) override;
     // wantsAwake stays false: the economy accrues offline via settle() on wake,
     // so there is nothing to keep the panel powered for between interactions.

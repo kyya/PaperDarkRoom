@@ -270,6 +270,17 @@ const pages::Region* TradePage::regions(int* n) const {
     return m_regionCount ? m_regions : nullptr;
 }
 
+// Press feedback: narrow the Page default's full 540px-wide flash (page.h) to
+// the band's own drawn frame. Every band here — real good or "更多" — shares
+// the same BUY_X/BUY_W/BUY_H rect drawBuyBand's two concentric drawRect calls
+// paint; BUY_X is PAD-inset (24px each side, not full-bleed), so the untouched
+// default would also flash that white margin outside the drawn frame. x/y are
+// unused: onLocalAction (and every band's drawn frame) doesn't split on them.
+pages::Rect TradePage::pressRect(const pages::Region& rg, int x, int y) const {
+    (void)x; (void)y;
+    return pages::Rect{ BUY_X, rg.y0, BUY_W, BUY_H };
+}
+
 // Hidden until the trading post stands: returning false makes showPageOrNext
 // skip this ring slot (same mechanism the Outside page uses for outsideUnlocked
 // — verified page-kind-agnostic: showPage -> pageAt resolves client pages too,
