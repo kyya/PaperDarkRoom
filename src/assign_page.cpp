@@ -170,6 +170,20 @@ void drawReturnBand(m5gfx::M5Canvas& c, int top) {
     cjk::drawText(c, BAND_X + (BAND_W - lw) / 2, top + (BAND_H - BTN_GLYPH) / 2 - 4,
                   label, BTN_SCALE);
 }
+
+// Content signature — a hash of every live value that alters a painted number
+// (population, worker mix, buildings — a new building unlocks a job band). tick()
+// compares it each second to decide a full redraw; onLocalAction re-baselines it
+// right after its own showPage so the same assignment no longer forces a SECOND
+// full redraw on the next tick (see onLocalAction). Reads only g_game, never mutates.
+uint32_t contentSig() {
+    uint32_t sig = 2166136261u;
+    auto mix = [&](uint32_t v) { sig = (sig ^ v) * 16777619u; };
+    mix(g_game.population); mix((uint32_t)g_game.maxPopulation());
+    for (int i = 0; i < JOB_COUNT; i++) mix(g_game.workers[i]);
+    for (int i = 0; i < BLD_COUNT; i++) mix(g_game.buildings[i]);
+    return sig;
+}
 }  // namespace
 
 // ================================ Page API =================================
@@ -269,7 +283,7 @@ void AssignPage::onLocalAction(uint8_t param, int x, int y) {
         assign_page::close();
         M5.Speaker.tone(1800, 80);
         pager::showPage(pager::ringIndexByName("outside"), false);
-        return;
+        return;                                      // navigates away — no tick to double up
     }
 
     uint8_t job = m_jobs[param];
@@ -282,6 +296,11 @@ void AssignPage::onLocalAction(uint8_t param, int x, int y) {
         M5.Speaker.tone(1800, 80);
         g_game.save();
         pager::showPage(pager::currentRingIndex(), false);
+        // Re-baseline tick()'s content signature to the state we JUST drew, so this
+        // same assignment no longer trips a SECOND full-page redraw next tick — only
+        // genuine economy advancing in the following second still does. No extra
+        // settle: draw() paints un-settled g_game and contentSig() must mirror it.
+        m_lastSig = contentSig();
     } else {
         M5.Speaker.tone(600, 120);                   // no idle pop / already at 0
     }
@@ -291,24 +310,20 @@ void AssignPage::onLocalAction(uint8_t param, int x, int y) {
 // to be open). Settle the economy each second, then repaint on any change to a
 // painted number (population, workers, idle count, buildings — a new building
 // unlocks a job band). A simplified Outside::tick: no cooldowns live here, so
-// every change is a full redraw with no partial path.
+// every change is a full redraw with no partial path. onLocalAction re-baselines
+// m_lastSig after its own showPage, so an assignment no longer forces a second
+// full redraw here.
 void AssignPage::tick(uint32_t nowMs) {
     static uint32_t s_lastTick = 0;
-    static uint32_t s_lastSig  = 0;
 
     if (s_lastTick != 0 && nowMs - s_lastTick < 1000) return;
     s_lastTick = nowMs;
 
     g_game.settle(epochNow());
 
-    uint32_t sig = 2166136261u;
-    auto mix = [&](uint32_t v) { sig = (sig ^ v) * 16777619u; };
-    mix(g_game.population); mix((uint32_t)g_game.maxPopulation());
-    for (int i = 0; i < JOB_COUNT; i++) mix(g_game.workers[i]);
-    for (int i = 0; i < BLD_COUNT; i++) mix(g_game.buildings[i]);
-
-    if (sig != s_lastSig) {
-        s_lastSig = sig;
+    uint32_t sig = contentSig();
+    if (sig != m_lastSig) {
+        m_lastSig = sig;
         pager::showPage(pager::currentRingIndex(), false);
     }
 }

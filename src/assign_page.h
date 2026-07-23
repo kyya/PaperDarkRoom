@@ -57,4 +57,8 @@ private:
     mutable int           m_regionCount = 0;
     mutable uint8_t       m_jobs[MAX_JOBS];     // Job id per visible band
     mutable int           m_jobCount = 0;
+    uint32_t              m_lastSig = 0;   // tick()'s content baseline; onLocalAction
+                                           // re-syncs it after its showPage so an
+                                           // assignment doesn't force a second full
+                                           // redraw next tick (see assign_page.cpp)
 };

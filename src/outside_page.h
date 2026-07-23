@@ -45,4 +45,8 @@ private:
     // inventory above are read-only. See outside_page.cpp for the geometry.
     mutable pages::Region m_regions[2];
     mutable int           m_regionCount = 0;   // 2 (the two action rows)
+    uint32_t              m_lastSig = 0;   // tick()'s content baseline; onLocalAction
+                                           // re-syncs it after its showPage so a
+                                           // press doesn't force a second full
+                                           // redraw next tick (see outside_page.cpp)
 };

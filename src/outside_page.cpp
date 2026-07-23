@@ -430,6 +430,39 @@ void repaintActionArea(m5gfx::M5Canvas& c, uint32_t now) {
     c.fillRect(r.x, r.y, r.w, r.h, TFT_WHITE);
     drawActionArea(c, now);
 }
+
+// Content signature — a hash of every live value that alters a painted number or
+// label (population, worker mix, buildings, inventory, the shared Room tab title).
+// tick() compares it each second to decide a full redraw; onLocalAction re-baselines
+// it right after its own showPage so the same action's state change doesn't force a
+// SECOND full redraw next tick (see onLocalAction). Reads only g_game, never mutates.
+uint32_t contentSig() {
+    uint32_t sig = 2166136261u;
+    auto mix = [&](uint32_t v) { sig = (sig ^ v) * 16777619u; };
+    mix(g_game.population); mix((uint32_t)g_game.maxPopulation());
+    mix(g_game.outsideUnlocked ? 1u : 0u);
+    mix((uint32_t)(uint8_t)g_game.fire);       // Room tab title (shared header)
+    for (int i = 0; i < JOB_COUNT; i++) mix(g_game.workers[i]);
+    for (int i = 0; i < BLD_COUNT; i++) mix(g_game.buildings[i]);
+    for (int i = 0; i < RES_COUNT; i++)  mix((uint32_t)g_game.whole((uint8_t)i));
+    for (int i = 0; i < ITEM_COUNT; i++) mix((uint32_t)g_game.items[i]);
+    return sig;
+}
+
+// Bounding rect (2px bleed) of the ROW-1 verb cells currently draining a bar:
+// bit 0 = 伐木 (gather ch1, left), bit 1 = 查看陷阱 (traps ch2, right). The cooldown
+// tick pushes just this — not the whole 540-wide row — so only the cell with a
+// moving bar flips. Empty mask -> zero rect (the caller gates on mask).
+pages::Rect coolingRect(uint8_t mask) {
+    int x0 = 540, x1 = 0;
+    for (int col = 0; col < 2; col++) {
+        if (!(mask & (1u << col))) continue;
+        if (ACT_COLX[col] < x0)             x0 = ACT_COLX[col];
+        if (ACT_COLX[col] + ACT_COL_W > x1) x1 = ACT_COLX[col] + ACT_COL_W;
+    }
+    if (x1 <= x0) return pages::Rect{ 0, 0, 0, 0 };
+    return pages::Rect{ x0 - 2, ACT_ROW1_TOP - 2, (x1 - x0) + 4, ACT_H + 4 };
+}
 }  // namespace
 
 // ================================ Page API =================================
@@ -524,6 +557,12 @@ void OutsidePage::onLocalAction(uint8_t param, int x, int y) {
         M5.Speaker.tone(1800, 80);
         g_game.save();
         pager::showPage(pager::currentRingIndex(), false);
+        // Re-baseline tick()'s content signature to the state we JUST drew (no extra
+        // settle: draw() paints un-settled g_game, contentSig() must mirror it). So
+        // this same 伐木/查看陷阱 no longer forces a SECOND full redraw next tick —
+        // only genuine economy advancing in the following second still does. (The 分工
+        // branch navigates away to AssignPage, so it has no such tick to double up.)
+        m_lastSig = contentSig();
     } else {
         M5.Speaker.tone(600, 120);                    // cooldown / engine reject
     }
@@ -532,12 +571,15 @@ void OutsidePage::onLocalAction(uint8_t param, int x, int y) {
 // Time axis (awake only). Settle the economy each second, then repaint on any
 // change to a painted number/label (population, workers, buildings, inventory).
 // tick 签名 keeps the worker mix so a change made on AssignPage (then paged back)
-// still repaints the worker summary here. The bottom action-row cooldowns get the
-// same partial-refresh path the Room page uses; everything else is a full redraw.
+// still repaints the worker summary here. onLocalAction re-baselines m_lastSig after
+// its own showPage, so a 伐木/查看陷阱 press no longer forces a second full redraw
+// here. The bottom action-row cooldowns drain a bar: paint both rows into the canvas
+// but push ONLY the cooling cell(s) (coolingRect), FASTEST — never QUALITY, whose
+// full-row grayscale flash is the "big black block" the user reported; that ghost is
+// cleaned at sleep by pager::payGhostDebtIfDue instead. Mirrors the Room page.
 void OutsidePage::tick(uint32_t nowMs) {
-    static uint32_t s_lastTick = 0;
-    static uint32_t s_lastSig  = 0;
-    static bool     s_wasCooling = false;
+    static uint32_t s_lastTick     = 0;
+    static uint8_t  s_lastCoolMask = 0;   // cooling cells the previous tick pushed
 
     if (s_lastTick != 0 && nowMs - s_lastTick < 1000) return;
     s_lastTick = nowMs;
@@ -545,39 +587,31 @@ void OutsidePage::tick(uint32_t nowMs) {
     uint32_t now = epochNow();
     g_game.settle(now);
 
-    uint32_t sig = 2166136261u;
-    auto mix = [&](uint32_t v) { sig = (sig ^ v) * 16777619u; };
-    mix(g_game.population); mix((uint32_t)g_game.maxPopulation());
-    mix(g_game.outsideUnlocked ? 1u : 0u);
-    mix((uint32_t)(uint8_t)g_game.fire);       // Room tab title (shared header)
-    for (int i = 0; i < JOB_COUNT; i++) mix(g_game.workers[i]);
-    for (int i = 0; i < BLD_COUNT; i++) mix(g_game.buildings[i]);
-    // Inventory section: repaint when any shown store/item count changes.
-    for (int i = 0; i < RES_COUNT; i++)  mix((uint32_t)g_game.whole((uint8_t)i));
-    for (int i = 0; i < ITEM_COUNT; i++) mix((uint32_t)g_game.items[i]);
+    uint32_t sig = contentSig();
 
-    // 野外 action-row cooldowns (gather ch1 / traps ch2) drain a progress bar,
-    // but — unlike the content above — they are NOT in the content signature: the
-    // wood/meat they yield is banked at press time, so nothing else changes while
-    // they cool. Mirror the Room page: while either is live (or on the tick it
-    // clears) repaint JUST action row 1 (the cooldown row), QUALITY on the clearing
-    // tick to wipe the bar ghost and restore the solid frame.
-    bool cooling = g_game.cooldownLeft(1, now) > 0 ||
-                   (g_game.buildings[B_TRAP] > 0 && g_game.cooldownLeft(2, now) > 0);
+    // 野外 action-row cooldowns (gather ch1 left / traps ch2 right) drain a bar,
+    // but — unlike the content above — they are NOT in the signature: the wood/meat
+    // they yield is banked at press time, so nothing else changes while they cool.
+    // bit 0 = 伐木 (left), bit 1 = 查看陷阱 (right, only when a trap stands).
+    uint8_t coolMask = 0;
+    if (g_game.cooldownLeft(1, now) > 0) coolMask |= 1u;
+    if (g_game.buildings[B_TRAP] > 0 && g_game.cooldownLeft(2, now) > 0)
+        coolMask |= 2u;
 
-    if (sig != s_lastSig) {
-        s_lastSig = sig;
+    if (sig != m_lastSig) {
+        m_lastSig = sig;
         pager::showPage(pager::currentRingIndex(), false);   // recomputes the page
-        s_wasCooling = cooling;
+        s_lastCoolMask = coolMask;
         return;
     }
 
-    if (cooling || s_wasCooling) {
+    if (coolMask || s_lastCoolMask) {
         repaintActionArea(canvas, now);
-        bool cleared = (!cooling && s_wasCooling);
-        pager::partialRefresh(actionCoolRect(),
-                              cleared ? pages::RefreshMode::QUALITY
-                                      : pages::RefreshMode::FAST);
+        // Union of the cells cooling now and the ones that just cleared this tick
+        // (were cooling last tick) — never the whole 540-wide row. FASTEST; the
+        // ghost cleanup is deferred to sleep (see the function note).
+        pager::partialRefresh(coolingRect((uint8_t)(coolMask | s_lastCoolMask)),
+                              pages::RefreshMode::FASTEST);
     }
-    s_wasCooling = cooling;
+    s_lastCoolMask = coolMask;
 }

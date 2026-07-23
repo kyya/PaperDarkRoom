@@ -46,4 +46,8 @@ private:
     mutable uint8_t       m_slotCodes[MAX_BANDS];   // Trade id, or A_MORE per band
     mutable int           m_slotCount = 0;
     int                   m_page = 0;      // which batch of goods is shown
+    uint32_t              m_lastSig = 0;   // tick()'s content baseline; onLocalAction
+                                           // re-syncs it after its showPage so a buy
+                                           // doesn't force a second full redraw next
+                                           // tick (see trade_page.cpp)
 };

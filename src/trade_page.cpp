@@ -261,6 +261,23 @@ void drawBuyBand(m5gfx::M5Canvas& c, int top, const BandView& v) {
     }
 }
 
+// Content signature — a hash of every live value that alters a painted number or
+// label (whole resource units, buildings, the shared Room/Outside tab titles, the
+// seen-mask that gates a buy band). tick() compares it each second to decide a full
+// redraw; onLocalAction re-baselines it right after its own showPage so the same
+// buy no longer forces a SECOND full redraw on the next tick (see onLocalAction).
+// Reads only g_game, never mutates.
+uint32_t contentSig() {
+    uint32_t sig = 2166136261u;
+    auto mix = [&](uint32_t v) { sig = (sig ^ v) * 16777619u; };
+    for (int i = 0; i < RES_COUNT; i++) mix((uint32_t)g_game.whole((uint8_t)i));
+    for (int i = 0; i < BLD_COUNT; i++) mix(g_game.buildings[i]);
+    mix((uint32_t)(uint8_t)g_game.fire);                 // Room tab title
+    mix(g_game.outsideUnlocked ? 1u : 0u);               // Outside tab gate
+    mix(g_game.seen);                                    // B4: a newly-seen resource adds its buy band
+    return sig;
+}
+
 }  // namespace
 
 // ================================ Page API =================================
@@ -328,6 +345,13 @@ void TradePage::onLocalAction(uint8_t param, int x, int y) {
         M5.Speaker.tone(1800, 80);
         g_game.save();
         pager::showPage(pager::currentRingIndex(), false);
+        // Re-baseline tick()'s content signature to the state we JUST drew, so this
+        // same buy no longer trips a SECOND full-page redraw next tick — only genuine
+        // economy advancing in the following second still does. No extra settle:
+        // draw() paints un-settled g_game and contentSig() must mirror exactly that.
+        // (buyOfferable is const, so draw() has no craftUnlocked-style side effect to
+        // capture; after showPage stays the canonical spot for parity with Room.)
+        m_lastSig = contentSig();
     } else {
         // RC_ERR_COST (engine pushed "not enough X") / RC_ERR_MAX / RC_ERR_LOCKED
         // — low beep; nothing on this page changed, so no repaint.
@@ -340,27 +364,20 @@ void TradePage::onLocalAction(uint8_t param, int x, int y) {
 // band's affordable/dashed state and presence (a compass leaving the list at
 // max, a good becoming affordable), plus the shared header's Room/Outside tab
 // titles. Buys carry no cooldown, so — unlike Room/Outside — there is no partial
-// button-area path; every change is a full redraw. Mirrors the room/outside
-// tick cadence.
+// button-area path; every change is a full redraw. onLocalAction re-baselines
+// m_lastSig after its own showPage, so a buy no longer forces a second full redraw
+// here. Mirrors the room/outside tick cadence.
 void TradePage::tick(uint32_t nowMs) {
     static uint32_t s_lastTick = 0;
-    static uint32_t s_lastSig  = 0;
 
     if (s_lastTick != 0 && nowMs - s_lastTick < 1000) return;
     s_lastTick = nowMs;
 
     g_game.settle(epochNow());
 
-    uint32_t sig = 2166136261u;
-    auto mix = [&](uint32_t v) { sig = (sig ^ v) * 16777619u; };
-    for (int i = 0; i < RES_COUNT; i++) mix((uint32_t)g_game.whole((uint8_t)i));
-    for (int i = 0; i < BLD_COUNT; i++) mix(g_game.buildings[i]);
-    mix((uint32_t)(uint8_t)g_game.fire);                 // Room tab title
-    mix(g_game.outsideUnlocked ? 1u : 0u);               // Outside tab gate
-    mix(g_game.seen);                                    // B4: a newly-seen resource adds its buy band
-
-    if (sig != s_lastSig) {
-        s_lastSig = sig;
+    uint32_t sig = contentSig();
+    if (sig != m_lastSig) {
+        m_lastSig = sig;
         pager::showPage(pager::currentRingIndex(), false);
     }
 }
