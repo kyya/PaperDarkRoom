@@ -87,6 +87,11 @@ struct SpScene {
     LootDrop    loot[SP_SCENE_LOOT_MAX];   // narrative loot auto-banked on load
     uint8_t     lootN;
     uint8_t     btnStart, btnCount, defaultBtn;   // into the setpiece's btns[]
+    bool        visit;        // setpieces.js World.markVisited(curPos) on load: the
+                              // one-shot landmark scenes (house outcomes, battlefield,
+                              // borehole, ship, swamp talk, mine cleared) spend the
+                              // tile so it can't re-trigger. Omitted -> false (a scene
+                              // you can leave and return to, e.g. a mine's start).
 };
 
 // ---- setpiece ------------------------------------------------------------
@@ -141,7 +146,7 @@ static const SpScene sw_scenes[] = {
         "he speaks of once leading the great fleets to fresh worlds.",
         "unfathomable destruction to fuel wanderer hungers.",
         "his time here, now, is his penance." },
-      nullptr, SPE_GRANT_GASTRONOME, false, 0, NOLOOT, 4, 1, 0 },
+      nullptr, SPE_GRANT_GASTRONOME, false, 0, NOLOOT, 4, 1, 0, true },
 };
 
 // ===========================================================================
@@ -172,16 +177,16 @@ static const SpScene ho_scenes[] = {
     { { "the house has been ransacked.",
         "but there is a cache of medicine under the floorboards.", nullptr, nullptr },
       nullptr, SPE_NONE, false, 0,
-      { {false,R_MEDICINE,2,5,1000}, LOOT_END,LOOT_END,LOOT_END,LOOT_END,LOOT_END,LOOT_END,LOOT_END }, 1, 2, 1, 0 },
+      { {false,R_MEDICINE,2,5,1000}, LOOT_END,LOOT_END,LOOT_END,LOOT_END,LOOT_END,LOOT_END,LOOT_END }, 1, 2, 1, 0, true },
     /* 2 supplies */
     { { "the house is abandoned, but not yet picked over.",
         "still a few drops of water in the old well.", nullptr, nullptr },
       "water replenished", SPE_FILL_WATER, false, 0,
       { {false,R_CURED_MEAT,1,10,800}, {false,R_LEATHER,1,10,200},
-        {false,R_CLOTH,1,10,500}, LOOT_END,LOOT_END,LOOT_END,LOOT_END,LOOT_END }, 3, 3, 1, 0 },
+        {false,R_CLOTH,1,10,500}, LOOT_END,LOOT_END,LOOT_END,LOOT_END,LOOT_END }, 3, 3, 1, 0, true },
     /* 3 occupied (combat) */
     { { nullptr, nullptr, nullptr, nullptr },
-      nullptr, SPE_NONE, true, 0, NOLOOT, 4, 1, 0 },
+      nullptr, SPE_NONE, true, 0, NOLOOT, 4, 1, 0, true },
 };
 
 // ===========================================================================
@@ -198,7 +203,7 @@ static const SpScene bf_scenes[] = {
       { {true,I_RIFLE,1,3,500}, {false,R_BULLETS,5,20,800}, {true,I_LASER_RIFLE,1,3,300},
         {false,R_ENERGY_CELL,5,10,500}, {true,I_GRENADE,1,5,500},
         {false,R_ALIEN_ALLOY,1,1,300}, LOOT_END,LOOT_END }, 6,
-      0, 1, 0 },
+      0, 1, 0, true },
 };
 
 // ===========================================================================
@@ -214,7 +219,7 @@ static const SpScene bh_scenes[] = {
         nullptr },
       nullptr, SPE_NONE, false, 0,
       { {false,R_ALIEN_ALLOY,1,3,1000}, LOOT_END,LOOT_END,LOOT_END,LOOT_END,LOOT_END,LOOT_END,LOOT_END }, 1,
-      0, 1, 0 },
+      0, 1, 0, true },
 };
 
 // ===========================================================================
@@ -227,7 +232,7 @@ static const SpScene sh_scenes[] = {
     { { "the familiar curves of a wanderer vessel rise up out of the dust and ash. ",
         "lucky that the natives can't work the mechanisms.",
         "with a little effort, it might fly again.", nullptr },
-      nullptr, SPE_CLEAR_SHIP, false, 0, NOLOOT, 0, 1, 0 },
+      nullptr, SPE_CLEAR_SHIP, false, 0, NOLOOT, 0, 1, 0, true },
 };
 
 // ===========================================================================
@@ -255,7 +260,7 @@ static const SpScene im_scenes[] = {
       nullptr, SPE_NONE, true, 0, NOLOOT, 2, 1, 0 },
     /* 2 cleared */
     { { "the beast is dead.", "the mine is now safe for workers.", nullptr, nullptr },
-      "the iron mine is clear of dangers", SPE_CLEAR_IRON, false, 0, NOLOOT, 3, 1, 0 },
+      "the iron mine is clear of dangers", SPE_CLEAR_IRON, false, 0, NOLOOT, 3, 1, 0, true },
 };
 
 // ===========================================================================
@@ -289,7 +294,7 @@ static const SpScene cm_scenes[] = {
     /* 4 cleared */
     { { "the camp is still, save for the crackling of the fires.",
         "the mine is now safe for workers.", nullptr, nullptr },
-      "the coal mine is clear of dangers", SPE_CLEAR_COAL, false, 0, NOLOOT, 7, 1, 0 },
+      "the coal mine is clear of dangers", SPE_CLEAR_COAL, false, 0, NOLOOT, 7, 1, 0, true },
 };
 
 // ===========================================================================
@@ -326,7 +331,7 @@ static const SpScene su_scenes[] = {
     /* 4 cleared */
     { { "the military presence has been cleared.",
         "the mine is now safe for workers.", nullptr, nullptr },
-      "the sulphur mine is clear of dangers", SPE_CLEAR_SULPHUR, false, 0, NOLOOT, 7, 1, 0 },
+      "the sulphur mine is clear of dangers", SPE_CLEAR_SULPHUR, false, 0, NOLOOT, 7, 1, 0, true },
 };
 
 // ===========================================================================

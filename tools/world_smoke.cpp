@@ -902,6 +902,84 @@ int main() {
         (void)alloyBefore;
     }
 
+    printf("== [setpiece] markVisited stops a landmark re-triggering (upstream 'H!') ==\n");
+    {
+        GameState gs; WorldState w;
+        // A house 5 east of the walker; plain forest everywhere else.
+        plant(w, gs, VILLAGE_X + 4, VILLAGE_Y, T_FOREST, 4242);
+        const int hx = VILLAGE_X + 5, hy = VILLAGE_Y;
+        w.ex.tiles[hy * WORLD_DIM + hx] = T_HOUSE;
+        w.ex.outfitRes[R_CURED_MEAT] = 1000;              // supplies can't run out
+        w.ex.maxWater = 30000; w.ex.water = 30000;
+        w.ex.fightMove = -30000;                          // no random fight interferes
+
+        // First arrival: the fresh house fires its setpiece (no upkeep this step).
+        StepResult r = w.move(gs, DIR_EAST);              // step east onto the house
+        CHECK(r.kind == STEP_LANDMARK && r.scene == SP_HOUSE,
+              "fresh house fires its setpiece on first arrival");
+        CHECK(!w.exVisited(hx, hy), "house not yet visited (no terminal scene has run)");
+
+        // Drive the setpiece into a terminal outcome. All of medicine/supplies/
+        // occupied markVisited on load (occupied before the fight is armed), so the
+        // tile is spent regardless of which branch the roll picks.
+        setpiece::bind(&w, &gs);
+        CHECK(setpiece::begin(SP_HOUSE), "house setpiece begins");
+        CHECK(!w.exVisited(hx, hy), "start scene does NOT mark visited (leave-and-return ok)");
+        CHECK(setpiece::choose(0) == RC_OK, "go inside -> a terminal outcome");
+        CHECK(w.exVisited(hx, hy), "a terminal house scene marks the tile visited");
+        setpiece::end();
+
+        // Re-step onto the now-visited house: upstream 'H!' misses LANDMARKS, so it
+        // is plain terrain — supplies are consumed and NO setpiece fires.
+        w.ex.x = hx - 1; w.ex.y = hy;                     // stand just west of it
+        int waterBefore = w.ex.water;
+        r = w.move(gs, DIR_EAST);                         // back onto the visited house
+        CHECK(r.kind != STEP_LANDMARK, "a visited house no longer fires its setpiece");
+        CHECK(w.ex.water == waterBefore - 1,
+              "visited house is plain terrain: water upkeep ran (useSupplies)");
+    }
+
+    printf("== [setpiece] visited committed on goHome, discarded on die (World.state layering) ==\n");
+    {
+        GameState gs; gs.init();
+        WorldState w; w.init(); w.generateMap(0xDEAD01);
+        const int hx = VILLAGE_X + 1, hy = VILLAGE_Y;     // house right next to home
+        w.tiles[hy * WORLD_DIM + hx] = T_HOUSE;
+        w.saveWorld();
+        int16_t out[RES_COUNT] = { 0 };
+        auto stock = [&]() { gs.stores[R_CURED_MEAT] = 5 * FP; out[R_CURED_MEAT] = 5; };
+        auto visitHouse = [&]() {                         // drive house to a terminal scene
+            setpiece::bind(&w, &gs);
+            setpiece::begin(SP_HOUSE);
+            setpiece::choose(0);                          // go inside -> markVisited outcome
+            setpiece::end();
+        };
+
+        // Trip 1: mark the house visited, then DIE -> the mark is discarded.
+        stock(); CHECK(w.embark(gs, out, nullptr, 1), "trip1 embark");
+        StepResult r = w.move(gs, DIR_EAST);
+        CHECK(r.kind == STEP_LANDMARK && r.scene == SP_HOUSE, "trip1: fresh house triggers");
+        visitHouse();
+        CHECK(w.exVisited(hx, hy), "trip1: house visited on the working map");
+        w.die();
+
+        // Trip 2: die() dropped the mark -> the house triggers again; visit it and
+        // walk HOME so goHome commits the mark into the committed layer.
+        stock(); CHECK(w.embark(gs, out, nullptr, 1), "trip2 embark");
+        r = w.move(gs, DIR_EAST);
+        CHECK(r.kind == STEP_LANDMARK && r.scene == SP_HOUSE,
+              "trip2: house triggers again (die discarded the visited mark)");
+        visitHouse();
+        r = w.move(gs, DIR_WEST);                         // back onto the village
+        CHECK(r.kind == STEP_HOME, "trip2: reached home -> goHome commits the visited mark");
+
+        // Trip 3: the committed mark makes the house plain terrain across expeditions.
+        stock(); CHECK(w.embark(gs, out, nullptr, 1), "trip3 embark");
+        r = w.move(gs, DIR_EAST);
+        CHECK(r.kind != STEP_LANDMARK,
+              "trip3: committed-visited house no longer triggers (persisted like 'H!')");
+    }
+
     printf("\n==== %d passed, %d failed ====\n", g_pass, g_fail);
     return g_fail ? 1 : 0;
 }

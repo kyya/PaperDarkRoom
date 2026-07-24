@@ -237,6 +237,12 @@ public:
                        LootLine* out, int outCap);
     void spFillWater() { ex.water = ex.maxWater; }        // outpost / house well
     void spGrantGastronome(GameState& gs);                // swamp charm -> perk
+    // world.js markVisited — mark the CURRENT landmark tile as consumed (upstream
+    // appends '!' to the tile char). A visited landmark's doSpace LANDMARKS lookup
+    // then misses, so move() treats it as plain terrain (no re-trigger). Written to
+    // the WORKING visited mask (goHome commits, die discards) — the same layering
+    // as revealed/tiles. Called from the setpiece scenes upstream marks visited.
+    void spMarkVisited();
     // Persist the trip after a setpiece scene mutates it (loot banked, water
     // filled, mine flagged): the World map changes commit at goHome, but the bag /
     // water / cleared flags must survive a power-off mid-setpiece like any step.

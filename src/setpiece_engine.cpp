@@ -56,6 +56,7 @@ void loadScene(int idx) {
     s_dispN = 0;
     const SpScene& sc = s_def->scenes[idx];
     applyEffect(sc.effect);
+    if (sc.visit) s_w->spMarkVisited();               // setpieces.js World.markVisited
     if (sc.notify && s_gs) s_gs->pushLog(sc.notify);
     if (sc.combat) {
         s_w->beginFightSetpiece(s_def->enemies[sc.enemy]);

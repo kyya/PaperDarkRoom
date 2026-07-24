@@ -302,7 +302,6 @@ bool WorldState::embark(GameState& gs, const int16_t* outfitRes,
     if (outfitItem)
         for (int i = 0; i < ITEM_COUNT; i++) ex.outfitItem[i] = outfitItem[i];
     lightMap(ex.x, ex.y);
-    setBit(ex.visited, widx(ex.x, ex.y));
     saveTrek();
     return true;
 }
@@ -459,7 +458,6 @@ StepResult WorldState::move(GameState& gs, uint8_t dir) {
     uint8_t oldTile = ex.tiles[widx(ex.x, ex.y)];        // narrateMove's "from" tile
     ex.x = (int16_t)nx; ex.y = (int16_t)ny;
     lightMap(nx, ny);
-    setBit(ex.visited, widx(nx, ny));
 
     // doSpace(): village -> goHome; landmark -> setpiece hook (no upkeep this
     // step); otherwise upkeep + fight roll on plain ground.
@@ -475,7 +473,12 @@ StepResult WorldState::move(GameState& gs, uint8_t dir) {
         res.kind = STEP_HOME; res.scene = SP_NONE;
         return res;                                   // trek already cleared
     }
-    if (isLandmark(tile)) {
+    // world.js doSpace: a markVisited'd landmark (tile char gains a '!') misses the
+    // LANDMARKS lookup and falls through to plain terrain (useSupplies + checkFight).
+    // We model that '!' with the working visited mask. Outposts are exempt — they
+    // carry their OWN one-shot (outpostUsed) and are never markVisited'd upstream.
+    bool spentLandmark = tile != T_OUTPOST && getBit(ex.visited, widx(nx, ny));
+    if (isLandmark(tile) && !spentLandmark) {
         if (tile == T_OUTPOST && outpostUsed(nx, ny)) {
             res.kind = STEP_MOVED;                    // used outpost = safe, no upkeep
         } else {
@@ -842,6 +845,14 @@ void WorldState::fightEndVictory() {
 void WorldState::spGrantGastronome(GameState& gs) {
     gs.addPerk(PK_GASTRONOME);
     ex.gastronome = true;
+}
+
+// world.js markVisited — flag the current landmark tile as consumed on the working
+// map. move() then routes a re-step through the plain-terrain branch (no re-trigger),
+// exactly as upstream's 'H!' tile char misses the LANDMARKS lookup. Committed at
+// goHome, discarded at die() (working-layer, same as revealed/tiles).
+void WorldState::spMarkVisited() {
+    if (inBounds(ex.x, ex.y)) setBit(ex.visited, widx(ex.x, ex.y));
 }
 
 int WorldState::spRand1000() { return (int)(xorshift(ex.rng) % 1000u); }
