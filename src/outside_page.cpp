@@ -12,6 +12,7 @@
 // follows the §9.4 vertical budget (24px CJK, >=80px long-press bands). See
 // outside_page.h for the region model.
 #include "outside_page.h"
+#include "action_band.h"        // shared band renderer (v0.10.1, room+outside)
 #include "assign_page.h"        // 分工 cell opens the worker-assignment page
 #include "path_page.h"          // 尘土之路 cell opens the Path (背包整备) page
 #include "cjk_text.h"
@@ -41,7 +42,7 @@ constexpr int CONTENT_W = 540 - 2 * PAD;     // 492px usable (§9.2)
 // from a fixed top anchor (WRK_LEGEND_Y=84, under the tab header) with a uniform
 // 12px gap. Only the y axis + row counts are dynamic — the x geometry (box edges,
 // column widths/positions) stays constant. The 野外 action AREA is bottom-anchored
-// (independent of the flow) as two 80px rows: row 1 伐木 | 查看陷阱, row 2 分工 | —.
+// (independent of the flow) as two 96px rows: row 1 伐木 | 查看陷阱, row 2 分工 | —.
 //
 // Per-box height (box y0=top border, y1=bottom border): a box that shows N
 // content rows spans boxY0..(rowTop + N*ROWH), where boxY0 = legendY + GLYPH/2 and
@@ -61,12 +62,14 @@ constexpr int CONTENT_W = 540 - 2 * PAD;     // 492px usable (§9.2)
 //   工人 4 rows  -> box 96..232
 //   建筑 10 buildings -> 5 rows -> legend@244, box 256..420
 //   库存 starts rowTop=468. Space to the action area: INV_MAX_BOTTOM =
-//        ACT_ROW1_TOP - 12 = 734, so floor((734-468)/28) = 9 rows = 27 cells.
-//   Max 库存 entries = RES_COUNT(19) + ITEM_COUNT(14) = 33 > 27 -> the grid CLAMPS
-//   to 9 rows and the last cell collapses to "…" (the pre-existing tail-collapse,
+//        ACT_ROW1_TOP - 12 = 702 (v0.10.1 grew ACT_H 80 -> 96 for the
+//        cost/yield subtitle, see the 野外 action AREA note below), so
+//        floor((702-468)/28) = 8 rows = 24 cells.
+//   Max 库存 entries = RES_COUNT(19) + ITEM_COUNT(14) = 33 > 24 -> the grid CLAMPS
+//   to 8 rows and the last cell collapses to "…" (the pre-existing tail-collapse,
 //   now driven by remaining-space rows instead of a fixed INV_ROWS constant).
-//   库存 box then ends 468+9*28 = 720 < 734, clearing the action row-1 top (746)
-//   by 26px. All region y's + the tick cooldown-refresh rect track the (static)
+//   库存 box then ends 468+8*28 = 692 < 702, clearing the action row-1 top (714)
+//   by 22px. All region y's + the tick cooldown-refresh rect track the (static)
 //   action area, so they need no dynamic recompute.
 // ----------------------------------------------------------------------------
 
@@ -112,23 +115,29 @@ constexpr int INV_COLX[INV_COLS] = {
 // ---- 野外 action AREA (v0.4.5): two 240px columns, two rows, bottom-anchored.
 // Row 2 (分工) bottom hugs 916 (< 928 status bar); row 1 (伐木 | 查看陷阱) sits a
 // 10px gap above it. Two columns: (492 - 12)/2 = 240px each, x = {24, 276} (276 +
-// 240 = 516 = right edge ✓). 36px labels have room to spare — the widest,
-// "查看陷阱" = 4x36 = 144px < 240 ✓.
-constexpr int ACT_H        = 80;             // long-press band (§9.3: >=80px floor)
+// 240 = 516 = right edge ✓).
+// v0.10.1 ("第二页的按钮加消耗/收获"): ROW 1's two verbs now carry a cost/yield
+// sub-row (the shared action_band renderer's convention, "+50 木头" / "-2 诱饵")
+// the SAME bottom-anchored way — ACT_H grows 80 -> 96 to fit label+subtitle+
+// bar-gutter (both 伐木's yield and 查看陷阱's bait cost are always exactly one
+// resource, so unlike Room's craft costs this page never needs a 2-line wrap).
+// ROW 2 (分工 / 尘土之路) is pure navigation with no cost ever, so it keeps the
+// plain single-label centering action_band::draw's `hasCost=false` branch
+// already has. The label itself is 24px (action_band::BTN_SCALE, shrunk from
+// the app-wide 36px verb-label scale along with room_page.cpp's — see
+// room_page.cpp for the "why smaller" rationale); even the widest label,
+// "查看陷阱" = 4x24 = 96px, clears the 240px column with room to spare.
+constexpr int ACT_H        = 96;             // long-press band (§9.3: >=80px floor)
 constexpr int ACT_ROW_GAP  = 10;
-constexpr int ACT_ROW2_TOP = 916 - ACT_H;                       // 836 — 分工 row (bottom)
-constexpr int ACT_ROW1_TOP = ACT_ROW2_TOP - ACT_ROW_GAP - ACT_H; // 746 — gather/traps row
+constexpr int ACT_ROW2_TOP = 916 - ACT_H;                       // 820 — 分工 row (bottom)
+constexpr int ACT_ROW1_TOP = ACT_ROW2_TOP - ACT_ROW_GAP - ACT_H; // 714 — gather/traps row
 constexpr int ACT_COL_GAP  = 12;
 constexpr int ACT_COL_W    = (CONTENT_W - ACT_COL_GAP) / 2;      // 240
 constexpr int ACT_COLX[2]  = { PAD, PAD + ACT_COL_W + ACT_COL_GAP };  // {24, 276}
 constexpr int ACT_DIV      = ACT_COLX[1];    // 276 — press x < DIV -> left column
 
 // Overflow ceiling for the 库存 box: it must stop this far above the action area.
-constexpr int INV_MAX_BOTTOM = ACT_ROW1_TOP - FS_BOX_GAP;        // 734
-
-// 36px labels (原作「框大字小」) for the action verbs, centered in their cells.
-constexpr int BTN_SCALE = 3;                 // 12px grid x3 = 36px (verb label)
-constexpr int BTN_GLYPH = 12 * BTN_SCALE;    // 36px line box
+constexpr int INV_MAX_BOTTOM = ACT_ROW1_TOP - FS_BOX_GAP;        // 702
 
 // One param per action ROW (the pager resolves the row from the press y = which
 // Region band it hit; onLocalAction then resolves the column from x).
@@ -136,6 +145,27 @@ constexpr uint8_t PARAM_ROW1 = 0xFE;         // 伐木 | 查看陷阱
 constexpr uint8_t PARAM_ROW2 = 0xFD;         // 分工 | —
 
 int ceilDiv(int a, int b) { return (a + b - 1) / b; }
+
+// 伐木's current wood yield — "+50 木头" with a cart, else "+10 木头" (room.js
+// gatherWood's own amount, game_state.cpp:336). Always exactly one resource.
+void gatherYieldLine(char* out, size_t cap) {
+    int amt = g_game.buildings[B_CART] > 0 ? 50 : 10;
+    snprintf(out, cap, "+%d %s", amt, tr(RES_KEY[R_WOOD]));
+}
+
+// 查看陷阱's current bait consumption — "-2 诱饵", mirroring game_state.cpp
+// checkTraps' own `baited = min(numBait, numTraps)` (the extra-roll bait THIS
+// press will actually spend). False (no subtitle) when no bait is held: the
+// press is genuinely free this time, same "free action = no subtitle" rule the
+// Room page's craft costs use.
+bool trapsCostLine(char* out, size_t cap) {
+    int numTraps = g_game.buildings[B_TRAP];
+    int numBait  = g_game.whole(R_BAIT); if (numBait < 0) numBait = 0;
+    int baited   = numBait < numTraps ? numBait : numTraps;
+    if (baited <= 0) { out[0] = 0; return false; }
+    snprintf(out, cap, "-%d %s", baited, tr(RES_KEY[R_BAIT]));
+    return true;
+}
 
 // RTC -> Unix epoch, mirroring room_page/main.cpp's epochNow (only differences
 // matter to settle(), so the mktime timezone is irrelevant if consistent).
@@ -345,51 +375,17 @@ void drawInventory(m5gfx::M5Canvas& c, const Layout& L) {
     }
 }
 
-// 1px dashed rect, 4px-on/4px-off on all four edges — the disabled-button
-// frame (no inner concentric rect, unlike the enabled 2-ring frame below).
-void drawDashedRect(m5gfx::M5Canvas& c, int x0, int y0, int w, int h) {
-    int x1 = x0 + w - 1, y1 = y0 + h - 1;
-    for (int x = x0; x <= x1; x += 8) {
-        int len = (x1 - x + 1 < 4) ? (x1 - x + 1) : 4;
-        c.drawFastHLine(x, y0, len, TFT_BLACK);
-        c.drawFastHLine(x, y1, len, TFT_BLACK);
-    }
-    for (int y = y0; y <= y1; y += 8) {
-        int len = (y1 - y + 1 < 4) ? (y1 - y + 1) : 4;
-        c.drawFastVLine(x0, y, len, TFT_BLACK);
-        c.drawFastVLine(x1, y, len, TFT_BLACK);
-    }
-}
-
 // One action cell (伐木 / 查看陷阱 / 分工) at column origin x0, width ACT_COL_W —
-// the same frame language the Room page uses (drawBand): enabled = solid double
-// ring; unavailable/cooling = 1px dashed outer frame. A live cooldown draws a
-// thin progress bar hugging the band's inner bottom edge (Room drawBand parity):
-// an 8px-tall outlined bar inset 12px, its inner fill width = the fraction of the
-// cooldown remaining, draining left-anchored to 0. The 36px label centers in the
-// band, clear above the bar. 分工 (open-assign) has no cooldown — it always draws
-// solid with no bar (coolTotal 0).
+// thin wrapper around the shared action_band::draw (v0.10.1; the same renderer
+// room_page.cpp's craft/build grid uses — see action_band.h for the frame /
+// fixed-baseline / cooldown-bar rules). 分工/尘土之路 (open-assign/open-path)
+// pass coolTotal=0 (no cooldown) and hasCost=false (pure navigation, never
+// priced) so they draw a plain solid frame with a lone centered label.
 void drawActionBand(m5gfx::M5Canvas& c, int x0, int top, const char* label,
-                    bool enabled, int coolLeft, int coolTotal) {
-    if (enabled) {
-        c.drawRect(x0, top, ACT_COL_W, ACT_H, TFT_BLACK);
-        c.drawRect(x0 + 1, top + 1, ACT_COL_W - 2, ACT_H - 2, TFT_BLACK);
-    } else {
-        drawDashedRect(c, x0, top, ACT_COL_W, ACT_H);
-    }
-
-    int lw = cjk::textWidth(label, BTN_SCALE);
-    cjk::drawText(c, x0 + (ACT_COL_W - lw) / 2, top + (ACT_H - BTN_GLYPH) / 2 - 4,
-                  label, BTN_SCALE);
-
-    if (coolTotal > 0 && coolLeft > 0) {                      // draining cooldown
-        int barX0 = x0 + 12, barX1 = x0 + ACT_COL_W - 12;
-        int barY = top + ACT_H - 16, barH = 8;
-        c.drawRect(barX0, barY, barX1 - barX0, barH, TFT_BLACK);
-        int inner = barX1 - barX0 - 4;
-        int fw = (int)((int64_t)inner * coolLeft / coolTotal);   // drains L-anchored
-        if (fw > 0) c.fillRect(barX0 + 2, barY + 2, fw, barH - 4, TFT_BLACK);
-    }
+                    const char* cost, bool hasCost, bool enabled,
+                    int coolLeft, int coolTotal) {
+    action_band::draw(c, x0, top, ACT_COL_W, ACT_H, label, cost, hasCost,
+                      enabled, coolLeft, coolTotal);
 }
 
 // Paint the two-row action area (v0.4.5). ROW 1 left = 伐木 (gather wood): always
@@ -405,21 +401,26 @@ void drawActionBand(m5gfx::M5Canvas& c, int x0, int top, const char* label,
 // A live gather/traps cooldown (channels 1/2) renders its cell dashed + draining.
 void drawActionArea(m5gfx::M5Canvas& c, uint32_t now) {
     int gcool = g_game.cooldownLeft(1, now);                 // gather channel
-    drawActionBand(c, ACT_COLX[0], ACT_ROW1_TOP, tr("gather wood"),
+    char gyield[24]; gatherYieldLine(gyield, sizeof(gyield));
+    drawActionBand(c, ACT_COLX[0], ACT_ROW1_TOP, tr("gather wood"), gyield, true,
                    gcool == 0, gcool, GATHER_DELAY_S);
     if (g_game.buildings[B_TRAP] > 0) {
         int tcool = g_game.cooldownLeft(2, now);             // traps channel
-        drawActionBand(c, ACT_COLX[1], ACT_ROW1_TOP, tr("check traps"),
+        char tcost[24]; bool hasT = trapsCostLine(tcost, sizeof(tcost));
+        drawActionBand(c, ACT_COLX[1], ACT_ROW1_TOP, tr("check traps"), tcost, hasT,
                        tcool == 0, tcool, TRAPS_DELAY_S);
     }
     // 分工 — hardcoded literal like the old "更多": 分/工 are in the §8.3 closure
     // (分享 / 工人). Blank until a job exists (parity with 查看陷阱's 无供给 blank).
+    // Pure navigation — no cost ever.
     if (g_game.hasUnlockedJob())
-        drawActionBand(c, ACT_COLX[0], ACT_ROW2_TOP, "分工", true, 0, 0);
+        drawActionBand(c, ACT_COLX[0], ACT_ROW2_TOP, "分工", nullptr, false, true, 0, 0);
     // 尘土之路 (right cell) — tr("A Dusty Path") == 漫漫尘途 (official name; glyphs in
     // the §8.3 closure). Blank until a compass is held (parity with 分工's 无供给).
+    // Pure navigation — no cost ever.
     if (g_game.whole(R_COMPASS) > 0)
-        drawActionBand(c, ACT_COLX[1], ACT_ROW2_TOP, tr("A Dusty Path"), true, 0, 0);
+        drawActionBand(c, ACT_COLX[1], ACT_ROW2_TOP, tr("A Dusty Path"), nullptr, false,
+                       true, 0, 0);
 }
 
 // The cooldown partial-refresh target: only ROW 1 carries a draining bar (gather
