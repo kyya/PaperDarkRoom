@@ -20,6 +20,14 @@
 
 namespace adr {
 
+// ---- Perks (character.perks) ----------------------------------------------
+// Permanent World-survival buffs, granted by setpieces and combat milestones
+// (upstream $SM.addPerk). Persistent (survive death + future expeditions),
+// stored as a bitfield. Phase 2 grants only gastronome (the swamp); the rest of
+// the upstream roster (slow metabolism / desert rat / scout / precise / …) are
+// reserved slots, wired as they gain a Phase-2/3 source.
+enum Perk : uint8_t { PK_GASTRONOME = 0, PERK_COUNT };
+
 // Result of an action API call.
 enum Result : uint8_t {
     RC_OK = 0,
@@ -92,6 +100,10 @@ public:
     // (CRAFT_COUNT<=32).
     uint32_t seen;
     uint32_t craftShown;
+
+    // Permanent perks bitfield (Perk enum). Granted by World setpieces (gastronome
+    // = swamp) — persists across death and expeditions. 0 for a fresh/old save.
+    uint32_t perks;
 
     // cooldown last-press epochs (0 = ready). Light & stoke share one button.
     uint32_t cdFire, cdGather, cdTraps;
@@ -174,6 +186,9 @@ public:
     // "owned" (upstream $SM.add defines the store key), which unlocks the
     // craftUnlocked / buyOfferable gates for it.
     void markSeen(uint8_t res) { if (res < RES_COUNT) seen |= (1u << res); }
+    // Permanent perk query / grant (Perk enum). addPerk is idempotent.
+    bool hasPerk(uint8_t p) const { return p < 32 && (perks & (1u << p)); }
+    void addPerk(uint8_t p) { if (p < 32) perks |= (1u << p); }
     uint16_t maxPopulation() const { return buildings[B_HUT] * HUT_ROOM; }
     int      numGatherers() const;
     // The P1-assignable jobs currently unlocked — a job is offerable once its

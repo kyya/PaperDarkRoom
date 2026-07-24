@@ -29,6 +29,7 @@ void GameState::init() {
     outsideUnlocked = craftablesUnlocked = woodSeen = seenForest = false;
     seen = 0;
     craftShown = 0;
+    perks = 0;
     cdFire = cdGather = cdTraps = 0;
     tTemp = ROOM_WARM_S;
     tBuilder = BUILDER_STATE_S;
@@ -665,8 +666,8 @@ size_t GameState::toJson(char* out, size_t cap) const {
     AP("\"nev\":%lu,", (unsigned long)nextEventAt);
     AP("\"echo\":[%d,%ld,%lu],", echoRes, (long)echoAmt,
        (unsigned long)echoDueEpoch);
-    AP("\"seen\":%lu,\"cshow\":%lu,",
-       (unsigned long)seen, (unsigned long)craftShown);
+    AP("\"seen\":%lu,\"cshow\":%lu,\"perks\":%lu,",
+       (unsigned long)seen, (unsigned long)craftShown, (unsigned long)perks);
     AP("\"stores\":[");
     for (int i = 0; i < RES_COUNT; i++) AP("%s%ld", i ? "," : "", (long)stores[i]);
     AP("],\"bld\":[");
@@ -726,6 +727,9 @@ bool GameState::fromJson(const char* j) {
     // available proxy for "ever owned"), and leave craftShown=0 so already-
     // eligible craftables re-emit their availableMsg once on the first post-
     // upgrade load (harmless, self-limiting via the latch).
+    // perks bitfield — absent in pre-2.4 saves, init()'s 0 stands (readLong of a
+    // nullptr key is 0, so this is safe unconditionally).
+    perks = (uint32_t)readLong(afterKey(j, "perks"));
     const char* seenP = afterKey(j, "seen");
     if (seenP) {
         seen = (uint32_t)readLong(seenP);

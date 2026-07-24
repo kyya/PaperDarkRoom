@@ -65,6 +65,50 @@ STRING_OVERRIDES = {
 }
 
 
+# ---- LOCAL append table (keys upstream never had) -------------------------
+# DISTINCT from STRING_OVERRIDES above (which reword an EXISTING upstream row):
+# these keys do NOT exist in the upstream flat translation map at all, so there is
+# no official translation to inherit. This is the ONE sanctioned deviation from
+# the "official-translation only" principle — a small set of Phase-2 strings the
+# firmware needs that upstream keys differently (or never surfaced as flat _()
+# msgids). Each entry is asserted ABSENT from upstream at generation time (below),
+# so if a future upstream sync adds an official translation for one, the build
+# HARD-ERRORS here — forcing us to drop the local and adopt the official wording
+# (guards against silently shadowing an upstream string). Keep this list minimal.
+#
+#   1) The 8 World.LANDMARKS[].label map tooltips — upstream joins them with
+#      &nbsp; ("Iron&nbsp;Mine"), so the bare labels the port renders as the
+#      map/HUD hint never entered the zh_cn flat map. Wording aligned with the
+#      matching setpiece TITLE already in zh_cn (The Iron Mine -> 铁矿, etc.).
+#   2) The Two-Headed Creature encounter's 3 strings — the sole Phase-2 random
+#      enemy absent from the official zh_cn set (research-phase2.md §7.2).
+LOCAL_STRINGS = {
+    "Iron Mine":            "铁矿",
+    "Coal Mine":            "煤矿",
+    "Sulphur Mine":         "硫磺矿",
+    "An Abandoned Town":    "废弃小镇",
+    "A Crashed Starship":   "坠毁星舰",
+    "A Borehole":           "巨坑",
+    "A Battlefield":        "战场",
+    "A Ravaged Battleship": "被摧毁的战舰",
+    "two-headed creature":  "双头怪",
+    "a two-headed creature appears, the smaller head trembling":
+        "一只双头怪出现了，较小的那颗头在颤抖",
+    "the two creatures are dead": "两只怪物都倒下了",
+}
+
+
+def apply_locals(pairs: dict[str, str]) -> int:
+    """Append local-only keys; hard-error if any now exists upstream (drifted)."""
+    for en in LOCAL_STRINGS:
+        if en in pairs:
+            raise SystemExit(
+                f"local en_key now EXISTS upstream (adopt the official one, drop "
+                f"the local): {en!r}")
+    pairs.update(LOCAL_STRINGS)
+    return len(LOCAL_STRINGS)
+
+
 def apply_overrides(pairs: dict[str, str]) -> int:
     """Replace glyph-closure-adapted zh values in place; return count applied."""
     for en in STRING_OVERRIDES:
@@ -149,6 +193,7 @@ def main():
 
     pairs = parse_strings_js(args.inp)
     n_over = apply_overrides(pairs)      # §8.3 glyph-closure adaptations
+    n_local = apply_locals(pairs)        # local-only keys upstream never had
     header = emit(pairs)
     os.makedirs(os.path.dirname(args.out) or ".", exist_ok=True)
     with open(args.out, "w", encoding="utf-8", newline="\n") as f:
@@ -156,7 +201,7 @@ def main():
     total_zh = sum(len(v) for v in pairs.values())
     print(f"wrote {args.out}: {len(pairs)} entries, {total_zh} zh chars "
           f"({sum(len(v.encode('utf-8')) for v in pairs.values())} UTF-8 bytes); "
-          f"{n_over} glyph-closure override(s) applied")
+          f"{n_over} glyph-closure override(s), {n_local} local append(s) applied")
 
 
 if __name__ == "__main__":

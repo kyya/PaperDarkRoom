@@ -1,0 +1,904 @@
+// This Source Code Form is subject to the terms of the Mozilla Public
+// License, v. 2.0. If a copy of the MPL was not distributed with this
+// file, You can obtain one at https://mozilla.org/MPL/2.0/.
+//
+// A Dark Room — Phase 2 World state engine implementation. See world_state.h.
+// Faithful port of upstream script/world.js map/move/upkeep logic; only the
+// saveWorld/loadWorld/saveTrek/loadTrek helpers touch the platform (SD under
+// ARDUINO, stdio on host).
+#include "world_state.h"
+#include <string.h>
+#include <stdio.h>
+#include <stdlib.h>
+#ifdef ARDUINO
+#include <SD.h>          // file scope, NOT inside namespace (frame_store parity)
+#endif
+
+namespace adr {
+
+// ===================== small helpers ======================================
+
+static inline int widx(int x, int y) { return y * WORLD_DIM + x; }
+static inline bool inBounds(int x, int y) {
+    return x >= 0 && x < WORLD_DIM && y >= 0 && y < WORLD_DIM;
+}
+static inline bool getBit(const uint8_t* m, int i) {
+    return (m[i >> 3] >> (i & 7)) & 1;
+}
+static inline void setBit(uint8_t* m, int i) { m[i >> 3] |= (uint8_t)(1 << (i & 7)); }
+static inline int   iabs(int v) { return v < 0 ? -v : v; }
+static inline uint32_t xorshift(uint32_t& s) {
+    uint32_t x = s ? s : 0x9e3779b9u;
+    x ^= x << 13; x ^= x >> 17; x ^= x << 5;
+    s = x;
+    return x;
+}
+
+// Little-endian byte (de)serialization over a moving cursor.
+static inline void putU32(uint8_t* b, size_t& o, uint32_t v) {
+    b[o++] = (uint8_t)v; b[o++] = (uint8_t)(v >> 8);
+    b[o++] = (uint8_t)(v >> 16); b[o++] = (uint8_t)(v >> 24);
+}
+static inline uint32_t getU32(const uint8_t* b, size_t& o) {
+    uint32_t v = (uint32_t)b[o] | ((uint32_t)b[o + 1] << 8) |
+                 ((uint32_t)b[o + 2] << 16) | ((uint32_t)b[o + 3] << 24);
+    o += 4; return v;
+}
+static inline void putI16(uint8_t* b, size_t& o, int16_t v) {
+    uint16_t u = (uint16_t)v; b[o++] = (uint8_t)u; b[o++] = (uint8_t)(u >> 8);
+}
+static inline int16_t getI16(const uint8_t* b, size_t& o) {
+    uint16_t u = (uint16_t)b[o] | ((uint16_t)b[o + 1] << 8); o += 2;
+    return (int16_t)u;
+}
+
+// ---- binary sizes (documented layout; see world_state.h) ------------------
+constexpr size_t WORLD_BIN_SIZE =
+    12 + WORLD_CELLS + 2 * WORLD_MASK_BYTES;                       // 4665
+constexpr size_t TREK_HDR = 8 + 2 + 18 + 2 + 4 + 1 + 1 + 32;      // 68
+constexpr size_t TREK_BIN_SIZE =
+    TREK_HDR + RES_COUNT * 2 + ITEM_COUNT * 2 +
+    WORLD_CELLS + 2 * WORLD_MASK_BYTES;
+
+// ===================== platform file I/O ==================================
+
+#ifdef ARDUINO
+static bool w_writeAtomic(const char* path, const uint8_t* d, size_t n) {
+    char tmp[80]; snprintf(tmp, sizeof tmp, "%s.tmp", path);
+    File f = SD.open(tmp, FILE_WRITE);
+    if (!f) return false;
+    f.write(d, n);
+    f.close();
+    SD.remove(path);
+    return SD.rename(tmp, path);
+}
+static int w_read(const char* path, uint8_t* buf, size_t cap) {
+    File f = SD.open(path, FILE_READ);
+    if (!f) return -1;
+    size_t len = f.size();
+    if (len == 0 || len > cap) { f.close(); return -1; }
+    size_t rd = f.read(buf, len);
+    f.close();
+    return (int)rd;
+}
+static bool w_exists(const char* path) { return SD.exists(path); }
+static void w_remove(const char* path) { SD.remove(path); }
+#else
+static bool w_writeAtomic(const char* path, const uint8_t* d, size_t n) {
+    char tmp[512]; snprintf(tmp, sizeof tmp, "%s.tmp", path);
+    FILE* f = fopen(tmp, "wb");
+    if (!f) return false;
+    fwrite(d, 1, n, f);
+    fclose(f);
+    remove(path);
+    return rename(tmp, path) == 0;
+}
+static int w_read(const char* path, uint8_t* buf, size_t cap) {
+    FILE* f = fopen(path, "rb");
+    if (!f) return -1;
+    size_t rd = fread(buf, 1, cap, f);
+    fclose(f);
+    return (int)rd;
+}
+static bool w_exists(const char* path) {
+    FILE* f = fopen(path, "rb");
+    if (f) { fclose(f); return true; }
+    return false;
+}
+static void w_remove(const char* path) { remove(path); }
+#endif
+
+// ===================== lifecycle ==========================================
+
+void WorldState::init() {
+    seed = 0;
+    generated = false;
+    memset(tiles, T_VOID, sizeof tiles);
+    memset(revealed, 0, sizeof revealed);
+    memset(visited, 0, sizeof visited);
+    memset(&ex, 0, sizeof ex);
+    memset(&cx, 0, sizeof cx);      // no combat at boot (RAM-only)
+    genRng = 0;
+}
+
+// ===================== map generation (world.js) ==========================
+
+uint32_t WorldState::mapRand() { return xorshift(genRng); }
+
+// world.js chooseTile — stickiness-weighted terrain pick. Integer permille: the
+// weights ALWAYS sum to exactly 1000 (each present terrain adds STICKINESS to
+// itself and removes it from the nonSticky pool that is redistributed by
+// TILE_PROBS, so total = added-stickiness + nonSticky*sum(probs)=nonSticky =
+// 1000), so this reproduces upstream's float model with no rounding drift.
+uint8_t WorldState::chooseTile(int x, int y) {
+    uint8_t nb[4];
+    int nn = 0;
+    const int nx[4] = { x, x, x - 1, x + 1 };
+    const int ny[4] = { y - 1, y + 1, y, y };
+    for (int i = 0; i < 4; i++) {
+        if (!inBounds(nx[i], ny[i])) continue;
+        uint8_t t = tiles[widx(nx[i], ny[i])];
+        if (t == T_VOID) continue;           // not generated yet -> ignore
+        if (t == T_VILLAGE) return T_FOREST;  // village must be ringed by forest
+        nb[nn++] = t;
+    }
+    int w[TI_COUNT] = { 0, 0, 0 };
+    int nonSticky = 1000;
+    for (int ti = 0; ti < TI_COUNT; ti++) {
+        bool present = false;
+        for (int k = 0; k < nn; k++)
+            if (nb[k] == TERRAIN_TILE[ti]) { present = true; break; }
+        if (present) { w[ti] += STICKINESS_PM; nonSticky -= STICKINESS_PM; }
+    }
+    for (int ti = 0; ti < TI_COUNT; ti++)
+        w[ti] += TILE_PROBS_PM[ti] * nonSticky / 1000;
+    int total = w[0] + w[1] + w[2];
+    if (total <= 0) return T_BARRENS;
+    int r = (int)(mapRand() % (uint32_t)total);
+    int c = 0;
+    for (int ti = 0; ti < TI_COUNT; ti++) {
+        c += w[ti];
+        if (r < c) return TERRAIN_TILE[ti];
+    }
+    return T_BARRENS;
+}
+
+// world.js placeLandmark — reject until it lands on terrain inside the annulus.
+void WorldState::placeLandmark(const LandmarkDef& l) {
+    for (int guard = 0; guard < 100000; guard++) {
+        int span = (int)l.maxR - (int)l.minR;
+        int r = (int)l.minR + (span > 0 ? (int)(mapRand() % (uint32_t)span) : 0);
+        int xDist = (r > 0) ? (int)(mapRand() % (uint32_t)r) : 0;
+        int yDist = r - xDist;
+        if ((mapRand() & 1) == 0) xDist = -xDist;
+        if ((mapRand() & 1) == 0) yDist = -yDist;
+        int x = VILLAGE_X + xDist, y = VILLAGE_Y + yDist;
+        if (x < 0) x = 0; if (x >= WORLD_DIM) x = WORLD_DIM - 1;
+        if (y < 0) y = 0; if (y >= WORLD_DIM) y = WORLD_DIM - 1;
+        if (isTerrain(tiles[widx(x, y)])) { tiles[widx(x, y)] = l.tile; return; }
+    }
+    // Unreachable in practice (ample terrain); give up rather than spin forever.
+}
+
+void WorldState::generateMap(uint32_t s) {
+    seed = s;
+    genRng = s ? s : 0x9e3779b9u;
+    memset(tiles, T_VOID, sizeof tiles);
+    memset(revealed, 0, sizeof revealed);   // committed fog starts empty
+    memset(visited, 0, sizeof visited);
+    tiles[widx(VILLAGE_X, VILLAGE_Y)] = T_VILLAGE;
+    // Spiral out ring by ring so a cell's inner (closer) neighbors are already
+    // generated when chooseTile reads them. Each cell is chosen exactly once
+    // (the T_VOID guard skips the mirror duplicates at t==0 / t==r), so the RNG
+    // stream — and thus the map for a given seed — is fully deterministic.
+    for (int r = 1; r <= WORLD_RADIUS; r++) {
+        for (int t = 0; t <= r; t++) {
+            const int pts[4][2] = {
+                { VILLAGE_X + t, VILLAGE_Y + (r - t) },
+                { VILLAGE_X + t, VILLAGE_Y - (r - t) },
+                { VILLAGE_X - t, VILLAGE_Y + (r - t) },
+                { VILLAGE_X - t, VILLAGE_Y - (r - t) },
+            };
+            for (int k = 0; k < 4; k++) {
+                int x = pts[k][0], y = pts[k][1];
+                if (inBounds(x, y) && tiles[widx(x, y)] == T_VOID)
+                    tiles[widx(x, y)] = chooseTile(x, y);
+            }
+        }
+    }
+    for (int i = 0; i < LANDMARK_ROWS; i++) {
+        const LandmarkDef& l = LANDMARKS[i];
+        if (l.prestigeOnly) continue;         // cache is prestige-only (deferred)
+        for (int n = 0; n < l.num; n++) placeLandmark(l);
+    }
+    generated = true;
+}
+
+bool WorldState::ensureGenerated(uint32_t s) {
+    if (!generated) { generateMap(s); saveWorld(); }
+    return generated;
+}
+
+// ===================== equipment-derived caps =============================
+
+int WorldState::maxWater(const GameState& gs) {
+    if (gs.items[I_WATER_TANK] > 0) return WATER_TANK;
+    if (gs.items[I_CASK] > 0)       return WATER_CASK;
+    if (gs.items[I_WATERSKIN] > 0)  return WATER_WATERSKIN;
+    return WATER_BASE;
+}
+int WorldState::maxHealth(const GameState& gs) {
+    if (gs.items[I_S_ARMOUR] > 0) return HEALTH_S_ARMOUR;
+    if (gs.items[I_I_ARMOUR] > 0) return HEALTH_I_ARMOUR;
+    if (gs.items[I_L_ARMOUR] > 0) return HEALTH_L_ARMOUR;
+    return HEALTH_BASE;
+}
+int WorldState::bagCapacityCenti(const GameState& gs) {
+    if (gs.items[I_CONVOY] > 0)   return BAG_CONVOY;
+    if (gs.items[I_WAGON] > 0)    return BAG_WAGON;
+    if (gs.items[I_RUCKSACK] > 0) return BAG_RUCKSACK;
+    return BAG_BASE_CENTI;
+}
+
+// ===================== visibility =========================================
+
+void WorldState::lightMap(int x, int y) {
+    int r = LIGHT_RADIUS;                     // scout perk (x2) not modeled yet
+    for (int i = -r; i <= r; i++) {
+        int span = r - iabs(i);
+        for (int j = -span; j <= span; j++) {
+            int cx = x + i, cy = y + j;
+            if (inBounds(cx, cy)) setBit(ex.revealed, widx(cx, cy));
+        }
+    }
+}
+
+// ===================== expedition =========================================
+
+bool WorldState::embark(GameState& gs, const int16_t* outfitRes,
+                        const int16_t* outfitItem, uint32_t trekSeed) {
+    if (!generated) return false;
+    if (!outfitRes || outfitRes[R_CURED_MEAT] <= 0) return false;  // embark gate
+
+    // Deduct the chosen outfit from the village stores (caller validated the
+    // bag against capacity/inventory; clamp defensively at 0).
+    for (int i = 0; i < RES_COUNT; i++) {
+        if (outfitRes[i] <= 0) continue;
+        gs.stores[i] -= (int32_t)outfitRes[i] * FP;
+        if (gs.stores[i] < 0) gs.stores[i] = 0;
+    }
+    if (outfitItem)
+        for (int i = 0; i < ITEM_COUNT; i++) {
+            if (outfitItem[i] <= 0) continue;
+            gs.items[i] = (uint8_t)(gs.items[i] >= outfitItem[i]
+                                    ? gs.items[i] - outfitItem[i] : 0);
+        }
+
+    memset(&ex, 0, sizeof ex);
+    memset(&cx, 0, sizeof cx);      // fresh trip -> no lingering combat
+    ex.active = true;
+    ex.dead = false;
+    ex.x = VILLAGE_X; ex.y = VILLAGE_Y;
+    ex.maxHp = (int16_t)maxHealth(gs);   ex.hp = ex.maxHp;
+    ex.maxWater = (int16_t)maxWater(gs); ex.water = ex.maxWater;  // onArrival fills
+    ex.gastronome = gs.hasPerk(PK_GASTRONOME);   // meat heals x2 (persisted perk)
+    ex.rng = trekSeed ? trekSeed : 0x1a2b3c4du;
+    memcpy(ex.tiles, tiles, sizeof tiles);
+    memcpy(ex.revealed, revealed, sizeof revealed);
+    memcpy(ex.visited, visited, sizeof visited);
+    for (int i = 0; i < RES_COUNT; i++) ex.outfitRes[i] = outfitRes[i];
+    if (outfitItem)
+        for (int i = 0; i < ITEM_COUNT; i++) ex.outfitItem[i] = outfitItem[i];
+    lightMap(ex.x, ex.y);
+    setBit(ex.visited, widx(ex.x, ex.y));
+    saveTrek();
+    return true;
+}
+
+bool WorldState::outpostUsed(int x, int y) const {
+    for (int i = 0; i < ex.usedOutpostN; i++)
+        if (ex.usedOutpostX[i] == x && ex.usedOutpostY[i] == y) return true;
+    return false;
+}
+void WorldState::markOutpostUsed(int x, int y) {
+    if (outpostUsed(x, y)) return;
+    if (ex.usedOutpostN < 16) {
+        ex.usedOutpostX[ex.usedOutpostN] = (uint8_t)x;
+        ex.usedOutpostY[ex.usedOutpostN] = (uint8_t)y;
+        ex.usedOutpostN++;
+    }
+}
+
+// world.js useSupplies — food/water upkeep. Returns false if the wanderer died
+// (die() has already dropped the trip). No progressive HP drain: meat/water run
+// out -> one warning tick -> next tick kills (research §3.3).
+bool WorldState::useSupplies(GameState& gs) {
+    (void)gs;
+    ex.foodMove++;
+    ex.waterMove++;
+    const int movesPerFood = MOVES_PER_FOOD;    // slow-metabolism perk (x2) TODO
+    const int movesPerWater = MOVES_PER_WATER;  // desert-rat perk (x2) TODO
+
+    if (ex.foodMove >= movesPerFood) {
+        ex.foodMove = 0;
+        int num = ex.outfitRes[R_CURED_MEAT] - 1;
+        if (num == 0) {
+            ex.outfitRes[R_CURED_MEAT] = 0;      // ate the last piece, no heal
+        } else if (num < 0) {
+            ex.outfitRes[R_CURED_MEAT] = 0;
+            if (!ex.starving) ex.starving = true;   // "starvation sets in"
+            else { die(); return false; }            // starved to death
+        } else {
+            ex.outfitRes[R_CURED_MEAT] = (int16_t)num;
+            ex.starving = false;
+            ex.hp += MEAT_HEAL * (ex.gastronome ? 2 : 1);   // gastronome (swamp perk)
+            if (ex.hp > ex.maxHp) ex.hp = ex.maxHp;
+        }
+    }
+
+    if (ex.waterMove >= movesPerWater) {
+        ex.waterMove = 0;
+        ex.water--;
+        if (ex.water == 0) {
+            /* "there is no more water" — warning only */
+        } else if (ex.water < 0) {
+            ex.water = 0;
+            if (!ex.thirsty) ex.thirsty = true;      // "thirst becomes unbearable"
+            else { die(); return false; }             // died of thirst
+        } else {
+            ex.thirsty = false;
+        }
+    }
+    return true;
+}
+
+// world.js checkFight — after FIGHT_DELAY steps, FIGHT_CHANCE per step, then
+// triggerFight picks an available encounter. Returns true (with enemyOut set)
+// only when a fight actually starts; a chance that lands on a non-terrain tile
+// (road/void) with no available encounter resolves to no fight, faithful to
+// upstream (its possibleFights pool would be empty there).
+bool WorldState::rollFight(int& enemyOut) {
+    ex.fightMove++;
+    if (ex.fightMove <= FIGHT_DELAY) return false;
+    if ((int)(xorshift(ex.rng) % 1000u) >= FIGHT_CHANCE_PM) return false;  // no roll
+    ex.fightMove = 0;                              // upstream resets on the chance hit
+    int e = chooseEncounter();
+    if (e < 0) return false;
+    enemyOut = e;
+    return true;
+}
+
+// encounters.js triggerFight / isAvailable — the pool of encounters whose tier
+// (Manhattan distance band) AND terrain match the current tile, one drawn from
+// ex.rng. -1 on a non-terrain tile (roads/void carry no encounter). Every
+// terrain×tier pair has >=1 encounter, so n>=1 on any FOREST/FIELD/BARRENS cell.
+int WorldState::chooseEncounter() {
+    uint8_t tile = ex.tiles[widx(ex.x, ex.y)];
+    if (!isTerrain(tile)) return -1;
+    int dist = iabs(ex.x - VILLAGE_X) + iabs(ex.y - VILLAGE_Y);
+    int tier = fightTier(dist);
+    uint8_t pool[ENCOUNTER_COUNT];
+    int n = 0;
+    for (int i = 0; i < ENCOUNTER_COUNT; i++)
+        if (ENCOUNTERS[i].tier == tier && ENCOUNTERS[i].terrain == tile)
+            pool[n++] = (uint8_t)i;
+    if (n == 0) return -1;
+    return pool[(int)(xorshift(ex.rng) % (uint32_t)n)];
+}
+
+StepResult WorldState::move(GameState& gs, uint8_t dir) {
+    StepResult res{ STEP_BLOCKED, SP_NONE };
+    if (!ex.active) return res;
+
+    Vec2 v = DIR_VEC[dir & 3];
+    int nx = ex.x + v.dx, ny = ex.y + v.dy;
+    if (nx < 0) nx = 0; if (nx >= WORLD_DIM) nx = WORLD_DIM - 1;
+    if (ny < 0) ny = 0; if (ny >= WORLD_DIM) ny = WORLD_DIM - 1;
+    ex.x = (int16_t)nx; ex.y = (int16_t)ny;
+    lightMap(nx, ny);
+    setBit(ex.visited, widx(nx, ny));
+
+    // doSpace(): village -> goHome; landmark -> setpiece hook (no upkeep this
+    // step); otherwise upkeep + fight roll on plain ground.
+    uint8_t tile = ex.tiles[widx(nx, ny)];
+    if (tile == T_VILLAGE) {
+        goHome(gs);
+        res.kind = STEP_HOME; res.scene = SP_NONE;
+        return res;                                   // trek already cleared
+    }
+    if (isLandmark(tile)) {
+        if (tile == T_OUTPOST && outpostUsed(nx, ny)) {
+            res.kind = STEP_MOVED;                    // used outpost = safe, no upkeep
+        } else {
+            if (tile == T_OUTPOST) markOutpostUsed(nx, ny);
+            res.kind = STEP_LANDMARK; res.scene = landmarkScene(tile);
+        }
+    } else if (!useSupplies(gs)) {
+        res.kind = STEP_DIED; res.scene = SP_NONE;
+        return res;                                   // trek already cleared
+    } else {
+        int enemy = -1;
+        if (rollFight(enemy)) {
+            res.kind = STEP_FIGHT; res.scene = (uint8_t)enemy;  // enemy for the fight
+        } else {
+            res.kind = STEP_MOVED;
+        }
+    }
+    saveTrek();                                       // persist the step
+    return res;
+}
+
+void WorldState::goHome(GameState& gs) {
+    // Commit the working map -> committed (cleared dungeons + revealed fog stay).
+    memcpy(tiles, ex.tiles, sizeof tiles);
+    memcpy(revealed, ex.revealed, sizeof revealed);
+    memcpy(visited, ex.visited, sizeof visited);
+    // Unlock cleared mines (economic closure: staffs the miner jobs).
+    if (ex.clearedIron && gs.buildings[B_IRON_MINE] == 0)
+        gs.buildings[B_IRON_MINE] = 1;
+    if (ex.clearedCoal && gs.buildings[B_COAL_MINE] == 0)
+        gs.buildings[B_COAL_MINE] = 1;
+    if (ex.clearedSulphur && gs.buildings[B_SULPHUR_MINE] == 0)
+        gs.buildings[B_SULPHUR_MINE] = 1;
+    // clearedShip / clearedExec unlock Ship / Fabricator (Phase 3) — deferred.
+    // Bank the bag: everything returns to the village. The upstream
+    // leaveItAtHome nicety (keep supplies/weapons pre-loaded for the next trip)
+    // belongs to the persistent Path outfit, which lands with the Path panel.
+    for (int i = 0; i < RES_COUNT; i++) {
+        if (ex.outfitRes[i] <= 0) continue;
+        gs.stores[i] += (int32_t)ex.outfitRes[i] * FP;
+        gs.markSeen((uint8_t)i);
+        ex.outfitRes[i] = 0;
+    }
+    for (int i = 0; i < ITEM_COUNT; i++) {
+        if (ex.outfitItem[i] <= 0) continue;
+        int c = gs.items[i] + ex.outfitItem[i];
+        gs.items[i] = (uint8_t)(c > 255 ? 255 : c);
+        ex.outfitItem[i] = 0;
+    }
+    ex.active = false;
+    saveWorld();       // persist the newly committed map
+    clearTrek();       // trip over
+}
+
+void WorldState::die() {
+    // Drop the working map (this trip's clears/fog are lost) and empty the bag —
+    // committed map and game state are untouched (World.state=null, outfit={}).
+    ex.dead = true;
+    ex.active = false;
+    for (int i = 0; i < RES_COUNT; i++) ex.outfitRes[i] = 0;
+    for (int i = 0; i < ITEM_COUNT; i++) ex.outfitItem[i] = 0;
+    clearTrek();
+}
+
+// ===================== setpiece map hooks (working map) ===================
+
+bool WorldState::findClosestRoad(int sx, int sy, int& rx, int& ry) const {
+    for (int r = 1; r < WORLD_DIM; r++) {
+        for (int t = 0; t <= r; t++) {
+            const int pts[4][2] = {
+                { sx + t, sy + (r - t) }, { sx + t, sy - (r - t) },
+                { sx - t, sy + (r - t) }, { sx - t, sy - (r - t) },
+            };
+            for (int k = 0; k < 4; k++) {
+                int cx = pts[k][0], cy = pts[k][1];
+                if (!inBounds(cx, cy)) continue;
+                if (cx == sx && cy == sy) continue;
+                uint8_t tt = ex.tiles[widx(cx, cy)];
+                if (tt == T_ROAD || tt == T_VILLAGE || tt == T_OUTPOST) {
+                    rx = cx; ry = cy; return true;
+                }
+            }
+        }
+    }
+    return false;
+}
+
+// world.js drawRoad — L-shaped path from (x,y) to the nearest road/outpost/
+// village, converting only terrain cells to ROAD (landmarks untouched). We draw
+// the horizontal leg first then the vertical; the leg order only shifts the
+// single corner cell, so connectivity is identical to upstream's ordered form.
+void WorldState::drawRoad(int x, int y) {
+    int rx = VILLAGE_X, ry = VILLAGE_Y;
+    findClosestRoad(x, y, rx, ry);                // fallback stays VILLAGE_POS
+    int x0 = x < rx ? x : rx, x1 = x < rx ? rx : x;
+    for (int ix = x0; ix <= x1; ix++)
+        if (isTerrain(ex.tiles[widx(ix, y)])) ex.tiles[widx(ix, y)] = T_ROAD;
+    int y0 = y < ry ? y : ry, y1 = y < ry ? ry : y;
+    for (int iy = y0; iy <= y1; iy++)
+        if (isTerrain(ex.tiles[widx(rx, iy)])) ex.tiles[widx(rx, iy)] = T_ROAD;
+}
+
+void WorldState::clearDungeon(int x, int y) {
+    if (!inBounds(x, y)) return;
+    ex.tiles[widx(x, y)] = T_OUTPOST;             // cave/town/city -> outpost
+    drawRoad(x, y);
+}
+
+void WorldState::clearMine(int x, int y, uint8_t tile) {
+    if (!inBounds(x, y)) return;
+    switch (tile) {
+        case T_IRON_MINE:    ex.clearedIron = true;    break;
+        case T_COAL_MINE:    ex.clearedCoal = true;    break;
+        case T_SULPHUR_MINE: ex.clearedSulphur = true; break;
+        case T_SHIP:         ex.clearedShip = true;    break;
+        case T_EXECUTIONER:  ex.clearedExec = true;    break;
+        default: break;
+    }
+    drawRoad(x, y);                               // mine tile itself is kept
+}
+
+// ===================== combat (events.js, 1s discrete) ====================
+// The upstream real-time fight (enemy setInterval, per-weapon cooldown seconds)
+// runs here as a 1s tick driven by fight_modal. State lives in `cx` (RAM-only);
+// only the OUTCOMES touch the persisted expedition — ex.hp (damage / heals) and
+// ex.outfit (ammo spend / banked loot) — so a power-off mid-fight loses the
+// fight but not the trek (research decision 7). See combat_data.h.
+
+// Total carried weight in centi-units (path.js getWeight model, default 1.00).
+// Loot capacity checks the same way path_page's freeCenti does.
+int WorldState::exBagUsedCenti() const {
+    int used = 0;
+    for (int i = 0; i < RES_COUNT; i++)
+        used += (int)ex.outfitRes[i] * weightCenti(RES_KEY[i]);
+    for (int i = 0; i < ITEM_COUNT; i++)
+        used += (int)ex.outfitItem[i] * weightCenti(ITEM_KEY[i]);
+    return used;
+}
+
+// Fill the attack-button weapon list from the carried outfit (events.js
+// startCombat): every carried weapon that can fire NOW (ammo present); fists is
+// the sole fallback when nothing else qualifies. Shared by both begin* paths.
+void WorldState::armWeapons() {
+    cx.weaponN = 0;
+    for (int i = 1; i < WEAPON_COUNT; i++) {         // skip fists (index 0) here
+        const WeaponDef& w = WEAPONS[i];
+        if (ex.outfitItem[w.itemSlot] <= 0) continue;            // not carried
+        if (w.ammoRes != RES_NONE && ex.outfitRes[w.ammoRes] <= 0) continue;  // no ammo
+        cx.weapons[cx.weaponN++] = (uint8_t)i;
+    }
+    if (cx.weaponN == 0) cx.weapons[cx.weaponN++] = WEAPON_FISTS;
+}
+
+void WorldState::beginFight(uint8_t enemyId) {
+    memset(&cx, 0, sizeof cx);
+    if (enemyId >= ENCOUNTER_COUNT) return;          // defensive
+    const Encounter& e = ENCOUNTERS[enemyId];
+    cx.active = true;
+    cx.setpiece = false;
+    cx.enemyId = enemyId;
+    cx.enemyHp = cx.enemyMaxHp = e.health;
+    cx.enemyDelayLeft = e.attackDelayS;
+    cx.enemyDamage = e.damage; cx.enemyHitPM = e.hitPM; cx.enemyDelayS = e.attackDelayS;
+    cx.enemyChara   = e.chara;
+    cx.enemyNameKey = e.name; cx.enemyNotifKey = e.notif; cx.enemyDeathKey = e.death;
+    cx.lootTbl = e.loot; cx.lootTblN = (int16_t)e.lootN;
+    armWeapons();
+}
+
+// Arm combat against a setpiece's inline enemy. cx.setpiece flags the win/flee
+// hand-back to setpiece_modal; the name/death keys are null (the setpiece owns
+// the victory panel, not fight_modal).
+void WorldState::beginFightSetpiece(const SetpieceEnemy& e) {
+    memset(&cx, 0, sizeof cx);
+    cx.active = true;
+    cx.setpiece = true;
+    cx.enemyId = 0xFF;
+    cx.enemyHp = cx.enemyMaxHp = e.health;
+    cx.enemyDelayLeft = e.attackDelayS;
+    cx.enemyDamage = e.damage; cx.enemyHitPM = e.hitPM; cx.enemyDelayS = e.attackDelayS;
+    cx.enemyChara   = e.chara;
+    cx.enemyNameKey = nullptr; cx.enemyNotifKey = e.notif; cx.enemyDeathKey = nullptr;
+    cx.lootTbl = e.loot; cx.lootTblN = (int16_t)e.lootN;
+    armWeapons();
+}
+
+uint8_t WorldState::fightWeaponId(int s) const {
+    return (s >= 0 && s < cx.weaponN) ? cx.weapons[s] : (uint8_t)WEAPON_FISTS;
+}
+int WorldState::fightWeaponCoolLeft(int s) const {
+    return (s >= 0 && s < cx.weaponN) ? cx.weaponCool[s] : 0;
+}
+bool WorldState::fightWeaponEnabled(int s) const {
+    if (s < 0 || s >= cx.weaponN) return false;
+    if (cx.weaponCool[s] > 0) return false;
+    const WeaponDef& w = WEAPONS[cx.weapons[s]];
+    if (w.itemSlot == WSLOT_NONE) return true;                   // fists
+    if (w.selfAmmo)            return ex.outfitItem[w.itemSlot] > 0;
+    if (w.ammoRes != RES_NONE) return ex.outfitRes[w.ammoRes] > 0;
+    return ex.outfitItem[w.itemSlot] > 0;                        // melee, still carried
+}
+
+// events.js drawLoot — per drop line: chance roll, then a count draw on a hit
+// (consumed even when max==min, matching upstream). Banked into the bag capped by
+// free weight (§1/§4.7); excess is dropped (the e-ink port auto-banks rather than
+// running upstream's take/drop menu — research decision 4).
+// Shared loot banker (events.js drawLoot): per drop line, a chance roll then a
+// count draw on a hit (a random is consumed even when max==min, matching
+// upstream). Banked into the bag capped by free weight (§1/§4.7); excess is
+// dropped (the e-ink port auto-banks rather than running upstream's take/drop
+// menu — research decision 4). Reused by combat victory (rollLoot -> cx.loot) and
+// by setpiece narrative-scene loot (setpiece_engine -> its own display buffer).
+int WorldState::bankLootTable(GameState& gs, const LootDrop* tbl, int n,
+                              LootLine* out, int outCap) {
+    int outN = 0;
+    int cap = bagCapacityCenti(gs);
+    int freeC = cap - exBagUsedCenti();
+    if (freeC < 0) freeC = 0;
+    for (int i = 0; i < n; i++) {
+        const LootDrop& d = tbl[i];
+        bool hit = (int)(xorshift(ex.rng) % 1000u) < d.chancePM;
+        if (!hit) continue;
+        uint32_t c = xorshift(ex.rng);               // count draw (on hit)
+        int num = (d.mx > d.mn)
+                ? (int)(c % (uint32_t)(d.mx - d.mn)) + d.mn
+                : d.mn;
+        const char* key = d.isItem ? ITEM_KEY[d.slot] : RES_KEY[d.slot];
+        int wt = weightCenti(key); if (wt <= 0) wt = 1;
+        int canFit = freeC / wt;
+        if (num > canFit) num = canFit;              // capacity clamp
+        if (num <= 0) continue;
+        freeC -= num * wt;
+        if (d.isItem) {
+            int v = (int)ex.outfitItem[d.slot] + num;
+            ex.outfitItem[d.slot] = (int16_t)(v > 255 ? 255 : v);
+        } else {
+            ex.outfitRes[d.slot] += (int16_t)num;
+        }
+        if (out && outN < outCap) {
+            out[outN].isItem = d.isItem;
+            out[outN].slot   = d.slot;
+            out[outN].got    = (int16_t)num;
+            outN++;
+        }
+    }
+    return outN;
+}
+
+void WorldState::rollLoot(GameState& gs) {
+    cx.lootN = bankLootTable(gs, cx.lootTbl, cx.lootTblN, cx.loot, MAX_LOOT);
+}
+
+uint8_t WorldState::fightAttack(GameState& gs, int s) {
+    if (!cx.active || cx.won) return FIGHT_NOOP;
+    if (s < 0 || s >= cx.weaponN) return FIGHT_NOOP;
+    if (cx.weaponCool[s] > 0) return FIGHT_NOOP;
+    const WeaponDef& w = WEAPONS[cx.weapons[s]];
+    // Spend ammo (grenade/bolas spend themselves; rifle/laser spend a Res).
+    if (w.selfAmmo) {
+        if (ex.outfitItem[w.itemSlot] <= 0) return FIGHT_NOOP;
+        ex.outfitItem[w.itemSlot]--;
+    } else if (w.ammoRes != RES_NONE) {
+        if (ex.outfitRes[w.ammoRes] <= 0) return FIGHT_NOOP;
+        ex.outfitRes[w.ammoRes]--;
+    }
+    cx.weaponCool[s] = w.cooldownS;
+    bool hit = (int)(xorshift(ex.rng) % 1000u) < BASE_HIT_CHANCE_PM;  // 0.8, no perks
+    cx.lastMiss = !hit;
+    if (!hit) return FIGHT_ONGOING;
+    if (w.damage == DMG_STUN) { cx.enemyStunLeft = FIGHT_STUN_S; return FIGHT_ONGOING; }
+    cx.enemyHp -= w.damage;
+    if (cx.enemyHp <= 0) {
+        cx.enemyHp = 0;
+        rollLoot(gs);                                // bank the drops
+        cx.won = true;
+        return FIGHT_WON;
+    }
+    return FIGHT_ONGOING;
+}
+
+uint8_t WorldState::fightTick() {
+    if (!cx.active || cx.won) return FIGHT_ONGOING;
+    for (int i = 0; i < cx.weaponN; i++)
+        if (cx.weaponCool[i] > 0) cx.weaponCool[i]--;
+    if (cx.eatCool > 0)  cx.eatCool--;
+    if (cx.medsCool > 0) cx.medsCool--;
+    // Enemy swings on its interval; a stunned enemy's swing is SKIPPED (the clock
+    // still runs, matching upstream's interval + `if(stunned) return`).
+    bool stunned = cx.enemyStunLeft > 0;
+    if (stunned) cx.enemyStunLeft--;
+    if (cx.enemyDelayLeft > 0) cx.enemyDelayLeft--;
+    if (cx.enemyDelayLeft <= 0) {
+        cx.enemyDelayLeft = cx.enemyDelayS;          // rearm for the next swing
+        if (!stunned) {
+            bool hit = (int)(xorshift(ex.rng) % 1000u) < cx.enemyHitPM;
+            if (hit) {
+                ex.hp -= cx.enemyDamage;
+                if (ex.hp <= 0) {
+                    ex.hp = 0;
+                    cx.active = false;
+                    die();                            // discards trip + empties bag
+                    return FIGHT_LOST;
+                }
+            }
+        }
+    }
+    return FIGHT_ONGOING;
+}
+
+uint8_t WorldState::fightEat() {
+    if (!cx.active || cx.won) return FIGHT_NOOP;
+    if (cx.eatCool > 0) return FIGHT_NOOP;
+    if (ex.outfitRes[R_CURED_MEAT] <= 0) return FIGHT_NOOP;
+    if (ex.hp >= ex.maxHp) return FIGHT_NOOP;         // heal only below max (setHeal)
+    ex.outfitRes[R_CURED_MEAT]--;
+    ex.hp += MEAT_HEAL * (ex.gastronome ? 2 : 1); if (ex.hp > ex.maxHp) ex.hp = ex.maxHp;
+    cx.eatCool = FIGHT_EAT_COOLDOWN_S;
+    return FIGHT_ONGOING;
+}
+
+uint8_t WorldState::fightMeds() {
+    if (!cx.active || cx.won) return FIGHT_NOOP;
+    if (cx.medsCool > 0) return FIGHT_NOOP;
+    if (ex.outfitRes[R_MEDICINE] <= 0) return FIGHT_NOOP;
+    if (ex.hp >= ex.maxHp) return FIGHT_NOOP;
+    ex.outfitRes[R_MEDICINE]--;
+    ex.hp += MEDS_HEAL; if (ex.hp > ex.maxHp) ex.hp = ex.maxHp;
+    cx.medsCool = FIGHT_MEDS_COOLDOWN_S;
+    return FIGHT_ONGOING;
+}
+
+// Abandon the fight (no loot, damage taken kept). Random encounters have no
+// upstream flee (§4.8); the slow e-ink panel adds it so a bad-matchup fight isn't
+// a guaranteed death — and it doubles as the power-off-mid-fight resolution
+// (research decision 7). Persist the (damaged) expedition so the flee sticks.
+void WorldState::fightFlee() {
+    cx.active = false;
+    cx.won = false;
+    saveTrek();
+}
+
+// Dismiss the victory panel: loot is already banked into ex; persist and end.
+void WorldState::fightEndVictory() {
+    cx.active = false;
+    cx.won = false;
+    saveTrek();
+}
+
+// ===================== setpiece effects ===================================
+// Swamp charm -> gastronome (setpieces.js $SM.addPerk). Persist it on the game
+// state (survives death + future trips) AND flip the live expedition flag so the
+// x2 meat heal applies this trip too.
+void WorldState::spGrantGastronome(GameState& gs) {
+    gs.addPerk(PK_GASTRONOME);
+    ex.gastronome = true;
+}
+
+int WorldState::spRand1000() { return (int)(xorshift(ex.rng) % 1000u); }
+
+// ===================== read helpers =======================================
+
+uint8_t WorldState::tileAt(int x, int y) const {
+    return inBounds(x, y) ? tiles[widx(x, y)] : (uint8_t)T_VOID;
+}
+uint8_t WorldState::exTileAt(int x, int y) const {
+    return inBounds(x, y) ? ex.tiles[widx(x, y)] : (uint8_t)T_VOID;
+}
+bool WorldState::isRevealed(int x, int y) const {
+    return inBounds(x, y) && getBit(revealed, widx(x, y));
+}
+bool WorldState::exRevealed(int x, int y) const {
+    return inBounds(x, y) && getBit(ex.revealed, widx(x, y));
+}
+bool WorldState::exVisited(int x, int y) const {
+    return inBounds(x, y) && getBit(ex.visited, widx(x, y));
+}
+int WorldState::countTiles(uint8_t tile) const {
+    int n = 0;
+    for (int i = 0; i < WORLD_CELLS; i++) if (tiles[i] == tile) n++;
+    return n;
+}
+
+// ===================== SD persistence =====================================
+// world.bin layout (LE): [magic u32][ver u8][rsv 3][seed u32][tiles CELLS]
+//                        [revealed MASK][visited MASK]                (4665 B)
+
+bool WorldState::saveWorld() const {
+    static uint8_t buf[WORLD_BIN_SIZE];
+    size_t o = 0;
+    putU32(buf, o, WORLD_MAGIC);
+    buf[o++] = WORLD_VER; buf[o++] = 0; buf[o++] = 0; buf[o++] = 0;
+    putU32(buf, o, seed);
+    memcpy(buf + o, tiles, WORLD_CELLS);          o += WORLD_CELLS;
+    memcpy(buf + o, revealed, WORLD_MASK_BYTES);  o += WORLD_MASK_BYTES;
+    memcpy(buf + o, visited, WORLD_MASK_BYTES);   o += WORLD_MASK_BYTES;
+    return w_writeAtomic(ADR_WORLD_PATH, buf, o);
+}
+
+bool WorldState::loadWorld() {
+    static uint8_t buf[WORLD_BIN_SIZE];
+    int n = w_read(ADR_WORLD_PATH, buf, sizeof buf);
+    if (n < (int)WORLD_BIN_SIZE) return false;
+    size_t o = 0;
+    if (getU32(buf, o) != WORLD_MAGIC) return false;
+    uint8_t ver = buf[o++]; o += 3;
+    if (ver != WORLD_VER) return false;
+    seed = getU32(buf, o);
+    memcpy(tiles, buf + o, WORLD_CELLS);          o += WORLD_CELLS;
+    memcpy(revealed, buf + o, WORLD_MASK_BYTES);  o += WORLD_MASK_BYTES;
+    memcpy(visited, buf + o, WORLD_MASK_BYTES);   o += WORLD_MASK_BYTES;
+    generated = true;
+    return true;
+}
+
+// trek.bin layout (LE): [magic u32][ver u8][rsv 3][active u8][dead u8]
+//   [x,y,hp,maxHp,water,maxWater,foodMove,waterMove,fightMove i16 x9]
+//   [starving u8][thirsty u8][rng u32][clearedFlags u8][usedOutpostN u8]
+//   [usedOutpostX 16][usedOutpostY 16][outfitRes i16 x RES_COUNT]
+//   [outfitItem i16 x ITEM_COUNT][tiles CELLS][revealed MASK][visited MASK]
+
+bool WorldState::saveTrek() const {
+    static uint8_t buf[TREK_BIN_SIZE];
+    size_t o = 0;
+    putU32(buf, o, TREK_MAGIC);
+    buf[o++] = TREK_VER; buf[o++] = 0; buf[o++] = 0; buf[o++] = 0;
+    buf[o++] = ex.active ? 1 : 0;
+    buf[o++] = ex.dead ? 1 : 0;
+    putI16(buf, o, ex.x);        putI16(buf, o, ex.y);
+    putI16(buf, o, ex.hp);       putI16(buf, o, ex.maxHp);
+    putI16(buf, o, ex.water);    putI16(buf, o, ex.maxWater);
+    putI16(buf, o, ex.foodMove); putI16(buf, o, ex.waterMove);
+    putI16(buf, o, ex.fightMove);
+    buf[o++] = ex.starving ? 1 : 0;
+    buf[o++] = ex.thirsty ? 1 : 0;
+    putU32(buf, o, ex.rng);
+    uint8_t cf = (ex.clearedIron ? 1 : 0) | (ex.clearedCoal ? 2 : 0) |
+                 (ex.clearedSulphur ? 4 : 0) | (ex.clearedShip ? 8 : 0) |
+                 (ex.clearedExec ? 16 : 0) | (ex.gastronome ? 32 : 0);
+    buf[o++] = cf;
+    buf[o++] = ex.usedOutpostN;
+    memcpy(buf + o, ex.usedOutpostX, 16); o += 16;
+    memcpy(buf + o, ex.usedOutpostY, 16); o += 16;
+    for (int i = 0; i < RES_COUNT; i++)  putI16(buf, o, ex.outfitRes[i]);
+    for (int i = 0; i < ITEM_COUNT; i++) putI16(buf, o, ex.outfitItem[i]);
+    memcpy(buf + o, ex.tiles, WORLD_CELLS);          o += WORLD_CELLS;
+    memcpy(buf + o, ex.revealed, WORLD_MASK_BYTES);  o += WORLD_MASK_BYTES;
+    memcpy(buf + o, ex.visited, WORLD_MASK_BYTES);   o += WORLD_MASK_BYTES;
+    return w_writeAtomic(ADR_TREK_PATH, buf, o);
+}
+
+bool WorldState::loadTrek() {
+    static uint8_t buf[TREK_BIN_SIZE];
+    int n = w_read(ADR_TREK_PATH, buf, sizeof buf);
+    if (n < (int)TREK_BIN_SIZE) { ex.active = false; return false; }
+    size_t o = 0;
+    if (getU32(buf, o) != TREK_MAGIC) { ex.active = false; return false; }
+    uint8_t ver = buf[o++]; o += 3;
+    if (ver != TREK_VER) { ex.active = false; return false; }
+    memset(&ex, 0, sizeof ex);
+    ex.active = buf[o++] != 0;
+    ex.dead   = buf[o++] != 0;
+    ex.x = getI16(buf, o);        ex.y = getI16(buf, o);
+    ex.hp = getI16(buf, o);       ex.maxHp = getI16(buf, o);
+    ex.water = getI16(buf, o);    ex.maxWater = getI16(buf, o);
+    ex.foodMove = getI16(buf, o); ex.waterMove = getI16(buf, o);
+    ex.fightMove = getI16(buf, o);
+    ex.starving = buf[o++] != 0;
+    ex.thirsty  = buf[o++] != 0;
+    ex.rng = getU32(buf, o);
+    uint8_t cf = buf[o++];
+    ex.clearedIron = cf & 1; ex.clearedCoal = cf & 2; ex.clearedSulphur = cf & 4;
+    ex.clearedShip = cf & 8; ex.clearedExec = cf & 16; ex.gastronome = cf & 32;
+    ex.usedOutpostN = buf[o++];
+    memcpy(ex.usedOutpostX, buf + o, 16); o += 16;
+    memcpy(ex.usedOutpostY, buf + o, 16); o += 16;
+    for (int i = 0; i < RES_COUNT; i++)  ex.outfitRes[i] = getI16(buf, o);
+    for (int i = 0; i < ITEM_COUNT; i++) ex.outfitItem[i] = getI16(buf, o);
+    memcpy(ex.tiles, buf + o, WORLD_CELLS);          o += WORLD_CELLS;
+    memcpy(ex.revealed, buf + o, WORLD_MASK_BYTES);  o += WORLD_MASK_BYTES;
+    memcpy(ex.visited, buf + o, WORLD_MASK_BYTES);   o += WORLD_MASK_BYTES;
+    return true;
+}
+
+void WorldState::clearTrek() { w_remove(ADR_TREK_PATH); }
+
+bool WorldState::restore() {
+    memset(&ex, 0, sizeof ex);
+    memset(&cx, 0, sizeof cx);      // a resumed trip has no active combat (=flee)
+    if (!loadWorld()) { generated = false; return false; }
+    if (w_exists(ADR_TREK_PATH) && loadTrek() && ex.active) return true;
+    ex.active = false;
+    return false;
+}
+
+}  // namespace adr

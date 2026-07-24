@@ -8,7 +8,7 @@
 // binary search in tr(). zh values are UTF-8, rendered by the CJK font
 // (src/cjk_font12.h). Include this header from exactly ONE .cpp
 // (cjk_text.cpp) — it carries the whole table.
-// 786 entries · 6615 zh chars · 19517 UTF-8 bytes of translation text.
+// 797 entries · 6669 zh chars · 19679 UTF-8 bytes of translation text.
 #pragma once
 #include <stddef.h>
 
@@ -22,8 +22,11 @@ static const AdrString ADR_STRINGS[] = {
     { "300 wood", "300木头" },
     { "5 medicine", "5支药剂" },
     { "A Barren World", "荒芜世界" },
+    { "A Battlefield", "战场" },
     { "A Beast Attack", "野兽来袭" },
+    { "A Borehole", "巨坑" },
     { "A Crashed Ship", "坠毁星舰" },
+    { "A Crashed Starship", "坠毁星舰" },
     { "A Damp Cave", "潮湿洞穴" },
     { "A Dark Room", "小黑屋" },
     { "A Deserted Town", "沙漠小镇" },
@@ -42,6 +45,7 @@ static const AdrString ADR_STRINGS[] = {
     { "A Modest Village", "中型村落" },
     { "A Murky Swamp", "迷雾沼泽" },
     { "A Raucous Village", "喧嚣小镇" },
+    { "A Ravaged Battleship", "被摧毁的战舰" },
     { "A Ruined City", "被毁的城市" },
     { "A Ruined Trap", "损毁的陷阱" },
     { "A Scavenger", "拾荒者" },
@@ -59,12 +63,14 @@ static const AdrString ADR_STRINGS[] = {
     { "A&nbsp;Destroyed&nbsp;Village", "被摧毁的村落" },
     { "A&nbsp;Murky&nbsp;Swamp", "迷雾沼泽" },
     { "A&nbsp;Ruined&nbsp;City", "被毁的城市" },
+    { "An Abandoned Town", "废弃小镇" },
     { "An Old House", "旧房子" },
     { "An Old Starship", "破旧星舰" },
     { "An Outpost", "前哨" },
     { "An&nbsp;Abandoned&nbsp;Town", "废弃小镇" },
     { "An&nbsp;Old&nbsp;House", "破旧小屋" },
     { "An&nbsp;Outpost", "前哨" },
+    { "Coal Mine", "煤矿" },
     { "Coal&nbsp;Mine", "煤矿" },
     { "Dropbox Export / Import", "dropbox导出/导入" },
     { "Dropbox connection", "dropbox连接" },
@@ -73,6 +79,7 @@ static const AdrString ADR_STRINGS[] = {
     { "Fire", "火灾" },
     { "Get the App", "应用商店" },
     { "Go Hyper?", "要加速么？" },
+    { "Iron Mine", "铁矿" },
     { "Iron&nbsp;Mine", "铁矿" },
     { "Mesosphere", "中气层" },
     { "Noises", "噪声" },
@@ -86,6 +93,7 @@ static const AdrString ADR_STRINGS[] = {
     { "Sickness", "疾病" },
     { "Space", "太空" },
     { "Stratosphere", "平流层" },
+    { "Sulphur Mine", "硫磺矿" },
     { "Sulphur&nbsp;Mine", "硫磺矿" },
     { "The Beggar", "乞丐" },
     { "The Coal Mine", "煤矿" },
@@ -188,6 +196,7 @@ static const AdrString ADR_STRINGS[] = {
     { "a torch to keep the dark away", "驱散黑暗的火把" },
     { "a trading post would make commerce easier", "贸易站让贸易变得更加便捷" },
     { "a tribe of elderly squatters is camped out in this ward.", "一帮上了年纪的流浪者在这间病房里宿营" },
+    { "a two-headed creature appears, the smaller head trembling", "一只双头怪出现了，较小的那颗头在颤抖" },
     { "a wall of gnarled trees rises from the dust. their branches twist into a skeletal canopy overhead.", "尘土中长出了结瘤的树墙，枝干在头顶缠绕成骨骼般的穹顶" },
     { "a wanderer arrives with an empty cart. says if he leaves with wood, he'll be back with more.", "一名流浪者推着货车来到村子，声称如果让他带着木头离开，他会带回更多木头" },
     { "a wanderer arrives with an empty cart. says if she leaves with furs, she'll be back with more.", "一名流浪者推着货车来到村子，声称如果让她带着毛皮离开，她会带回更多毛皮" },
@@ -724,6 +733,7 @@ static const AdrString ADR_STRINGS[] = {
     { "the trees are gone. parched earth and blowing dust are poor replacements.", "树木都消失了，唯留下干裂的大地和飞扬的尘土" },
     { "the trees yield to dry grass. the yellowed brush rustles in the wind.", "树木歪倒在干草丛中，枯黄的灌木在风中沙沙作响" },
     { "the tunnel opens up at another platform.", "隧道出口在另一边的站台" },
+    { "the two creatures are dead", "两只怪物都倒下了" },
     { "the villagers hang the thief high in front of the store room.", "村民们将盗贼绞死，高挂在仓库门前" },
     { "the villagers haul a filthy man out of the store room.", "村民们从仓库里拽出来一个脏兮兮的家伙" },
     { "the villagers retreat to mourn the dead.", "村民撤了回来，悼念那些死去的人" },
@@ -770,6 +780,7 @@ static const AdrString ADR_STRINGS[] = {
     { "turn her away", "撵走她" },
     { "turn him away", "撵走他" },
     { "turning hyper mode speeds up the game to x2 speed. do you want to do that?", "开启加速模式将会使游戏速度变为原有的2倍。你确定要加速吗？" },
+    { "two-headed creature", "双头怪" },
     { "unarmed master", "徒手宗师" },
     { "unfathomable destruction to fuel wanderer hungers.", "以莫测的毁灭之力填补流浪者心中的欲壑" },
     { "upgrade engine", "升级引擎" },

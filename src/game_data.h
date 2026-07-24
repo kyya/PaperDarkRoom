@@ -67,28 +67,46 @@ static const char* const RES_KEY[RES_COUNT] = {
     "iron", "coal", "sulphur", "steel", "teeth", "scales", "cloth", "charm",
     "bullets", "medicine", "energy cell", "alien alloy", "compass" };
 
-// ---- Buildings (game.buildings) — the P1 craftable buildings --------------
+// ---- Buildings (game.buildings) — P1 craftables + P2 World mines ----------
 enum Bld : uint8_t {
     B_TRAP = 0, B_CART, B_HUT, B_LODGE, B_TRADING_POST, B_TANNERY,
     B_SMOKEHOUSE, B_WORKSHOP, B_STEELWORKS, B_ARMOURY,
+    // -- Phase 2 World mines. NOT craftable: World.goHome() sets each to 1 the
+    // first time the matching mine setpiece is cleared (world.js goHome), which
+    // unlocks the corresponding miner job (JOB_REQ_BLD below). They sit AFTER
+    // the 10 craftable buildings so craft ids 0..9 still map 1:1 to Bld 0..9.
+    B_IRON_MINE, B_COAL_MINE, B_SULPHUR_MINE,
     BLD_COUNT
 };
 constexpr uint8_t BLD_NONE = 0xFF;
+// Count of CRAFTABLE buildings (Craft ids 0..9 == Bld 0..9). Distinct from
+// BLD_COUNT now that the non-craftable World mines extend the Bld enum — the
+// craft<->building alignment (craftIsBuilding / craftSlot) keys off THIS, not
+// BLD_COUNT, so appending mines can't misclassify a tool craft id as a building.
+constexpr uint8_t CRAFT_BLD_COUNT = B_IRON_MINE;   // = 10
 static const char* const BLD_KEY[BLD_COUNT] = {
     "trap", "cart", "hut", "lodge", "trading post", "tannery",
-    "smokehouse", "workshop", "steelworks", "armoury" };
+    "smokehouse", "workshop", "steelworks", "armoury",
+    "iron mine", "coal mine", "sulphur mine" };
 
 // ---- Craftable items (stores, non-building) -------------------------------
 enum Item : uint8_t {
     I_TORCH = 0, I_WATERSKIN, I_CASK, I_WATER_TANK, I_BONE_SPEAR, I_RUCKSACK,
     I_WAGON, I_CONVOY, I_L_ARMOUR, I_I_ARMOUR, I_S_ARMOUR, I_IRON_SWORD,
     I_STEEL_SWORD, I_RIFLE,
+    // -- Phase 2 World carryable weapons (path.js carryable / World.Weapons).
+    // Loot from battlefield / city / mines, NOT P1-craftable, so they carry no
+    // Craft id — they extend Item past the 14 craftables purely as store slots a
+    // World expedition can carry and bank on goHome. Their Path.Weight (>1, see
+    // world_data.h WEIGHTS) is why they get dedicated slots rather than a Res row.
+    I_BAYONET, I_LASER_RIFLE, I_GRENADE, I_BOLAS,
     ITEM_COUNT
 };
 static const char* const ITEM_KEY[ITEM_COUNT] = {
     "torch", "waterskin", "cask", "water tank", "bone spear", "rucksack",
     "wagon", "convoy", "l armour", "i armour", "s armour", "iron sword",
-    "steel sword", "rifle" };
+    "steel sword", "rifle",
+    "bayonet", "laser rifle", "grenade", "bolas" };
 
 // ---- Unified craftable table (room.js Room.Craftables) --------------------
 // Craft ids 0..9 are buildings (aligned 1:1 with Bld); 10..23 are items
@@ -185,9 +203,9 @@ static const Craftable CRAFT[CRAFT_COUNT] = {
 };
 
 // Map a building/item count slot from a craft id.
-inline bool craftIsBuilding(uint8_t c) { return c < BLD_COUNT; }
+inline bool craftIsBuilding(uint8_t c) { return c < CRAFT_BLD_COUNT; }
 inline uint8_t craftSlot(uint8_t c) {
-    return craftIsBuilding(c) ? c : (uint8_t)(c - BLD_COUNT);
+    return craftIsBuilding(c) ? c : (uint8_t)(c - CRAFT_BLD_COUNT);
 }
 inline bool craftNeedsWorkshop(uint8_t type) { return type != CT_BUILDING; }
 
@@ -253,9 +271,9 @@ static const uint8_t JOB_REQ_BLD[JOB_COUNT] = {
     B_LODGE,         // trapper
     B_TANNERY,       // tanner
     B_SMOKEHOUSE,    // charcutier
-    BLD_NONE,        // iron miner  (mine, P2)
-    BLD_NONE,        // coal miner  (mine, P2)
-    BLD_NONE,        // sulphur miner (mine, P2)
+    B_IRON_MINE,     // iron miner    (World mine, P2 — set by World.goHome)
+    B_COAL_MINE,     // coal miner    (World mine, P2)
+    B_SULPHUR_MINE,  // sulphur miner (World mine, P2)
     B_STEELWORKS,    // steelworker
     B_ARMOURY,       // armourer
 };
