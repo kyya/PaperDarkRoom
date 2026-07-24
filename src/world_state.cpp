@@ -507,6 +507,21 @@ StepResult WorldState::move(GameState& gs, uint8_t dir) {
     return res;
 }
 
+// world.js World.leaveItAtHome for a Res slot: the consumable supplies stay
+// packed for the next trip (cured meat / bullets / energy cell / charm / medicine
+// — stim/hypo are P3, absent from Res); everything else (raw loot fur/iron/teeth/
+// scales/cloth/leather, alien alloy, compass) is banked to stores and dropped from
+// the outfit. Returns true == leave at home.
+static bool leaveResAtHome(int r) {
+    switch (r) {
+        case R_CURED_MEAT: case R_BULLETS: case R_ENERGY_CELL:
+        case R_CHARM:      case R_MEDICINE:
+            return false;
+        default:
+            return true;
+    }
+}
+
 void WorldState::goHome(GameState& gs) {
     // Commit the working map -> committed (cleared dungeons + revealed fog stay).
     memcpy(tiles, ex.tiles, sizeof tiles);
@@ -524,19 +539,27 @@ void WorldState::goHome(GameState& gs) {
     if (ex.clearedSulphur && gs.buildings[B_SULPHUR_MINE] == 0)
         gs.buildings[B_SULPHUR_MINE] = 1;
     // clearedShip / clearedExec unlock Ship / Fabricator (Phase 3) — deferred.
-    // Bank the bag: everything returns to the village. The upstream
-    // leaveItAtHome nicety (keep supplies/weapons pre-loaded for the next trip)
-    // belongs to the persistent Path outfit, which lands with the Path panel.
+    // Bank the bag: EVERYTHING returns to the village stores (upstream returnOutfit
+    // does $SM.add('stores[k]', outfit[k]) for every k). Then the leaveItAtHome
+    // nicety writes the RETAINED slots into the persistent Path outfit so the next
+    // embark pre-packs them (they are banked in stores AND remembered here — the
+    // Path panel re-deducts min(remembered, stock) next trip, no double count).
     for (int i = 0; i < RES_COUNT; i++) {
-        if (ex.outfitRes[i] <= 0) continue;
-        gs.stores[i] += (int32_t)ex.outfitRes[i] * FP;
-        gs.markSeen((uint8_t)i);
+        if (ex.outfitRes[i] > 0) {
+            gs.stores[i] += (int32_t)ex.outfitRes[i] * FP;
+            gs.markSeen((uint8_t)i);
+        }
+        gs.savedOutfitRes[i] = leaveResAtHome(i) ? 0 : ex.outfitRes[i];  // §3.5
         ex.outfitRes[i] = 0;
     }
     for (int i = 0; i < ITEM_COUNT; i++) {
-        if (ex.outfitItem[i] <= 0) continue;
-        int c = gs.items[i] + ex.outfitItem[i];
-        gs.items[i] = (uint8_t)(c > 255 ? 255 : c);
+        if (ex.outfitItem[i] > 0) {
+            int c = gs.items[i] + ex.outfitItem[i];
+            gs.items[i] = (uint8_t)(c > 255 ? 255 : c);
+        }
+        // leaveItAtHome is false for EVERY item: 0..I_RIFLE are Room craftables,
+        // I_BAYONET..I_BOLAS are World weapons — all stay packed for next trip.
+        gs.savedOutfitItem[i] = ex.outfitItem[i];
         ex.outfitItem[i] = 0;
     }
     ex.active = false;

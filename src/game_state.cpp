@@ -31,6 +31,7 @@ void GameState::init() {
     craftShown = 0;
     perks = 0;
     deathAt = 0;                      // no post-death embark lockout on a fresh game
+    clearSavedOutfit();               // fresh game: empty remembered Path outfit
     cdFire = cdGather = cdTraps = 0;
     tTemp = ROOM_WARM_S;
     tBuilder = BUILDER_STATE_S;
@@ -670,6 +671,15 @@ size_t GameState::toJson(char* out, size_t cap) const {
     AP("\"seen\":%lu,\"cshow\":%lu,\"perks\":%lu,",
        (unsigned long)seen, (unsigned long)craftShown, (unsigned long)perks);
     AP("\"dcool\":%lu,", (unsigned long)deathAt);
+    // Remembered Path outfit (sparse [idx,val,...] pairs — only the non-zero
+    // keep-slots): compact because a returned outfit is a handful of entries.
+    AP("\"oftr\":[");
+    { bool f = true; for (int i = 0; i < RES_COUNT; i++) if (savedOutfitRes[i] > 0)
+        { AP("%s%d,%d", f ? "" : ",", i, savedOutfitRes[i]); f = false; } }
+    AP("],\"ofti\":[");
+    { bool f = true; for (int i = 0; i < ITEM_COUNT; i++) if (savedOutfitItem[i] > 0)
+        { AP("%s%d,%d", f ? "" : ",", i, savedOutfitItem[i]); f = false; } }
+    AP("],");
     AP("\"stores\":[");
     for (int i = 0; i < RES_COUNT; i++) AP("%s%ld", i ? "," : "", (long)stores[i]);
     AP("],\"bld\":[");
@@ -733,6 +743,19 @@ bool GameState::fromJson(const char* j) {
     // nullptr key is 0, so this is safe unconditionally).
     perks = (uint32_t)readLong(afterKey(j, "perks"));
     deathAt = (uint32_t)readLong(afterKey(j, "dcool"));   // absent -> 0 (no lockout)
+    // Remembered Path outfit — sparse [idx,val,...] pairs; absent on pre-0.9 saves,
+    // where init()'s zeroed arrays stand (empty outfit). Zero-padding from readIntArr
+    // scatters as (0,0) no-ops; bounds-guarded on the way in.
+    {
+        int32_t pr[2 * RES_COUNT]; readIntArr(afterKey(j, "oftr"), pr, 2 * RES_COUNT);
+        for (int k = 0; k + 1 < 2 * RES_COUNT; k += 2)
+            if (pr[k] >= 0 && pr[k] < RES_COUNT && pr[k + 1] > 0)
+                savedOutfitRes[pr[k]] = (int16_t)pr[k + 1];
+        int32_t pi[2 * ITEM_COUNT]; readIntArr(afterKey(j, "ofti"), pi, 2 * ITEM_COUNT);
+        for (int k = 0; k + 1 < 2 * ITEM_COUNT; k += 2)
+            if (pi[k] >= 0 && pi[k] < ITEM_COUNT && pi[k + 1] > 0)
+                savedOutfitItem[pi[k]] = (int16_t)pi[k + 1];
+    }
     const char* seenP = afterKey(j, "seen");
     if (seenP) {
         seen = (uint32_t)readLong(seenP);

@@ -20,9 +20,10 @@
 //   "xN" + per-unit 负重 with a ▲/▼ stepper — increaseSupply/decreaseSupply ±1)
 //   · a 更多 band when the owned carryables overflow one page · a read-only
 //   护甲/水 row (712) · the 出发 band (746, dashed-disabled until cured meat ≥ 1,
-//   the sole embark gate) · a 「返回」band (836). The outfit selection is RAM-only
-//   (reset on open); embark() deducts it from the stores, fills hp/water from
-//   equipment, and writes trek.bin.
+//   the sole embark gate) · a 「返回」band (836). On open the selection is pre-filled
+//   from the persistent remembered outfit (game_state savedOutfit, written by
+//   world_state goHome) clamped to stock/capacity; embark() deducts it from the
+//   stores, fills hp/water from equipment, and writes trek.bin.
 //
 // Carryables (path.js carryable ∪ the Room.Craftables tools/weapons, §1.3 order)
 // map onto the P1 stores: some are Res (cured meat / bullets / energy cell /
@@ -67,9 +68,10 @@ private:
     static constexpr uint8_t PARAM_EMBARK = 0xFD;   // 出发
     static constexpr uint8_t PARAM_RETURN = 0xFE;   // 返回
 
-    // RAM-only outfit selection (upstream Path.outfit), indexed like the stores.
-    // Reset in open(); consumed by embark(). Persisting it across sleeps is a
-    // later concern (world_state goHome's leaveItAtHome nicety) — not P2.1.
+    // RAM working copy of the outfit selection (upstream Path.outfit), indexed like
+    // the stores. On open() it is PRE-FILLED from the persistent g_game.savedOutfit
+    // (the loadout goHome remembered), clamped to current stock + capacity; the
+    // player then tweaks it, and embark() consumes it. See prefillOutfit().
     int16_t m_outfitRes[adr::RES_COUNT]  = {0};
     int16_t m_outfitItem[adr::ITEM_COUNT] = {0};
 
@@ -80,6 +82,7 @@ private:
     int  carriedOf(int carryIdx) const;       // units already in the outfit
     int  freeCenti() const;                    // capacity − carried weight (centi)
     bool adjustOutfit(int carryIdx, int delta);   // ±1 with the space/stock clamps
+    void prefillOutfit();                          // seed selection from savedOutfit
     int  buildOutfitList(uint8_t* out) const;  // rows to show (owned/carried > 0)
     uint32_t contentSig() const;               // tick() repaint trigger
     void doEmbark();                           // embark() + jump to World (2.2 seam)

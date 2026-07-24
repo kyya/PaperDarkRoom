@@ -31,7 +31,7 @@ using namespace adr;
 namespace path_page {
 // Visibility latch — the page is drawable (a reachable ring slot) only between
 // open() and close(). Cleared on boot; the Outside 尘土之路 cell sets it. open()
-// also flags s_reset so the next draw() clears the RAM-only outfit selection.
+// also flags s_reset so the next draw() re-seeds the outfit from savedOutfit.
 static bool s_active = false;
 static bool s_reset  = false;
 void open()  { s_active = true; s_reset = true; }
@@ -273,6 +273,37 @@ bool PathPage::adjustOutfit(int i, int delta) {
     return true;
 }
 
+// Seed the selection from the persistent remembered outfit (g_game.savedOutfit,
+// written by world_state goHome's leaveItAtHome nicety) so a returning wanderer
+// re-embarks with last trip's loadout instead of re-packing from zero. Two clamps
+// in CARRY display order (cured meat + ammo first, weapons last — the survival-
+// critical rows win a shrunk bag):
+//   1. STOCK: min(remembered, current village stock) — stores may have been spent
+//      since goHome (miners eat cured meat, crafting spends bullets).
+//   2. CAPACITY: floor(freeSpace/weight) — capacity rarely shrinks (bag upgrades
+//      aren't consumed), but the stock clamp above means a row may still not fit;
+//      freeCenti() drains as earlier rows fill, so each row takes what's left.
+// Old saves / a fresh game leave savedOutfit zeroed, so this seeds nothing — the
+// pre-0.9 "empty on open" behaviour. (Death deliberately KEEPS the memory — see
+// game_state.h savedOutfit — so a returning-from-death trip still pre-fills.)
+void PathPage::prefillOutfit() {
+    memset(m_outfitRes, 0, sizeof m_outfitRes);
+    memset(m_outfitItem, 0, sizeof m_outfitItem);
+    for (int i = 0; i < CARRY_N; i++) {
+        const Carry& c = CARRY[i];
+        int want = c.isItem ? (int)g_game.savedOutfitItem[c.idx]
+                            : (int)g_game.savedOutfitRes[c.idx];
+        if (want <= 0) continue;
+        int stock = ownedOf(i);
+        if (want > stock) want = stock;                    // (1) stock clamp
+        int wc = weightCenti(c.key);
+        if (wc > 0) { int fits = freeCenti() / wc; if (want > fits) want = fits; }  // (2)
+        if (want <= 0) continue;
+        if (c.isItem) m_outfitItem[c.idx] = (int16_t)want;
+        else          m_outfitRes[c.idx]  = (int16_t)want;
+    }
+}
+
 // The carryable rows to show: owned > 0 OR already carried > 0; cured meat always
 // (the embark gate must stay visible even at zero). Writes CARRY indices to `out`.
 int PathPage::buildOutfitList(uint8_t* out) const {
@@ -300,9 +331,8 @@ bool PathPage::available() const {
 
 bool PathPage::draw(m5gfx::M5Canvas& c) {
     if (!available()) return false;
-    if (path_page::s_reset) {                 // fresh open -> clear the selection
-        memset(m_outfitRes, 0, sizeof m_outfitRes);
-        memset(m_outfitItem, 0, sizeof m_outfitItem);
+    if (path_page::s_reset) {                 // fresh open -> seed from savedOutfit
+        prefillOutfit();
         m_page = 0;
         path_page::s_reset = false;
     }

@@ -408,6 +408,116 @@ int main() {
         CHECK(w.ex.outfitRes[R_CURED_MEAT] == 0, "bag emptied on death");
     }
 
+    printf("== [outfit] goHome remembers the loadout (leaveItAtHome §3.5); raw loot drops off ==\n");
+    {
+        GameState gs; gs.init();
+        WorldState w; w.init(); w.generateMap(4242);
+        // Pack meat + medicine + a bayonet; the trip also loots raw teeth and a
+        // steel sword, and 3 meat get eaten en route.
+        gs.stores[R_CURED_MEAT] = 10 * FP;
+        gs.stores[R_MEDICINE]   = 3 * FP;
+        gs.items[I_BAYONET]     = 1;
+        int16_t out[RES_COUNT]  = { 0 };
+        int16_t outI[ITEM_COUNT] = { 0 };
+        out[R_CURED_MEAT] = 10; out[R_MEDICINE] = 3; outI[I_BAYONET] = 1;
+        CHECK(w.embark(gs, out, outI, 1), "embark with meat + medicine + bayonet");
+        w.ex.outfitRes[R_TEETH]         = 6;   // raw loot picked up
+        w.ex.outfitItem[I_STEEL_SWORD]  = 1;   // weapon loot picked up
+        w.ex.outfitRes[R_CURED_MEAT]    = 7;   // ate 3 of the 10 meat
+        w.ex.x = VILLAGE_X + 1; w.ex.y = VILLAGE_Y;
+        StepResult r = w.move(gs, DIR_WEST);
+        CHECK(r.kind == STEP_HOME, "reached the village -> goHome");
+        // Everything banks to stores (returnOutfit adds every slot).
+        CHECK(gs.whole(R_TEETH) == 6,        "raw teeth banked to stores");
+        CHECK(gs.items[I_STEEL_SWORD] == 1,  "looted steel sword banked to items");
+        CHECK(gs.whole(R_CURED_MEAT) == 7,   "the 7 surviving meat banked to stores");
+        CHECK(gs.whole(R_MEDICINE) == 3,     "the 3 medicine banked back to stores");
+        // Remembered outfit: supplies + weapons stay; raw material is left at home.
+        CHECK(gs.savedOutfitRes[R_CURED_MEAT] == 7,  "meat remembered for next trip");
+        CHECK(gs.savedOutfitRes[R_MEDICINE] == 3,    "medicine remembered");
+        CHECK(gs.savedOutfitItem[I_BAYONET] == 1,    "packed bayonet remembered (weapon)");
+        CHECK(gs.savedOutfitItem[I_STEEL_SWORD] == 1,"looted steel sword remembered (weapon)");
+        CHECK(gs.savedOutfitRes[R_TEETH] == 0,       "raw teeth NOT remembered (left at home)");
+
+        // Re-embark from the remembered loadout — the engine slice of the Path
+        // pre-fill: pack min(remembered, current stock) (prefillOutfit clamp #1).
+        // Stock still covers everything here, so the full loadout re-packs.
+        int16_t out2[RES_COUNT] = { 0 }, out2I[ITEM_COUNT] = { 0 };
+        for (int i = 0; i < RES_COUNT; i++) {
+            int wnt = gs.savedOutfitRes[i], stk = gs.whole((uint8_t)i);
+            out2[i] = (int16_t)(wnt < stk ? wnt : stk);
+        }
+        for (int i = 0; i < ITEM_COUNT; i++) {
+            int wnt = gs.savedOutfitItem[i], stk = gs.items[i];
+            out2I[i] = (int16_t)(wnt < stk ? wnt : stk);
+        }
+        int meatBefore = gs.whole(R_CURED_MEAT);
+        CHECK(w.embark(gs, out2, out2I, 2),           "re-embark from the remembered loadout");
+        CHECK(w.ex.outfitRes[R_CURED_MEAT] == 7,      "pre-filled 7 meat carried into the trek");
+        CHECK(w.ex.outfitItem[I_BAYONET] == 1,        "pre-filled bayonet carried into the trek");
+        CHECK(gs.whole(R_CURED_MEAT) == meatBefore-7, "re-embark deducted the pre-filled meat");
+    }
+
+    printf("== [outfit] stock spent below the remembered amount -> pre-fill clamps to stock ==\n");
+    {
+        GameState gs; gs.init();
+        gs.savedOutfitRes[R_CURED_MEAT] = 7;      // last trip remembered 7 meat
+        gs.stores[R_CURED_MEAT] = 2 * FP;         // but a charcutier shortfall left only 2
+        // prefillOutfit clamp #1: pack min(remembered, stock).
+        int want = gs.savedOutfitRes[R_CURED_MEAT], stock = gs.whole(R_CURED_MEAT);
+        int packed = want < stock ? want : stock;
+        CHECK(packed == 2, "pre-fill packs only the 2 in stock, not the remembered 7");
+    }
+
+    printf("== [outfit] death KEEPS the remembered loadout (deliberate divergence from upstream) ==\n");
+    {
+        // Design decision: the death penalty is the lost PHYSICAL bag (ex.outfit),
+        // not the pre-fill memory. die() empties the trek bag but must leave
+        // gs.savedOutfit intact so the next trip still pre-fills (min-clamped to
+        // stock -> no exploit). Upstream die() would $SM.remove('outfit'); we don't.
+        GameState gs; gs.init();
+        WorldState w; w.init(); w.generateMap(7777);
+        gs.savedOutfitRes[R_CURED_MEAT] = 5;   // a loadout remembered from a past goHome
+        gs.savedOutfitItem[I_BAYONET]   = 1;
+        gs.stores[R_CURED_MEAT] = 5 * FP;
+        int16_t out[RES_COUNT] = { 0 }; out[R_CURED_MEAT] = 5;
+        w.embark(gs, out, nullptr, 1);
+        w.ex.outfitRes[R_CURED_MEAT] = 5;      // physical bag carried into the trek
+        w.die();
+        CHECK(w.ex.dead && !w.ex.active,             "die() ended the expedition");
+        CHECK(w.ex.outfitRes[R_CURED_MEAT] == 0,     "physical bag forfeited on death (penalty stands)");
+        CHECK(gs.savedOutfitRes[R_CURED_MEAT] == 5,  "remembered meat SURVIVES death (pre-fill memory kept)");
+        CHECK(gs.savedOutfitItem[I_BAYONET] == 1,    "remembered bayonet SURVIVES death");
+        // Only a fresh game wipes the memory (init -> clearSavedOutfit).
+        gs.clearSavedOutfit();
+        bool empty = true;
+        for (int i = 0; i < RES_COUNT; i++)  if (gs.savedOutfitRes[i])  empty = false;
+        for (int i = 0; i < ITEM_COUNT; i++) if (gs.savedOutfitItem[i]) empty = false;
+        CHECK(empty, "clearSavedOutfit (fresh-game only) empties both arrays");
+    }
+
+    printf("== [outfit] remembered loadout survives a game.json round-trip (sparse pairs) ==\n");
+    {
+        GameState gs; gs.init();
+        gs.savedOutfitRes[R_CURED_MEAT]  = 9;
+        gs.savedOutfitRes[R_MEDICINE]    = 2;
+        gs.savedOutfitItem[I_LASER_RIFLE] = 1;
+        gs.savedOutfitItem[I_BOLAS]       = 3;
+        char buf[8192]; gs.toJson(buf, sizeof buf);
+        GameState g2; g2.fromJson(buf);
+        CHECK(g2.savedOutfitRes[R_CURED_MEAT] == 9,   "meat count survives round-trip");
+        CHECK(g2.savedOutfitRes[R_MEDICINE] == 2,     "medicine count survives round-trip");
+        CHECK(g2.savedOutfitItem[I_LASER_RIFLE] == 1, "laser rifle survives round-trip");
+        CHECK(g2.savedOutfitItem[I_BOLAS] == 3,       "bolas count survives round-trip");
+        CHECK(g2.savedOutfitRes[R_TEETH] == 0,        "an unset slot stays zero");
+        // Old saves lack the keys entirely -> empty remembered outfit (no bump).
+        GameState g3; g3.fromJson("{\"v\":3,\"ts\":0,\"stores\":[]}");
+        bool empty = true;
+        for (int i = 0; i < RES_COUNT; i++)  if (g3.savedOutfitRes[i])  empty = false;
+        for (int i = 0; i < ITEM_COUNT; i++) if (g3.savedOutfitItem[i]) empty = false;
+        CHECK(empty, "a save without the outfit keys loads as an empty loadout");
+    }
+
     printf("== [outpost] one-shot use persists across expeditions; die() discards ==\n");
     {
         GameState gs; gs.init();

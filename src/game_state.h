@@ -112,6 +112,25 @@ public:
     // (absent on pre-2.5 saves -> 0).
     uint32_t deathAt;
 
+    // Persistent Path outfit (upstream $SM 'outfit'): the loadout remembered from
+    // the last goHome so the Path panel pre-fills it next embark instead of making
+    // the player re-pack from zero every trip (§3.5 leaveItAtHome). goHome writes
+    // the RETAINED portion here (supplies/weapons/gear stay; raw loot drops off).
+    // Sparse — only ever the ~handful of keep-slots are non-zero. Whole units,
+    // indexed like stores/items. Optional in game.json (absent on pre-0.9 saves ->
+    // all zero == empty outfit, no SAVE_VER bump).
+    //
+    // DESIGN DECISION — deliberate divergence from upstream: death does NOT clear
+    // this. Upstream die() does $SM.remove('outfit'), wiping the memory too. We
+    // keep it. Rationale: the death penalty IS the loss of the Expedition's PHYSICAL
+    // bag (world_state die() empties ex.outfit — unchanged); savedOutfit is only the
+    // next-trip pre-fill MEMORY. Wiping it adds no penalty, just re-packing tedium
+    // (real playtest pain: dying one step from home). And prefillOutfit's
+    // min(remembered, stock) clamp means a death can never conjure resources the
+    // player no longer owns — so keeping the memory is free of exploit.
+    int16_t  savedOutfitRes[RES_COUNT];
+    int16_t  savedOutfitItem[ITEM_COUNT];
+
     // cooldown last-press epochs (0 = ready). Light & stoke share one button.
     uint32_t cdFire, cdGather, cdTraps;
 
@@ -196,6 +215,13 @@ public:
     // Permanent perk query / grant (Perk enum). addPerk is idempotent.
     bool hasPerk(uint8_t p) const { return p < 32 && (perks & (1u << p)); }
     void addPerk(uint8_t p) { if (p < 32) perks |= (1u << p); }
+    // Wipe the remembered Path outfit. Only a fresh game (init) clears it — NOT
+    // death (see the savedOutfit design-decision note above: we deliberately keep
+    // the pre-fill memory across a death, unlike upstream's die() $SM.remove).
+    void clearSavedOutfit() {
+        for (int i = 0; i < RES_COUNT; i++)  savedOutfitRes[i]  = 0;
+        for (int i = 0; i < ITEM_COUNT; i++) savedOutfitItem[i] = 0;
+    }
     uint16_t maxPopulation() const { return buildings[B_HUT] * HUT_ROOM; }
     int      numGatherers() const;
     // The P1-assignable jobs currently unlocked — a job is offerable once its
