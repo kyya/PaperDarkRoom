@@ -160,6 +160,19 @@ async def main() -> int:
     try:
         async with BleakClient(dev, timeout=20.0,
                                disconnected_callback=on_disc) as client:
+            # Windows/WinRT doesn't auto-pair on connect the way it used to
+            # once an old bond exists; explicit pair() (Just Works, no
+            # prompt) gets the link encrypted so the OTA/DATA characteristic
+            # writes below don't fail with ATT "Insufficient
+            # Authentication"/"Insufficient Encryption". Tolerate failure
+            # (e.g. already paired, or platforms where pair() isn't needed)
+            # and keep going — the writes below will surface a clearer error
+            # if the link truly isn't authenticated.
+            try:
+                await client.pair()
+            except (BleakError, NotImplementedError, OSError) as e:
+                print(f"[pair] {e} — continuing anyway")
+
             await client.start_notify(STAT, on_stat)
             await asyncio.sleep(2.5)   # catch a STATUS to learn the current fw=
             print(f"[ota] current fw={fw_before['v']}")
