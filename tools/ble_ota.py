@@ -5,8 +5,18 @@ BLE central.
 Streams a firmware .bin to the device over the existing BLE link, no USB:
   scan -> connect (existing bond) -> write the 8-byte OTA header (<II
   total|crc32, zlib CRC32) -> stream the image over the DATA characteristic at
-  mtu-3 chunks (write-without-response) -> watch STATUS for `ota=ok` -> the
-  device reboots into the new image -> rescan and confirm STATUS `fw=` changed.
+  mtu-3 chunks (acknowledged writes) -> watch STATUS for `ota=ok` -> the device
+  reboots into the new image -> rescan and confirm STATUS `fw=` changed.
+
+The DATA chunks are ACKNOWLEDGED writes (response=True), not
+write-without-response: the firmware writes each chunk into flash from its BLE
+RX callback (esp_ota_write, which lazily erases a 4 KB sector on first touch,
+stalling the callback), and write-without-response has no back-pressure, so a
+chunk arriving during an erase stall overruns the peripheral's ACL RX buffer
+and is dropped — with no per-chunk ack or retransmit, one lost chunk hangs the
+whole transfer (recv freezes short of `total`, never finalizes). See the long
+comment at the streaming loop. Acknowledged writes keep at most one chunk in
+flight, so nothing can be dropped at any image size.
 
 The game firmware and the companion dashboard firmware share the same BLE GATT
 UUID set and OTA slot layout on purpose, so this script can also cross-flash a
@@ -22,12 +32,11 @@ one peripheral. After the first flash that adds the OTA characteristic,
 Windows/WinRT may need the device removed + re-paired to drop its cached GATT
 table (see README.md).
 
-On macOS, bleak's CoreBluetooth backend applies no back-pressure to
-write-without-response: it accepts the whole image into a queue in a fraction
-of a second, overruns the ESP32's BLE receive buffer, and silently drops
-chunks so the image never completes. `--throttle` paces each chunk (ms/chunk,
-default 50) to keep the peripheral's buffer from overflowing. Windows/WinRT
-already back-pressures writes, so pass `--throttle 0` there.
+`--throttle` (ms/chunk, default 0) adds an extra per-chunk delay. It is now a
+manual escape hatch only: acknowledged writes already gate the send on the
+peripheral, which superseded the old macOS pacing hack (CoreBluetooth applied
+no back-pressure to write-without-response and would overrun the ESP32's RX
+buffer). Leave it at 0 unless a specific link needs slowing.
 """
 # PEP 563: defer annotation evaluation so the PEP 604 `X | None` return hints
 # below parse as strings — the Mac venv runs CLT python 3.9, which would else
@@ -105,11 +114,12 @@ async def main() -> int:
                          "(default: %(default)s)")
     ap.add_argument("--progress", type=int, default=64,
                     help="log every N chunks (default: %(default)s)")
-    ap.add_argument("--throttle", type=float, default=50.0,
-                    help="delay per chunk, ms — paces write-without-response so "
-                         "the ESP32 BLE buffer doesn't overflow on macOS "
-                         "(CoreBluetooth has no send back-pressure); 0 disables "
-                         "for Windows/WinRT (default: %(default)s)")
+    ap.add_argument("--throttle", type=float, default=0.0,
+                    help="extra delay per chunk, ms. Normally 0: DATA chunks now "
+                         "use acknowledged writes (response=True), whose ATT "
+                         "back-pressure already keeps at most one chunk in "
+                         "flight, so the old macOS pacing hack is obsolete. Kept "
+                         "as a manual escape hatch (default: %(default)s)")
     args = ap.parse_args()
 
     fw = Path(args.fw)
@@ -187,12 +197,42 @@ async def main() -> int:
 
             t0 = time.time()
             nchunks = (total + chunk - 1) // chunk
+            # ACKNOWLEDGED writes (response=True), NOT write-without-response.
+            # The firmware streams each DATA chunk straight into flash from the
+            # BLE RX callback (esp_ota_write). esp_ota_begin(OTA_SIZE_UNKNOWN)
+            # erases the OTA partition lazily, one 4 KB sector at a time, on the
+            # first write that reaches each sector — and that erase runs INSIDE
+            # the RX callback, stalling it for milliseconds. With
+            # write-without-response there is no ATT-layer back-pressure, so a
+            # chunk that arrives during a sector-erase stall overruns the
+            # peripheral's ACL RX buffer and is silently dropped. The transfer
+            # has no per-chunk ack and no retransmit, so a single dropped chunk
+            # hangs forever: the device's recv counter freezes one chunk short
+            # of `total`, never finalizes, never errors.
+            #
+            # This bit us the moment the image grew past a 4 KB boundary the
+            # previous builds never reached: a 1,385,600-byte image first writes
+            # into sector 338 (offset 0x151000 = 1,384,448), forcing one MORE
+            # late-stream erase than the ~1,383,7xx images that always flashed;
+            # the chunk right after that erase (chunk 2694, image bytes
+            # 1,384,716..1,385,230) got dropped every run, freezing recv at
+            # 1,385,086 = total - 514 = 514*2694 + 370. The trailing 370-byte
+            # chunk still landed, which is exactly why recv is not a multiple of
+            # 514 — proof one MID-stream chunk was lost, not the last one.
+            #
+            # response=True makes the host wait for the ATT Write Response the
+            # firmware only sends AFTER the callback (incl. any erase) returns,
+            # so at most one chunk is ever in flight: the RX buffer can't
+            # overflow and no chunk can be dropped, at any image size. Slower
+            # (one round-trip per chunk) but lossless; the DATA characteristic
+            # advertises PROPERTY_WRITE alongside PROPERTY_WRITE_NR, so the
+            # already-installed firmware accepts it with no firmware change.
             for ci, off in enumerate(range(0, total, chunk)):
                 if disconnected.is_set():
                     print("[ota] disconnected mid-transfer — aborting")
                     return 1
                 await client.write_gatt_char(DATA, image[off:off + chunk],
-                                             response=False)
+                                             response=True)
                 if args.throttle:
                     await asyncio.sleep(args.throttle / 1000)
                 if (ci + 1) % args.progress == 0 or ci + 1 == nchunks:
