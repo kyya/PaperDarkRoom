@@ -209,6 +209,17 @@ bool handleHold(int x, int y) {
 void checkTimeout(uint32_t nowMs) {
     if (!s_active) return;
     if (fight_modal::active()) { s_lastMs = nowMs; return; }   // fight owns the clock
+    // Clock-backwards guard (the "弹窗秒关" bug): s_lastMs is stamped with a FRESH
+    // millis() inside begin() — WorldPage opens us via begin(millis()) from within
+    // pager::handleTouch, and that millis() is read AFTER main.cpp captured the
+    // loop-top `now` snapshot it later passes here. begin() then blocks ~300ms, so
+    // on the very frame the setpiece opens, s_lastMs sits AHEAD of this nowMs by
+    // tens of ms. An unsigned nowMs - s_lastMs would underflow to ~4.29e9 >=
+    // TIMEOUT_MS and instantly fire the 2-min default exit. Treat any backwards
+    // reading as zero elapsed idle and wait for the next pass, where `now` is fresh
+    // and ahead again. (Same shape holds for any caller whose snapshot lags the
+    // interaction stamp — this is the general fix, not a begin()-specific patch.)
+    if (nowMs < s_lastMs) return;
     if (nowMs - s_lastMs < TIMEOUT_MS) return;
     Serial.println("[setpiece] 2min idle -> default exit");
     int d = setpiece::defaultBtnIndex();

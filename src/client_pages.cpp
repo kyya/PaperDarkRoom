@@ -7,6 +7,7 @@
 #include "world_page.h"
 #include "event_engine.h"
 #include "fight_modal.h"
+#include "setpiece_modal.h"
 
 // A Dark Room firmware: the ring is entirely game client pages (no host-pushed
 // server pages). The original two-page structure — Room + Outside, each fronted
@@ -61,6 +62,11 @@ bool anyWantsAwake() {
     // on its own (win/death) or a flee, and the victory panel self-dismisses after
     // its idle timeout, so this never pins the card awake indefinitely.
     if (fight_modal::active()) return true;
+    // A live landmark setpiece (P2.4) keeps the card awake for the same reason as
+    // the event modal: its narrative panel must not be lost to a 5-minute idle
+    // deep-sleep mid-choice. Its own 2-minute idle timeout (setpiece_modal::
+    // checkTimeout) takes the default exit, so this never pins the card awake.
+    if (setpiece_modal::active()) return true;
     for (int i = 0; i < count(); i++)
         if (s_reg[i]->wantsAwake()) return true;
     return false;

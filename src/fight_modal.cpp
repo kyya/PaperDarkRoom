@@ -394,11 +394,22 @@ bool handleHold(int x, int y) {
 
 void tick(uint32_t nowMs) {
     if (!s_active) return;
+    // Clock-backwards guard (same time-base constraint as setpiece_modal::
+    // checkTimeout): raise()/begin() stamp s_lastTickMs + s_lastMs with a FRESH
+    // millis() from inside handleTouch, then begin() blocks ~300ms — so on the frame
+    // the fight opens, s_lastTickMs sits AHEAD of the loop-top `now` snapshot main.cpp
+    // passes here. An unsigned nowMs - s_lastTickMs then underflows past the 1s
+    // throttle and runs an extra fightTick a beat early. Treat a backwards reading as
+    // "throttle not yet elapsed" and sit this pass out (next pass `now` is ahead).
+    if (nowMs < s_lastTickMs) return;
     if (s_lastTickMs != 0 && nowMs - s_lastTickMs < 1000) return;
     s_lastTickMs = nowMs;
 
     if (g_world.fightWon()) {
-        if (nowMs - s_lastMs >= TIMEOUT_MS) {        // forgotten victory panel -> leave
+        // Same guard for the victory-panel idle clock: a fresh-millis s_lastMs (set at
+        // the winning press) ahead of nowMs would underflow >= TIMEOUT_MS and dismiss
+        // the loot panel the instant the kill lands.
+        if (nowMs >= s_lastMs && nowMs - s_lastMs >= TIMEOUT_MS) {   // forgotten victory panel -> leave
             Serial.println("[fight] victory idle -> auto-dismiss");
             g_world.fightEndVictory();
             closeToWorld();

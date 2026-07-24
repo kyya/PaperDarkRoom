@@ -475,12 +475,36 @@ bool handleTouch() {
         return true;                               // consume anything else / multi-touch
     }
 
+    // Modal-open bounce guard (P2.4): when a fight/setpiece modal first goes active
+    // (rising edge — the frame after its ~300ms blocking begin() returns), the
+    // opening tap's e-ink rebound and any phantom touch the entry epd_quality flash
+    // induces on the GT911 may still be on the panel. A FIXED time window is the
+    // wrong shape: M5Unified needs 500ms of continuous contact to report a hold
+    // (wasHold), so no sub-500ms window can ever swallow a bounce that lands as a
+    // hold, and phantom release timing is variable. Instead latch on the rising edge
+    // and swallow EVERY touch routed to the modal until the panel reads fully
+    // untouched (getCount()==0) once — only then are real button presses accepted.
+    // Mirrors the three-finger s_ignoreUntilClear latch below. Tracked per modal so
+    // a setpiece->combat handoff (beginSetpiece, a second blocking begin) re-arms.
+    static bool s_fightWasActive = false;
+    static bool s_spWasActive    = false;
+    static bool s_modalGuard     = false;   // swallow modal touch until the first tc==0
+    bool fightActive = fight_modal::active();
+    bool spActive    = setpiece_modal::active();
+    if ((fightActive && !s_fightWasActive) || (spActive && !s_spWasActive))
+        s_modalGuard = true;                // rising edge: arm the swallow-until-lift
+    s_fightWasActive = fightActive;
+    s_spWasActive    = spActive;
+    if (s_modalGuard && tc == 0)
+        s_modalGuard = false;               // panel went untouched — release the guard
+
     // Combat overlay (P2.3): same ownership as the event modal — a single-finger
     // press (tap OR hold) drives fight_modal's attack/heal/flee band; page turns
     // and tab switches stay inert (this branch consumes everything and never falls
-    // through). No tap-debounce here on purpose: a weapon's own cooldown absorbs
-    // the e-ink double-tap bounce, so rapid attack tapping stays responsive.
-    if (fight_modal::active()) {
+    // through). The open-bounce guard covers the flee band, which (unlike a weapon)
+    // has no cooldown to otherwise absorb the rebound the instant the fight opens.
+    if (fightActive) {
+        if (s_modalGuard) return true;             // swallow open-bounce until first full lift
         for (int i = 0; tc <= 1 && i < tc; i++) {
             auto t = M5.Touch.getDetail(i);
             if (!t.wasHold() && !t.wasClicked()) continue;
@@ -492,7 +516,11 @@ bool handleTouch() {
     // Landmark setpiece overlay (P2.4): same ownership. Sits AFTER fight_modal so
     // that while an interleaved setpiece combat is live the fight gets the press;
     // once the fight hands back, this branch drives the narrative choice buttons.
-    if (setpiece_modal::active()) {
+    // The swallow-until-lift guard above stops the opening tap's rebound / entry-
+    // flash phantom from landing on the house-start leave band and slamming the
+    // setpiece shut the instant it opens.
+    if (spActive) {
+        if (s_modalGuard) return true;             // swallow open-bounce until first full lift
         for (int i = 0; tc <= 1 && i < tc; i++) {
             auto t = M5.Touch.getDetail(i);
             if (!t.wasHold() && !t.wasClicked()) continue;

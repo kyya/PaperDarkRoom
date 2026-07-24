@@ -234,6 +234,14 @@ bool handleHold(int x, int y) {
 
 void checkTimeout(uint32_t nowMs) {
     if (!s_active) return;
+    // Clock-backwards guard (same time-base constraint as setpiece_modal::
+    // checkTimeout): handleHold stamps s_lastMs with a FRESH millis(), but main.cpp
+    // drives this watchdog with its loop-top `now` snapshot — read BEFORE handleTouch
+    // ran the press this same pass. A keep-open mis-tap (missed band / unaffordable)
+    // thus leaves s_lastMs a hair AHEAD of nowMs, and an unsigned nowMs - s_lastMs
+    // underflows to ~4.29e9 >= TIMEOUT_MS, spuriously dismissing the event. Treat any
+    // backwards reading as zero elapsed idle; the next pass has a fresh, ahead `now`.
+    if (nowMs < s_lastMs) return;
     if (nowMs - s_lastMs < TIMEOUT_MS) return;
     Serial.println("[event] 2min idle -> dismissDefault");
     events::dismissDefault();               // no-cost safe exit -> ends the event
