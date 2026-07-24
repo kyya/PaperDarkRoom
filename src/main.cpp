@@ -35,9 +35,14 @@
 #include "pomo.h"
 #include "client_pages.h"
 #include "game_state.h"
+#include "world_state.h"       // g_world: committed map + volatile expedition (P2)
+#include "setpiece_engine.h"   // landmark setpiece scene machine (P2.4)
+#include "setpiece_modal.h"    // landmark setpiece overlay (P2.4)
 #include "event_engine.h"
 #include "event_modal.h"
+#include "fight_modal.h"        // World combat overlay (P2.3)
 #include "assign_page.h"        // assign_page::isOpen/close (adr:reset re-hides it)
+#include "path_page.h"          // path_page::isOpen/close (adr:reset re-hides it)
 #include <time.h>
 
 #ifndef CARD_VERSION
@@ -81,6 +86,13 @@ static uint32_t g_lastInteraction = 0;
 // task; this is the minimal init/settle/save spine that keeps it linked and the
 // save file live. See game_state.h.
 adr::GameState g_game;
+
+// The Phase-2 World model: the committed 61x61 map (world.bin) plus any volatile
+// expedition (trek.bin). restore()d each cold boot (below), embarked into by the
+// Path page. The World rendering + move loop page lands in milestone 2.2; here it
+// is only kept live so the Path page's embark can deduct stores, fill hp/water,
+// and write trek.bin — the committed map persists across sleeps via restore().
+adr::WorldState g_world;
 
 // RTC -> Unix epoch (seconds). Only differences matter to settle(), so the
 // timezone mktime assumes is irrelevant as long as it's consistent.
@@ -197,6 +209,19 @@ static void applyPendingGameCmd() {
         g_game.init();                       // factory state (all fields)
         events::reset();                     // drop any RAM-only on-screen event latch
         if (assign_page::isOpen()) assign_page::close();   // its ring slot re-hides
+        if (path_page::isOpen()) path_page::close();       // ditto for the Path sub-page
+        // World (P2.2) is now a visible ring slot gated on the trek / committed
+        // map — a factory wipe must drop it too, else a stale expedition would
+        // survive the reset and re-render over the wiped game. init() clears the
+        // RAM state; clearTrek() + removing world.bin drop the SD layers that
+        // g_world.restore() would otherwise reload on the next boot.
+        g_world.init();
+        g_world.clearTrek();                 // remove trek.bin (volatile expedition)
+        SD.remove(ADR_WORLD_PATH);           // remove the committed map
+        SD.remove(ADR_WORLD_PATH ".tmp");    // stray tmp from a torn atomic write
+        fight_modal::endForSleep();          // drop a live combat overlay's guard
+        setpiece_modal::endForSleep();       // and a live setpiece overlay's guard
+                                             // (else their active() blocks the room jump)
         M5.Speaker.tone(1800, 80);
         int room = pager::ringIndexByName("room");
         if (room >= 0) pager::showPage(room, false);
@@ -299,6 +324,13 @@ static void sleepNow(const char* reason) {
     // never power off mid-choice (research.md §5.4). The save() below persists the
     // resulting state; the modal is RAM-only and gone after the cold-boot wake.
     events::dismissDefault();
+    // A live fight can't be safely paused: combat is RAM-only and wasn't re-saved
+    // mid-fight, so releasing the overlay here treats a forced sleep as a flee (a
+    // cold boot resumes the pre-fight tile). In practice this is only reachable on
+    // the background hard-cap — interactive mode stays awake through combat
+    // (anyWantsAwake). Release the guard so payGhostDebtIfDue can repaint.
+    fight_modal::endForSleep();
+    setpiece_modal::endForSleep();   // same for a live setpiece overlay (abandon)
     pager::payGhostDebtIfDue();
     uint32_t sleepSecs = WAKE_INTERVAL_SECS;
     uint16_t qStart, qEnd;
@@ -432,12 +464,25 @@ void setup() {
                   (unsigned long)steps, g_game.fire, g_game.temp,
                   g_game.builderLevel, g_game.population, (long)g_game.whole(adr::R_WOOD));
 
+    // Restore the committed World map (world.bin) and resume any interrupted
+    // expedition (trek.bin). No-op when neither exists (a fresh game); the first
+    // Path embark lazily generates the map. Rendering the resumed expedition is
+    // milestone 2.2 — for now this just keeps the committed map alive across sleeps.
+    bool trekActive = g_world.restore();
+    Serial.printf("[game] world: generated=%d trek=%s\n",
+                  g_world.generated ? 1 : 0, trekActive ? "active" : "none");
+
     // Bind the random-event engine to the settled model. Its scheduler state
     // (nextEventAt / delayed echo) is persisted in GameState; bind() only wires
     // the pointer and clears the RAM-only "event on screen" flag. Events fire
     // only while awake (research.md §5.4); the offline echo was already redeemed
     // by settle() above.
     events::bind(&g_game);
+
+    // Bind the landmark setpiece engine to the World + game models (P2.4). Like the
+    // event engine it is pure/UI-independent; the setpiece_modal drives it and
+    // hands its combat scenes to fight_modal.
+    setpiece::bind(&g_world, &g_game);
 
     // The ring is all client (game) pages — no host pages exist. Restore the
     // last-shown game page by NAME and paint it in quality mode (a cold-boot
@@ -539,9 +584,20 @@ void loop() {
         s_evTick = now;
         events::tick(now, epochNow());
     }
-    if (events::active() && !event_modal::active())
+    // A random event never pops OVER a live fight (the fight owns the panel); a
+    // queued event waits and shows once the fight ends. The combat overlay drives
+    // its own 1s tick here (pager::tickCurrent no-ops while it's active), the
+    // per-second clock the enemy swings + weapon cooldowns run on.
+    if (events::active() && !event_modal::active() && !fight_modal::active() &&
+        !setpiece_modal::active())
         event_modal::show(now);
     event_modal::checkTimeout(now);
+    if (fight_modal::active())
+        fight_modal::tick(now);
+    // Landmark setpiece overlay (P2.4): its own 2-minute idle watchdog. The combat
+    // it may interleave is ticked by fight_modal above; checkTimeout no-ops while
+    // that fight is live (the fight owns the clock).
+    setpiece_modal::checkTimeout(now);
 
     // OTA: on the last streamed byte, verify + commit + reboot (never returns)
     // or report ota=err. No-op unless an OTA transfer just finished. THE

@@ -49,4 +49,11 @@ void draw(m5gfx::M5Canvas& c, int activeTab);
 // that was not painted is never hittable.
 const char* hitTab(int x);
 
+// Clear the tab hit-test cache (as if no tabs were drawn). A page that renders no
+// tabs (the World map — a non-village location) MUST call this in its draw(),
+// otherwise handleTouch's `if (y < TAB_H) hitTab(x)` would resolve a top-strip tap
+// against the LAST village page's still-cached tab spans and jump there. After
+// this, hitTab() returns nullptr until the next draw() repopulates the cache.
+void resetHitCache();
+
 }  // namespace page_tabs

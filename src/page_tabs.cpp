@@ -116,3 +116,10 @@ const char* page_tabs::hitTab(int x) {
     }
     return nullptr;
 }
+
+// See page_tabs.h — a tab-less page clears the cache so its top-strip taps can't
+// hit a prior village page's stale tab spans.
+void page_tabs::resetHitCache() {
+    s_slotCount = 0;
+    s_rightX    = 0;
+}

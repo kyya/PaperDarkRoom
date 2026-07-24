@@ -13,6 +13,7 @@
 // outside_page.h for the region model.
 #include "outside_page.h"
 #include "assign_page.h"        // 分工 cell opens the worker-assignment page
+#include "path_page.h"          // 尘土之路 cell opens the Path (背包整备) page
 #include "cjk_text.h"
 #include "pomo_page.h"          // PAD (shared layout authority)
 #include "page_tabs.h"          // shared tab header (生火间 │ 村落 │ 贸易站)
@@ -398,7 +399,9 @@ void drawActionBand(m5gfx::M5Canvas& c, int x0, int top, const char* label,
 // 整格不画, not a disabled frame), matching the Room 供给 condition. ROW 2 left =
 // 分工: opens AssignPage, but only once at least one job is unlocked — with none
 // there is nothing to assign, so the cell is left blank by the SAME 无供给 rule
-// (g_game.hasUnlockedJob(), the shared job filter). ROW 2 right is always blank.
+// (g_game.hasUnlockedJob(), the shared job filter). ROW 2 right = 尘土之路: opens
+// PathPage, but only once a compass is held (room.js pathDiscovery — buying a
+// compass unlocks the Path); blank before that by the same 无供给 rule.
 // A live gather/traps cooldown (channels 1/2) renders its cell dashed + draining.
 void drawActionArea(m5gfx::M5Canvas& c, uint32_t now) {
     int gcool = g_game.cooldownLeft(1, now);                 // gather channel
@@ -413,6 +416,10 @@ void drawActionArea(m5gfx::M5Canvas& c, uint32_t now) {
     // (分享 / 工人). Blank until a job exists (parity with 查看陷阱's 无供给 blank).
     if (g_game.hasUnlockedJob())
         drawActionBand(c, ACT_COLX[0], ACT_ROW2_TOP, "分工", true, 0, 0);
+    // 尘土之路 (right cell) — tr("A Dusty Path") == 漫漫尘途 (official name; glyphs in
+    // the §8.3 closure). Blank until a compass is held (parity with 分工's 无供给).
+    if (g_game.whole(R_COMPASS) > 0)
+        drawActionBand(c, ACT_COLX[1], ACT_ROW2_TOP, tr("A Dusty Path"), true, 0, 0);
 }
 
 // The cooldown partial-refresh target: only ROW 1 carries a draining bar (gather
@@ -483,8 +490,11 @@ pages::Rect OutsidePage::pressRect(const pages::Region& rg, int x, int y) const 
         if (left) return pages::Rect{ ACT_COLX[0], rg.y0, ACT_COL_W, ACT_H }; // 伐木
         if (g_game.buildings[B_TRAP] > 0)
             return pages::Rect{ ACT_COLX[1], rg.y0, ACT_COL_W, ACT_H };       // 查看陷阱
-    } else if (rg.param == PARAM_ROW2 && left && g_game.hasUnlockedJob()) {
-        return pages::Rect{ ACT_COLX[0], rg.y0, ACT_COL_W, ACT_H };           // 分工
+    } else if (rg.param == PARAM_ROW2) {
+        if (left && g_game.hasUnlockedJob())
+            return pages::Rect{ ACT_COLX[0], rg.y0, ACT_COL_W, ACT_H };       // 分工
+        if (!left && g_game.whole(R_COMPASS) > 0)
+            return pages::Rect{ ACT_COLX[1], rg.y0, ACT_COL_W, ACT_H };       // 尘土之路
     }
     return pages::Rect{ 0, rg.y0, 0, 0 };                                     // blank cell
 }
@@ -530,14 +540,24 @@ void OutsidePage::onLocalAction(uint8_t param, int x, int y) {
     (void)y;
 
     if (param == PARAM_ROW2) {
-        // 分工 (left cell): jump to AssignPage — but only if a job exists (the
-        // entry gate the empty-assign fix hinges on). Right cell / no job = blank.
-        if (x < ACT_DIV && g_game.hasUnlockedJob()) {
-            assign_page::open();
-            M5.Speaker.tone(1800, 80);
-            pager::showPage(pager::ringIndexByName("assign"), false);
+        // ROW 2: 分工 (left, needs a job) | 尘土之路 (right, needs a compass). Each
+        // jumps to its sub-page by name; an ungated (blank) cell low-beeps.
+        if (x < ACT_DIV) {
+            if (g_game.hasUnlockedJob()) {
+                assign_page::open();
+                M5.Speaker.tone(1800, 80);
+                pager::showPage(pager::ringIndexByName("assign"), false);
+            } else {
+                M5.Speaker.tone(600, 120);            // blank cell (no job unlocked)
+            }
         } else {
-            M5.Speaker.tone(600, 120);                // blank cell (no job / right)
+            if (g_game.whole(R_COMPASS) > 0) {
+                path_page::open();
+                M5.Speaker.tone(1800, 80);
+                pager::showPage(pager::ringIndexByName("path"), false);
+            } else {
+                M5.Speaker.tone(600, 120);            // blank cell (no compass held)
+            }
         }
         return;
     }

@@ -5,8 +5,11 @@
 #include "client_pages.h"
 #include "preview.h"
 #include "event_modal.h"
+#include "fight_modal.h"
+#include "setpiece_modal.h"
 #include "page_tabs.h"
 #include "assign_page.h"
+#include "path_page.h"
 #include <M5Unified.h>
 #include <climits>
 #include <cstring>
@@ -257,6 +260,13 @@ bool showPage(int ring, bool quality) {
     // on screen no background push / tick can repaint the page under it.
     // event_modal::closeAndRestore() clears the flag before its own showPage.
     if (event_modal::active()) return false;
+    // And the same for the combat overlay (P2.3): it owns the panel while a fight
+    // is live; fight_modal clears its flag before its own closeToWorld showPage.
+    if (fight_modal::active()) return false;
+    // And the landmark setpiece overlay (P2.4): it owns the panel across its whole
+    // run (including an interleaved fight); setpiece_modal clears its flag before
+    // its own closeToWorld showPage.
+    if (setpiece_modal::active()) return false;
     pages::Page* p = pageAt(ring);
     if (!p) return false;
     M5.Display.setEpdMode(quality ? epd_mode_t::epd_quality
@@ -465,6 +475,32 @@ bool handleTouch() {
         return true;                               // consume anything else / multi-touch
     }
 
+    // Combat overlay (P2.3): same ownership as the event modal — a single-finger
+    // press (tap OR hold) drives fight_modal's attack/heal/flee band; page turns
+    // and tab switches stay inert (this branch consumes everything and never falls
+    // through). No tap-debounce here on purpose: a weapon's own cooldown absorbs
+    // the e-ink double-tap bounce, so rapid attack tapping stays responsive.
+    if (fight_modal::active()) {
+        for (int i = 0; tc <= 1 && i < tc; i++) {
+            auto t = M5.Touch.getDetail(i);
+            if (!t.wasHold() && !t.wasClicked()) continue;
+            return fight_modal::handleHold(t.x, t.y);
+        }
+        return true;                               // consume anything else / multi-touch
+    }
+
+    // Landmark setpiece overlay (P2.4): same ownership. Sits AFTER fight_modal so
+    // that while an interleaved setpiece combat is live the fight gets the press;
+    // once the fight hands back, this branch drives the narrative choice buttons.
+    if (setpiece_modal::active()) {
+        for (int i = 0; tc <= 1 && i < tc; i++) {
+            auto t = M5.Touch.getDetail(i);
+            if (!t.wasHold() && !t.wasClicked()) continue;
+            return setpiece_modal::handleHold(t.x, t.y);
+        }
+        return true;                               // consume anything else / multi-touch
+    }
+
     // Three-finger long-press detection (before any single-finger handling).
     static uint32_t s_multiStart = 0;
     static bool     s_multiFired = false;
@@ -591,6 +627,7 @@ bool handleTouch() {
             int ring = ringIndexByName(tabName);
             if (ring >= 0 && ring != currentRingIndex()) {
                 if (assign_page::isOpen()) assign_page::close();
+                if (path_page::isOpen()) path_page::close();   // village sub-page: re-hide its slot
                 showPage(ring, false);
             }
             s_lastActMs = nowMs;
@@ -630,6 +667,8 @@ void tickCurrent(uint32_t nowMs) {
     // the pomo service keeps counting, only its VIEW repaint is held off.
     if (preview::active()) return;
     if (event_modal::active()) return;   // event modal owns the panel too
+    if (fight_modal::active()) return;   // combat overlay drives its own tick (main.cpp)
+    if (setpiece_modal::active()) return;  // setpiece overlay owns the panel too
     pages::Page* p = pageAt(currentRingIndex());
     if (p) p->tick(nowMs);
 }

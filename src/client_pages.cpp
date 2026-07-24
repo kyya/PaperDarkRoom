@@ -3,7 +3,10 @@
 #include "outside_page.h"
 #include "trade_page.h"
 #include "assign_page.h"
+#include "path_page.h"
+#include "world_page.h"
 #include "event_engine.h"
+#include "fight_modal.h"
 
 // A Dark Room firmware: the ring is entirely game client pages (no host-pushed
 // server pages). The original two-page structure — Room + Outside, each fronted
@@ -26,7 +29,20 @@ static TradePage s_trade;
 // game flag. Registered here so it occupies a stable ring slot (findable by name
 // for the open/return jumps, see pager::ringIndexByName).
 static AssignPage s_assign;
-static pages::Page* s_reg[] = { &s_room, &s_outside, &s_trade, &s_assign };
+// PathPage (P2.1) is the other non-tab sub-page — reached from the Outside 尘土之路
+// cell, gated on holding a compass, latched on path_page::isOpen(), and hidden
+// (draw() returns false) until opened, exactly like AssignPage. Appended after
+// assign (AssignPage precedent) so it holds a stable ring slot findable by name.
+static PathPage s_path;
+// WorldPage (P2.2) is the map-exploration screen — NOT a village sub-page (it
+// draws its own 荒芜世界 title, no page_tabs). It hides (draw() returns false)
+// until an expedition is live: available() is gated on g_world.ex.active (the
+// embark / cold-boot-resume state) OR its own death frame, not a latch. Appended
+// last so PathPage's doEmbark, which jumps to ringIndexByName("world"), resolves
+// this stable ring slot by name.
+static WorldPage s_world;
+static pages::Page* s_reg[] = { &s_room, &s_outside, &s_trade, &s_assign, &s_path,
+                                &s_world };
 
 int count() { return (int)(sizeof(s_reg) / sizeof(s_reg[0])); }
 
@@ -40,6 +56,11 @@ bool anyWantsAwake() {
     // timeout (event_modal::checkTimeout) releases this so a forgotten card can
     // still sleep.
     if (events::active()) return true;
+    // A live combat overlay (P2.3) keeps the card awake too: the enemy attacks
+    // every second, so the fight must not be frozen by a deep sleep. It resolves
+    // on its own (win/death) or a flee, and the victory panel self-dismisses after
+    // its idle timeout, so this never pins the card awake indefinitely.
+    if (fight_modal::active()) return true;
     for (int i = 0; i < count(); i++)
         if (s_reg[i]->wantsAwake()) return true;
     return false;
