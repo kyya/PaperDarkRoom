@@ -43,7 +43,7 @@ namespace adr {
 
 constexpr uint32_t WORLD_MAGIC = 0x314C5257;  // "WRL1" LE — world.bin
 constexpr uint32_t TREK_MAGIC  = 0x314B5254;  // "TRK1" LE — trek.bin
-constexpr uint8_t  WORLD_VER   = 1;
+constexpr uint8_t  WORLD_VER   = 2;   // v2 adds the used-outpost mask (v1 migrates)
 constexpr uint8_t  TREK_VER    = 1;
 
 // What one move() resolved to. Landmark is a hook for 2.4 (the setpiece engine);
@@ -56,7 +56,14 @@ enum StepKind : uint8_t {
     STEP_HOME,          // reached the village -> goHome() committed the trip
     STEP_DIED,          // starvation/thirst killed the wanderer this step
 };
-struct StepResult { uint8_t kind; uint8_t scene; };
+// `notice` is a one-shot tr() key (nullptr = nothing to say) for the events
+// world.js fires as a plain Notifications.notify() alongside the step — meat/
+// water just running out, an armour/distance danger-zone crossing, or a
+// terrain-change narration (§3.1/§3.3/§7.3) — distinct from the PERSISTING
+// starving/thirsty HUD state (world_page hudMessage reads those off ex directly).
+// Only one fires per step; move() picks a priority when more than one lands on
+// the same tick (see world_state.cpp).
+struct StepResult { uint8_t kind; uint8_t scene; const char* notice; };
 
 // Result of a combat command / tick (world.js events.js real-time loop, ported
 // to a 1s discrete tick — see combat_data.h). NOOP = the command was rejected
@@ -120,6 +127,10 @@ struct Expedition {
     bool     gastronome;        // swamp perk snapshot: meat heals x2 (world.js meatHeal).
                                 // Captured from gs at embark, set live if the swamp
                                 // grants it mid-trip; packed into the trek cleared byte.
+    bool     danger;            // checkDanger edge-trigger latch (world.js World.danger):
+                                // true once far-enough-without-armour has been warned, so
+                                // the notice only fires on the step that FLIPS the state
+                                // (§3.1/§4.4). Packed into the trek cleared byte.
     uint32_t rng;               // expedition PRNG (fight/loot rolls, 2.3)
     // Working map — a copy of the committed map, mutated during the trip.
     uint8_t  tiles[WORLD_CELLS];
@@ -130,8 +141,9 @@ struct Expedition {
     int16_t  outfitItem[ITEM_COUNT];
     // Cleared-this-trip flags, committed to game.buildings at goHome.
     bool     clearedIron, clearedCoal, clearedSulphur, clearedShip, clearedExec;
-    // Used outposts (position-keyed) don't re-trigger; a small ring is plenty
-    // since an outpost is one-shot. Stored as packed [x,y] pairs.
+    // Outposts used THIS trip (position-keyed) don't re-trigger; a small ring is
+    // plenty for one expedition. Merged into the committed usedOutpost bitmap at
+    // goHome, discarded at die(). outpostUsed() checks this ring AND that bitmap.
     uint8_t  usedOutpostX[16], usedOutpostY[16];
     uint8_t  usedOutpostN;
 };
@@ -144,6 +156,12 @@ public:
     uint8_t  tiles[WORLD_CELLS];
     uint8_t  revealed[WORLD_MASK_BYTES];    // committed fog-of-war
     uint8_t  visited[WORLD_MASK_BYTES];
+    // Outposts consumed for good (position-keyed bitmap). An outpost is one-shot
+    // GLOBALLY (upstream keys usedOutposts on the persistent game.world), so the
+    // committed layer must remember it across expeditions. goHome merges the
+    // trip's ex.usedOutpost* ring in here; die() discards the trip's uses (they
+    // never reach this bitmap), matching upstream's World.state discard.
+    uint8_t  usedOutpost[WORLD_MASK_BYTES];
 
     // ---- volatile layer (trek.bin) ----
     Expedition ex;
@@ -162,8 +180,13 @@ public:
     // equipment, snapshot committed map -> working, start at the village.
     // Requires cured meat > 0 (path.js embark gate) and a generated map, else
     // returns false and touches nothing. `trekSeed` seeds the expedition PRNG.
+    // Also refuses during the post-death embark lockout (World.DEATH_COOLDOWN_S,
+    // §1.5/§3.4): if gs.deathAt is within nowEpoch of the window. nowEpoch==0
+    // (no RTC) or a clock at/behind the death epoch fails open — never a
+    // permanent lockout.
     bool embark(GameState& gs, const int16_t* outfitRes,
-                const int16_t* outfitItem, uint32_t trekSeed);
+                const int16_t* outfitItem, uint32_t trekSeed,
+                uint32_t nowEpoch = 0);
     // Walk one Dir. Runs the full world.js move() -> doSpace() step; may commit
     // (goHome) or discard (die) the expedition. See StepResult.
     StepResult move(GameState& gs, uint8_t dir);
@@ -240,6 +263,14 @@ public:
     bool    exVisited(int x, int y) const;
     // Count committed tiles of a given type (tests / renderer).
     int     countTiles(uint8_t tile) const;
+    // world.js compassDir — the crashed starship's fixed 8-way direction FROM THE
+    // VILLAGE on the COMMITTED map (§2.7), the "the compass points <dir>" tr()
+    // key trade_page pushes once at the first compass purchase (§1.6). Distinct
+    // from world_page's own shipCompassKey, which is relative to the wanderer's
+    // LIVE position during a trek — the two answer different questions and both
+    // are upstream-faithful for where they're used. False (out untouched) if the
+    // committed map has no ship (shouldn't happen: LANDMARKS always places one).
+    bool    compassFromVillage(char* out, size_t cap) const;
 
     // Equipment-derived caps (world.js getMaxWater/getMaxHealth, path.js
     // getCapacity) — read gs.items. Pure, exposed for the future Path panel.
@@ -263,8 +294,17 @@ private:
     void     placeLandmark(const LandmarkDef& l);
     bool     findClosestRoad(int sx, int sy, int& rx, int& ry) const;
     void     lightMap(int x, int y);        // reveal working diamond r=LIGHT_RADIUS
-    bool     useSupplies(GameState& gs);    // food/water tick; false -> died
+    // food/water tick; false -> died. `notice` is set to a one-shot tr() key
+    // ("the meat has run out" / "there is no more water") on the exact step the
+    // last unit is consumed — distinct from the starving/thirsty latches above,
+    // which are the PERSISTING warn-then-die state (§3.3).
+    bool     useSupplies(GameState& gs, const char*& notice);
     bool     rollFight(int& enemyOut);      // world.js checkFight + encounter pick
+    // world.js checkDanger — edge-triggered armour/distance warning (§3.1/§4.4).
+    // Reads gs.items the same way maxHealth() does. Only writes res.notice when
+    // ex.danger FLIPS this step (and only if nothing higher-priority already
+    // claimed the slot — see the move() call site).
+    void     checkDanger(const GameState& gs, StepResult& res);
     int      exBagUsedCenti() const;        // total carried weight (loot cap)
     void     armWeapons();                  // build the attack-button weapon list
     void     rollLoot(GameState& gs);       // events.js drawLoot -> bank into bag

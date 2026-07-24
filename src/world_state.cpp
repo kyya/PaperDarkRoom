@@ -53,8 +53,12 @@ static inline int16_t getI16(const uint8_t* b, size_t& o) {
 }
 
 // ---- binary sizes (documented layout; see world_state.h) ------------------
-constexpr size_t WORLD_BIN_SIZE =
+// v1 = header + tiles + revealed + visited (legacy, loaded via migration);
+// v2 appends the used-outpost mask.
+constexpr size_t WORLD_BIN_SIZE_V1 =
     12 + WORLD_CELLS + 2 * WORLD_MASK_BYTES;                       // 4665
+constexpr size_t WORLD_BIN_SIZE =
+    12 + WORLD_CELLS + 3 * WORLD_MASK_BYTES;                       // 5131
 constexpr size_t TREK_HDR = 8 + 2 + 18 + 2 + 4 + 1 + 1 + 32;      // 68
 constexpr size_t TREK_BIN_SIZE =
     TREK_HDR + RES_COUNT * 2 + ITEM_COUNT * 2 +
@@ -116,6 +120,7 @@ void WorldState::init() {
     memset(tiles, T_VOID, sizeof tiles);
     memset(revealed, 0, sizeof revealed);
     memset(visited, 0, sizeof visited);
+    memset(usedOutpost, 0, sizeof usedOutpost);
     memset(&ex, 0, sizeof ex);
     memset(&cx, 0, sizeof cx);      // no combat at boot (RAM-only)
     genRng = 0;
@@ -186,6 +191,7 @@ void WorldState::generateMap(uint32_t s) {
     memset(tiles, T_VOID, sizeof tiles);
     memset(revealed, 0, sizeof revealed);   // committed fog starts empty
     memset(visited, 0, sizeof visited);
+    memset(usedOutpost, 0, sizeof usedOutpost);  // a fresh map has no used outposts
     tiles[widx(VILLAGE_X, VILLAGE_Y)] = T_VILLAGE;
     // Spiral out ring by ring so a cell's inner (closer) neighbors are already
     // generated when chooseTile reads them. Each cell is chosen exactly once
@@ -256,9 +262,15 @@ void WorldState::lightMap(int x, int y) {
 // ===================== expedition =========================================
 
 bool WorldState::embark(GameState& gs, const int16_t* outfitRes,
-                        const int16_t* outfitItem, uint32_t trekSeed) {
+                        const int16_t* outfitItem, uint32_t trekSeed,
+                        uint32_t nowEpoch) {
     if (!generated) return false;
     if (!outfitRes || outfitRes[R_CURED_MEAT] <= 0) return false;  // embark gate
+    // Post-death embark lockout (World.DEATH_COOLDOWN_S, §1.5/§3.4). Epoch-based so
+    // a deep sleep past the window expires it; nowEpoch==0 (no RTC) or a clock
+    // at/behind the death epoch fails open — never a permanent lockout.
+    if (gs.deathAt && nowEpoch >= gs.deathAt &&
+        nowEpoch - gs.deathAt < (uint32_t)DEATH_COOLDOWN_S) return false;
 
     // Deduct the chosen outfit from the village stores (caller validated the
     // bag against capacity/inventory; clamp defensively at 0).
@@ -296,6 +308,9 @@ bool WorldState::embark(GameState& gs, const int16_t* outfitRes,
 }
 
 bool WorldState::outpostUsed(int x, int y) const {
+    // Two layers: the committed bitmap (used on a PAST expedition, one-shot is
+    // global) and this trip's ring (used already this expedition).
+    if (inBounds(x, y) && getBit(usedOutpost, widx(x, y))) return true;
     for (int i = 0; i < ex.usedOutpostN; i++)
         if (ex.usedOutpostX[i] == x && ex.usedOutpostY[i] == y) return true;
     return false;
@@ -311,8 +326,11 @@ void WorldState::markOutpostUsed(int x, int y) {
 
 // world.js useSupplies — food/water upkeep. Returns false if the wanderer died
 // (die() has already dropped the trip). No progressive HP drain: meat/water run
-// out -> one warning tick -> next tick kills (research §3.3).
-bool WorldState::useSupplies(GameState& gs) {
+// out -> one warning tick -> next tick kills (research §3.3). `notice` carries a
+// one-shot "just ran out" tr() key (nullptr if neither ran out this step); if
+// BOTH run out on the same step (movesPerFood/movesPerWater can coincide), food's
+// notice wins — it's set first, matching upstream's food-then-water order.
+bool WorldState::useSupplies(GameState& gs, const char*& notice) {
     (void)gs;
     ex.foodMove++;
     ex.waterMove++;
@@ -324,6 +342,7 @@ bool WorldState::useSupplies(GameState& gs) {
         int num = ex.outfitRes[R_CURED_MEAT] - 1;
         if (num == 0) {
             ex.outfitRes[R_CURED_MEAT] = 0;      // ate the last piece, no heal
+            notice = "the meat has run out";
         } else if (num < 0) {
             ex.outfitRes[R_CURED_MEAT] = 0;
             if (!ex.starving) ex.starving = true;   // "starvation sets in"
@@ -340,7 +359,7 @@ bool WorldState::useSupplies(GameState& gs) {
         ex.waterMove = 0;
         ex.water--;
         if (ex.water == 0) {
-            /* "there is no more water" — warning only */
+            if (!notice) notice = "there is no more water";   // warning only
         } else if (ex.water < 0) {
             ex.water = 0;
             if (!ex.thirsty) ex.thirsty = true;      // "thirst becomes unbearable"
@@ -386,14 +405,58 @@ int WorldState::chooseEncounter() {
     return pool[(int)(xorshift(ex.rng) % (uint32_t)n)];
 }
 
+// world.js World.CHANGE_MSG — one-shot narration when a step crosses between two
+// DIFFERENT plain-terrain tiles (both the old and new cell must be terrain; a
+// landmark/road/village endpoint never narrates — matches narrateMove's own
+// isTerrain guard). All 6 directed pairs, transcribed from strings_zh.h (§7.3).
+struct TerrainChangeMsg { uint8_t from, to; const char* key; };
+static const TerrainChangeMsg TERRAIN_CHANGE[] = {
+    { T_FOREST,  T_FIELD,
+      "the trees yield to dry grass. the yellowed brush rustles in the wind." },
+    { T_FIELD,   T_FOREST,
+      "trees loom on the horizon. grasses gradually yield to a forest floor of "
+      "dry branches and fallen leaves." },
+    { T_FIELD,   T_BARRENS, "the grasses thin. soon, only dust remains." },
+    { T_BARRENS, T_FIELD,
+      "the barrens break at a sea of dying grass, swaying in the arid breeze." },
+    { T_FOREST,  T_BARRENS,
+      "the trees are gone. parched earth and blowing dust are poor replacements." },
+    { T_BARRENS, T_FOREST,
+      "a wall of gnarled trees rises from the dust. their branches twist into a "
+      "skeletal canopy overhead." },
+};
+static const char* terrainChangeKey(uint8_t from, uint8_t to) {
+    for (const auto& r : TERRAIN_CHANGE)
+        if (r.from == from && r.to == to) return r.key;
+    return nullptr;
+}
+
+// world.js checkDanger — edge-triggered: notice only on the step where the
+// danger state FLIPS (armour vs Manhattan distance from the village), not every
+// step spent inside the zone. Reads gs.items the SAME WAY maxHealth() does
+// (iron+ armour is safe past 8, steel+ safe past 18); "iron+" counts steel too
+// (a higher tier implies the lower one, matching upstream's armour ladder).
+void WorldState::checkDanger(const GameState& gs, StepResult& res) {
+    int dist = iabs(ex.x - VILLAGE_X) + iabs(ex.y - VILLAGE_Y);
+    bool hasIronPlus  = gs.items[I_I_ARMOUR] > 0 || gs.items[I_S_ARMOUR] > 0;
+    bool hasSteelPlus = gs.items[I_S_ARMOUR] > 0;
+    bool danger = (dist >= 8 && !hasIronPlus) || (dist >= 18 && !hasSteelPlus);
+    if (danger == ex.danger) return;
+    res.notice = danger
+        ? "dangerous to be this far from the village without proper protection"
+        : "safer here";
+    ex.danger = danger;
+}
+
 StepResult WorldState::move(GameState& gs, uint8_t dir) {
-    StepResult res{ STEP_BLOCKED, SP_NONE };
+    StepResult res{ STEP_BLOCKED, SP_NONE, nullptr };
     if (!ex.active) return res;
 
     Vec2 v = DIR_VEC[dir & 3];
     int nx = ex.x + v.dx, ny = ex.y + v.dy;
     if (nx < 0) nx = 0; if (nx >= WORLD_DIM) nx = WORLD_DIM - 1;
     if (ny < 0) ny = 0; if (ny >= WORLD_DIM) ny = WORLD_DIM - 1;
+    uint8_t oldTile = ex.tiles[widx(ex.x, ex.y)];        // narrateMove's "from" tile
     ex.x = (int16_t)nx; ex.y = (int16_t)ny;
     lightMap(nx, ny);
     setBit(ex.visited, widx(nx, ny));
@@ -401,6 +464,12 @@ StepResult WorldState::move(GameState& gs, uint8_t dir) {
     // doSpace(): village -> goHome; landmark -> setpiece hook (no upkeep this
     // step); otherwise upkeep + fight roll on plain ground.
     uint8_t tile = ex.tiles[widx(nx, ny)];
+
+    // world.js narrateMove — lowest-priority notice this step: only claims the
+    // slot if useSupplies (meat/water just ran out) doesn't overwrite it below.
+    if (isTerrain(oldTile) && isTerrain(tile) && oldTile != tile)
+        res.notice = terrainChangeKey(oldTile, tile);
+
     if (tile == T_VILLAGE) {
         goHome(gs);
         res.kind = STEP_HOME; res.scene = SP_NONE;
@@ -413,10 +482,13 @@ StepResult WorldState::move(GameState& gs, uint8_t dir) {
             if (tile == T_OUTPOST) markOutpostUsed(nx, ny);
             res.kind = STEP_LANDMARK; res.scene = landmarkScene(tile);
         }
-    } else if (!useSupplies(gs)) {
-        res.kind = STEP_DIED; res.scene = SP_NONE;
-        return res;                                   // trek already cleared
     } else {
+        const char* supplyNotice = nullptr;
+        if (!useSupplies(gs, supplyNotice)) {
+            res.kind = STEP_DIED; res.scene = SP_NONE;
+            return res;                                   // trek already cleared
+        }
+        if (supplyNotice) res.notice = supplyNotice;      // meat/water-out beats terrain
         int enemy = -1;
         if (rollFight(enemy)) {
             res.kind = STEP_FIGHT; res.scene = (uint8_t)enemy;  // enemy for the fight
@@ -424,6 +496,10 @@ StepResult WorldState::move(GameState& gs, uint8_t dir) {
             res.kind = STEP_MOVED;
         }
     }
+    // checkDanger is the lowest priority of all: it only speaks up when nothing
+    // else did this step (terrain narration / meat-or-water-just-ran-out already
+    // claimed the single HUD notice slot otherwise — §3.1's own e-ink throttle).
+    if (!res.notice) checkDanger(gs, res);
     saveTrek();                                       // persist the step
     return res;
 }
@@ -433,6 +509,10 @@ void WorldState::goHome(GameState& gs) {
     memcpy(tiles, ex.tiles, sizeof tiles);
     memcpy(revealed, ex.revealed, sizeof revealed);
     memcpy(visited, ex.visited, sizeof visited);
+    // Persist outposts used this trip into the committed one-shot bitmap (global
+    // across expeditions). die() skips this, so a discarded trip's uses are lost.
+    for (int i = 0; i < ex.usedOutpostN; i++)
+        setBit(usedOutpost, widx(ex.usedOutpostX[i], ex.usedOutpostY[i]));
     // Unlock cleared mines (economic closure: staffs the miner jobs).
     if (ex.clearedIron && gs.buildings[B_IRON_MINE] == 0)
         gs.buildings[B_IRON_MINE] = 1;
@@ -789,9 +869,36 @@ int WorldState::countTiles(uint8_t tile) const {
     return n;
 }
 
+// world.js compassDir — the ship's fixed 8-way direction FROM THE VILLAGE on the
+// committed map (§2.7); mapSearch(SHIP) + the same |dx|/2 vs |dy| primary-axis
+// heuristic world_page's shipCompassKey uses for its own (position-relative) HUD
+// hint, but rooted at VILLAGE_X/Y — this answers "which way from home", the
+// question the one-time compass-purchase notice (§1.6) needs.
+bool WorldState::compassFromVillage(char* out, size_t cap) const {
+    int sx = -1, sy = -1;
+    for (int y = 0; y < WORLD_DIM && sx < 0; y++)
+        for (int x = 0; x < WORLD_DIM; x++)
+            if (tiles[widx(x, y)] == T_SHIP) { sx = x; sy = y; break; }
+    if (sx < 0) return false;
+    int dx = sx - VILLAGE_X, dy = sy - VILLAGE_Y;
+    int a = iabs(dx), b = iabs(dy);
+    const char* dir;
+    char diag[16];
+    if (b / 2 > a)      dir = dy < 0 ? "north" : "south";
+    else if (a / 2 > b) dir = dx < 0 ? "west"  : "east";
+    else {
+        snprintf(diag, sizeof diag, "%s%s",
+                 dy < 0 ? "north" : "south", dx < 0 ? "west" : "east");
+        dir = diag;
+    }
+    snprintf(out, cap, "the compass points %s", dir);
+    return true;
+}
+
 // ===================== SD persistence =====================================
 // world.bin layout (LE): [magic u32][ver u8][rsv 3][seed u32][tiles CELLS]
-//                        [revealed MASK][visited MASK]                (4665 B)
+//                        [revealed MASK][visited MASK][usedOutpost MASK] (5131 B)
+// A v1 file (no usedOutpost mask, 4665 B) still loads — the mask defaults empty.
 
 bool WorldState::saveWorld() const {
     static uint8_t buf[WORLD_BIN_SIZE];
@@ -799,24 +906,33 @@ bool WorldState::saveWorld() const {
     putU32(buf, o, WORLD_MAGIC);
     buf[o++] = WORLD_VER; buf[o++] = 0; buf[o++] = 0; buf[o++] = 0;
     putU32(buf, o, seed);
-    memcpy(buf + o, tiles, WORLD_CELLS);          o += WORLD_CELLS;
-    memcpy(buf + o, revealed, WORLD_MASK_BYTES);  o += WORLD_MASK_BYTES;
-    memcpy(buf + o, visited, WORLD_MASK_BYTES);   o += WORLD_MASK_BYTES;
+    memcpy(buf + o, tiles, WORLD_CELLS);            o += WORLD_CELLS;
+    memcpy(buf + o, revealed, WORLD_MASK_BYTES);    o += WORLD_MASK_BYTES;
+    memcpy(buf + o, visited, WORLD_MASK_BYTES);     o += WORLD_MASK_BYTES;
+    memcpy(buf + o, usedOutpost, WORLD_MASK_BYTES); o += WORLD_MASK_BYTES;
     return w_writeAtomic(ADR_WORLD_PATH, buf, o);
 }
 
 bool WorldState::loadWorld() {
     static uint8_t buf[WORLD_BIN_SIZE];
     int n = w_read(ADR_WORLD_PATH, buf, sizeof buf);
-    if (n < (int)WORLD_BIN_SIZE) return false;
+    if (n < (int)WORLD_BIN_SIZE_V1) return false;   // too short even for legacy
     size_t o = 0;
     if (getU32(buf, o) != WORLD_MAGIC) return false;
     uint8_t ver = buf[o++]; o += 3;
-    if (ver != WORLD_VER) return false;
+    if (ver != 1 && ver != WORLD_VER) return false;
     seed = getU32(buf, o);
-    memcpy(tiles, buf + o, WORLD_CELLS);          o += WORLD_CELLS;
-    memcpy(revealed, buf + o, WORLD_MASK_BYTES);  o += WORLD_MASK_BYTES;
-    memcpy(visited, buf + o, WORLD_MASK_BYTES);   o += WORLD_MASK_BYTES;
+    memcpy(tiles, buf + o, WORLD_CELLS);            o += WORLD_CELLS;
+    memcpy(revealed, buf + o, WORLD_MASK_BYTES);    o += WORLD_MASK_BYTES;
+    memcpy(visited, buf + o, WORLD_MASK_BYTES);     o += WORLD_MASK_BYTES;
+    if (ver == WORLD_VER) {
+        if (n < (int)WORLD_BIN_SIZE) return false;
+        memcpy(usedOutpost, buf + o, WORLD_MASK_BYTES); o += WORLD_MASK_BYTES;
+    } else {
+        // v1 migration: no used-outpost record — start empty. Worst case a
+        // previously-used outpost becomes usable once more after the upgrade.
+        memset(usedOutpost, 0, sizeof usedOutpost);
+    }
     generated = true;
     return true;
 }
@@ -844,7 +960,8 @@ bool WorldState::saveTrek() const {
     putU32(buf, o, ex.rng);
     uint8_t cf = (ex.clearedIron ? 1 : 0) | (ex.clearedCoal ? 2 : 0) |
                  (ex.clearedSulphur ? 4 : 0) | (ex.clearedShip ? 8 : 0) |
-                 (ex.clearedExec ? 16 : 0) | (ex.gastronome ? 32 : 0);
+                 (ex.clearedExec ? 16 : 0) | (ex.gastronome ? 32 : 0) |
+                 (ex.danger ? 64 : 0);
     buf[o++] = cf;
     buf[o++] = ex.usedOutpostN;
     memcpy(buf + o, ex.usedOutpostX, 16); o += 16;
@@ -879,6 +996,8 @@ bool WorldState::loadTrek() {
     uint8_t cf = buf[o++];
     ex.clearedIron = cf & 1; ex.clearedCoal = cf & 2; ex.clearedSulphur = cf & 4;
     ex.clearedShip = cf & 8; ex.clearedExec = cf & 16; ex.gastronome = cf & 32;
+    ex.danger = cf & 64;   // absent (0) on a pre-existing trek.bin -> fail-open,
+                          // re-derived on the next move()'s checkDanger anyway
     ex.usedOutpostN = buf[o++];
     memcpy(ex.usedOutpostX, buf + o, 16); o += 16;
     memcpy(ex.usedOutpostY, buf + o, 16); o += 16;

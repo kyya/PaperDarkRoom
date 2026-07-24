@@ -116,6 +116,18 @@ uint32_t epochNow() {
     return e > 0 ? (uint32_t)e : 0;
 }
 
+// Seconds left on the post-death embark lockout (World.DEATH_COOLDOWN_S, §1.5/
+// §3.4). Epoch-based so a deep sleep past the window expires it; a clock at/
+// behind the death epoch (incl. a 0 no-RTC read) reports 0 — fail-open, never a
+// permanent lockout. Mirrors WorldState::embark's own guard so the two agree.
+int deathCooldownLeft() {
+    if (!g_game.deathAt) return 0;
+    uint32_t now = epochNow();
+    if (now < g_game.deathAt) return 0;            // clock behind death / no RTC -> fail open
+    uint32_t el = now - g_game.deathAt;
+    return el < (uint32_t)DEATH_COOLDOWN_S ? (int)((uint32_t)DEATH_COOLDOWN_S - el) : 0;
+}
+
 // centi-unit weight -> compact decimal ("10", "19.9", "0.1", "0.5"). Weights are
 // multiples of 0.1 (world_data WEIGHTS), so at most one significant decimal, but
 // the 2-decimal branch is kept exact for safety.
@@ -352,9 +364,15 @@ bool PathPage::draw(m5gfx::M5Canvas& c) {
     int wtW = cjk::textWidth(wat, SCALE);
     cjk::drawText(c, 540 - PAD - wtW, AWROW_Y, wat, SCALE);
 
-    // 出发 band — dashed-disabled until a cured meat is packed (the sole gate, §1.5).
-    bool canEmbark = carriedOf(CARRY_CURED_MEAT) > 0;
-    drawWideBand(c, EMBARK_TOP, tr("embark"), canEmbark);
+    // 出发 band — dashed-disabled until a cured meat is packed (the sole gate,
+    // §1.5) AND the post-death lockout has elapsed (§3.4). While cooling, the label
+    // carries the remaining seconds ("出发 118s").
+    int cdLeft = deathCooldownLeft();
+    bool canEmbark = carriedOf(CARRY_CURED_MEAT) > 0 && cdLeft == 0;
+    char embarkLbl[32];
+    if (cdLeft > 0) snprintf(embarkLbl, sizeof embarkLbl, "%s %ds", tr("embark"), cdLeft);
+    else            snprintf(embarkLbl, sizeof embarkLbl, "%s", tr("embark"));
+    drawWideBand(c, EMBARK_TOP, embarkLbl, canEmbark);
     m_regions[m_regionCount].y0    = (uint16_t)EMBARK_TOP;
     m_regions[m_regionCount].y1    = (uint16_t)(EMBARK_TOP + BAND_H);
     m_regions[m_regionCount].type  = 1;
@@ -431,8 +449,8 @@ void PathPage::onLocalAction(uint8_t param, int x, int y) {
 // page. The committed map is generated lazily on the first-ever embark (2.2 wires
 // the boot restore that normally loads it).
 void PathPage::doEmbark() {
-    if (carriedOf(CARRY_CURED_MEAT) <= 0) {      // the one hard gate (§1.5)
-        M5.Speaker.tone(600, 120);
+    if (carriedOf(CARRY_CURED_MEAT) <= 0 || deathCooldownLeft() > 0) {
+        M5.Speaker.tone(600, 120);               // no meat packed, or still cooling (§3.4)
         return;
     }
     if (!g_world.generated) {                    // first embark: make + save a map
@@ -440,7 +458,8 @@ void PathPage::doEmbark() {
         if (!seed) seed = g_game.rng ? g_game.rng : 0x9e3779b9u;
         g_world.ensureGenerated(seed);
     }
-    if (!g_world.embark(g_game, m_outfitRes, m_outfitItem, g_game.nextRand())) {
+    if (!g_world.embark(g_game, m_outfitRes, m_outfitItem, g_game.nextRand(),
+                        epochNow())) {
         M5.Speaker.tone(600, 120);               // defensive: gate + generated ensured above
         return;
     }
@@ -477,6 +496,7 @@ uint32_t PathPage::contentSig() const {
     for (int i = 0; i < RES_COUNT; i++)  mix((uint32_t)(uint16_t)m_outfitRes[i]);
     for (int i = 0; i < ITEM_COUNT; i++) mix((uint32_t)(uint16_t)m_outfitItem[i]);
     mix((uint32_t)m_page);
+    mix((uint32_t)deathCooldownLeft());   // ticks the embark countdown while cooling
     return sig;
 }
 

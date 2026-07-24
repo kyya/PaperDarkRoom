@@ -21,6 +21,7 @@
 #include "world_state.h"
 #include <M5Unified.h>
 #include <stdio.h>
+#include <time.h>
 
 // main.cpp owns the models and the full-screen sprite.
 extern adr::GameState  g_game;
@@ -68,6 +69,19 @@ constexpr int REPAINT_TOP = HUD_A_Y - 4;                // 64
 
 static inline int iabs(int v) { return v < 0 ? -v : v; }
 
+// RTC -> Unix epoch (mirrors path_page/room_page). Stamps g_game.deathAt at a
+// death so the post-death embark lockout (§3.4) is measured on the same clock as
+// settle()/embark and survives deep sleep.
+uint32_t epochNow() {
+    m5::rtc_date_t d; m5::rtc_time_t t;
+    M5.Rtc.getDateTime(&d, &t);
+    struct tm tmv = {};
+    tmv.tm_year = d.year - 1900; tmv.tm_mon = d.month - 1; tmv.tm_mday = d.date;
+    tmv.tm_hour = t.hours; tmv.tm_min = t.minutes; tmv.tm_sec = t.seconds;
+    time_t e = mktime(&tmv);
+    return e > 0 ? (uint32_t)e : 0;
+}
+
 // world_data LANDMARKS label (tr() key) for a landmark tile, or nullptr. Read-only
 // use of the engine tables (no modification).
 const char* landmarkLabel(uint8_t tile) {
@@ -102,12 +116,14 @@ bool shipCompassKey(char* out, size_t cap) {
     return true;
 }
 
-// The HUD message: survival latches win (starving/thirsty warnings, upstream
-// keys) over the landmark-name hint (2.4). Returns a tr()'d string or nullptr.
-const char* hudMessage(const char* landmarkKey) {
+// The HUD message: the PERSISTING survival latches (starving/thirsty, upstream
+// keys) win over msgKey — WorldPage::m_msgKey, itself either a one-shot
+// StepResult.notice (meat/water-out, danger crossing, terrain narration) or the
+// landmark-name hint (2.4). Returns a tr()'d string or nullptr.
+const char* hudMessage(const char* msgKey) {
     if (g_world.ex.starving) return tr("starvation sets in");
     if (g_world.ex.thirsty)  return tr("the thirst becomes unbearable");
-    if (landmarkKey)         return tr(landmarkKey);
+    if (msgKey)               return tr(msgKey);
     return nullptr;
 }
 
@@ -272,8 +288,11 @@ void WorldPage::onLocalAction(uint8_t param, int x, int y) {
             pager::showPage(pager::ringIndexByName("outside"), false);
             return;
         case STEP_DIED:
-            // die() already dropped the trip. Raise the death frame; a press
-            // dismisses it to the village.
+            // die() already dropped the trip. Stamp the death epoch (arms the
+            // post-death embark lockout, §3.4) + persist it, raise the death
+            // frame; a press dismisses it to the village.
+            g_game.deathAt = epochNow();
+            g_game.save();
             world_page::s_death = true;
             m_msgKey = nullptr;
             M5.Speaker.tone(300, 240);                     // somber
@@ -283,23 +302,29 @@ void WorldPage::onLocalAction(uint8_t param, int x, int y) {
             // 2.4: open the landmark's setpiece (r.scene is its SetpieceId). The
             // overlay owns the screen until a leave / flee / clear / death. If the
             // landmark has no Phase-2 table (executioner = Phase 3), begin() is
-            // inert and we fall back to surfacing the name in the HUD hint slot.
+            // inert and we fall back to r.notice (meat/water/danger, §3.1/§3.3) or,
+            // failing that, the landmark's own name in the HUD hint slot.
             m_msgKey = nullptr;
             setpiece_modal::begin(r.scene, millis());
             if (setpiece_modal::active()) return;
-            m_msgKey = landmarkLabel(g_world.exTileAt(g_world.ex.x, g_world.ex.y));
+            m_msgKey = r.notice
+                     ? r.notice
+                     : landmarkLabel(g_world.exTileAt(g_world.ex.x, g_world.ex.y));
             break;
         case STEP_FIGHT:
             // 2.3: a random encounter triggered. r.scene is the EncounterId; open
             // the combat overlay (fight_modal owns the screen until win/flee/death).
             // beginFight + show co-locate in fight_modal::begin. No map repaint here
             // — the full-screen overlay covers it; closing it repaints the World map
-            // at the new tile.
+            // at the new tile. Any r.notice this step is superseded by the overlay
+            // (matches upstream's instant-open combat covering any toast underneath).
             m_msgKey = nullptr;
             fight_modal::begin(r.scene, millis());
             return;
         case STEP_MOVED:
-            m_msgKey = nullptr;
+            // r.notice: meat/water just ran out, a danger-zone crossing, or a
+            // terrain-change narration (§3.1/§3.3/§7.3) — nullptr on a quiet step.
+            m_msgKey = r.notice;
             break;
         default:  // STEP_BLOCKED — no active expedition (shouldn't reach here)
             M5.Speaker.tone(600, 120);
@@ -319,6 +344,8 @@ void WorldPage::onLocalAction(uint8_t param, int x, int y) {
 // its own active() guard before calling this so pager::showPage can draw.
 namespace world_page {
 void enterDeath() {
+    g_game.deathAt = epochNow();                   // arm the post-death embark lockout (§3.4)
+    g_game.save();
     s_death = true;
     M5.Speaker.tone(300, 240);                     // somber, matching STEP_DIED
     pager::showPage(pager::currentRingIndex(), false);

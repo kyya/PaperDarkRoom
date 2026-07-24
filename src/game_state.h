@@ -105,6 +105,13 @@ public:
     // = swamp) — persists across death and expeditions. 0 for a fresh/old save.
     uint32_t perks;
 
+    // Epoch of the wanderer's last death (0 = none / already expired). embark is
+    // locked for World.DEATH_COOLDOWN_S seconds after it (§1.5/§3.4). Epoch-based
+    // (same clock as settle) so a deep sleep simply expires it; recorded UI-side
+    // at the death frame, enforced in WorldState::embark. Optional in game.json
+    // (absent on pre-2.5 saves -> 0).
+    uint32_t deathAt;
+
     // cooldown last-press epochs (0 = ready). Light & stoke share one button.
     uint32_t cdFire, cdGather, cdTraps;
 

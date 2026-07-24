@@ -14,13 +14,15 @@
 #include "page_tabs.h"          // shared three-tab header (生火间 │ 村落 │ 贸易站)
 #include "pager.h"
 #include "game_state.h"
+#include "world_state.h"        // WorldState::ensureGenerated + compassFromVillage (§1.6)
 #include <M5Unified.h>
 #include <stdio.h>
 #include <string.h>
 #include <time.h>
 
 // main.cpp owns both the game model and the full-screen sprite.
-extern adr::GameState g_game;
+extern adr::GameState  g_game;
+extern adr::WorldState g_world;
 extern M5Canvas canvas;
 
 using namespace adr;
@@ -342,6 +344,23 @@ void TradePage::onLocalAction(uint8_t param, int x, int y) {
 
     Result r = g_game.buy(code);
     if (r == RC_OK) {
+        // room.js: `if(stores.compass && !pathDiscovery){ pathDiscovery = true;
+        // Path.openPath() }` — buying the compass (capped at 1, so this is always
+        // the FIRST buy) is what "discovers" Path; openPath pushes the one-time
+        // "the compass points <dir>" notice (§1.6). The direction needs the
+        // COMMITTED map, which is otherwise lazily generated at the first embark
+        // (path_page::doEmbark) — a compass is always bought before any embark
+        // (Path itself is gated on holding one), so generate it here too, with
+        // the same seed strategy, so the notice has a real direction to report.
+        if (code == T_COMPASS) {
+            if (!g_world.generated) {
+                uint32_t seed = epochNow();
+                if (!seed) seed = g_game.rng ? g_game.rng : 0x9e3779b9u;
+                g_world.ensureGenerated(seed);
+            }
+            char key[40];
+            if (g_world.compassFromVillage(key, sizeof key)) g_game.pushLog(key);
+        }
         M5.Speaker.tone(1800, 80);
         g_game.save();
         pager::showPage(pager::currentRingIndex(), false);

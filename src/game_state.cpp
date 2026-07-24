@@ -30,6 +30,7 @@ void GameState::init() {
     seen = 0;
     craftShown = 0;
     perks = 0;
+    deathAt = 0;                      // no post-death embark lockout on a fresh game
     cdFire = cdGather = cdTraps = 0;
     tTemp = ROOM_WARM_S;
     tBuilder = BUILDER_STATE_S;
@@ -668,6 +669,7 @@ size_t GameState::toJson(char* out, size_t cap) const {
        (unsigned long)echoDueEpoch);
     AP("\"seen\":%lu,\"cshow\":%lu,\"perks\":%lu,",
        (unsigned long)seen, (unsigned long)craftShown, (unsigned long)perks);
+    AP("\"dcool\":%lu,", (unsigned long)deathAt);
     AP("\"stores\":[");
     for (int i = 0; i < RES_COUNT; i++) AP("%s%ld", i ? "," : "", (long)stores[i]);
     AP("],\"bld\":[");
@@ -730,6 +732,7 @@ bool GameState::fromJson(const char* j) {
     // perks bitfield — absent in pre-2.4 saves, init()'s 0 stands (readLong of a
     // nullptr key is 0, so this is safe unconditionally).
     perks = (uint32_t)readLong(afterKey(j, "perks"));
+    deathAt = (uint32_t)readLong(afterKey(j, "dcool"));   // absent -> 0 (no lockout)
     const char* seenP = afterKey(j, "seen");
     if (seenP) {
         seen = (uint32_t)readLong(seenP);

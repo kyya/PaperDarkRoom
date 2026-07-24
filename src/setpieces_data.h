@@ -100,8 +100,8 @@ struct SpDef {
 };
 
 // Convenience terminators.
-#define LEND {false,0,0,0,0}
-#define NOLOOT {LEND,LEND,LEND,LEND,LEND,LEND,LEND,LEND}, 0
+#define LOOT_END {false,0,0,0,0}
+#define NOLOOT {LOOT_END,LOOT_END,LOOT_END,LOOT_END,LOOT_END,LOOT_END,LOOT_END,LOOT_END}, 0
 
 // ===========================================================================
 // outpost — a safe rest point (spawned by clearing a dungeon). useOutpost fills
@@ -113,7 +113,7 @@ static const SpButton op_btns[] = {
 static const SpScene op_scenes[] = {
     { { "a safe place in the wilds.", nullptr, nullptr, nullptr },
       "a safe place in the wilds.", SPE_FILL_WATER, false, 0,
-      { {false,R_CURED_MEAT,5,10,1000}, LEND,LEND,LEND,LEND,LEND,LEND,LEND }, 1,
+      { {false,R_CURED_MEAT,5,10,1000}, LOOT_END,LOOT_END,LOOT_END,LOOT_END,LOOT_END,LOOT_END,LOOT_END }, 1,
       0, 1, 0 },
 };
 
@@ -150,7 +150,7 @@ static const SpScene sw_scenes[] = {
 static const SetpieceEnemy ho_enemies[] = {
     { 'E', "a man charges down the hall, a rusty blade in his hand", 10, 3, 800, 2, false,
       { {false,R_CURED_MEAT,1,10,800}, {false,R_LEATHER,1,10,200},
-        {false,R_CLOTH,1,10,500}, LEND,LEND,LEND }, 3 },
+        {false,R_CLOTH,1,10,500}, LOOT_END,LOOT_END,LOOT_END }, 3 },
 };
 static const SpProb ho_probs[] = {
     { 250, 1 }, { 500, 2 }, { 1000, 3 },   // medicine / supplies / occupied
@@ -172,13 +172,13 @@ static const SpScene ho_scenes[] = {
     { { "the house has been ransacked.",
         "but there is a cache of medicine under the floorboards.", nullptr, nullptr },
       nullptr, SPE_NONE, false, 0,
-      { {false,R_MEDICINE,2,5,1000}, LEND,LEND,LEND,LEND,LEND,LEND,LEND }, 1, 2, 1, 0 },
+      { {false,R_MEDICINE,2,5,1000}, LOOT_END,LOOT_END,LOOT_END,LOOT_END,LOOT_END,LOOT_END,LOOT_END }, 1, 2, 1, 0 },
     /* 2 supplies */
     { { "the house is abandoned, but not yet picked over.",
         "still a few drops of water in the old well.", nullptr, nullptr },
       "water replenished", SPE_FILL_WATER, false, 0,
       { {false,R_CURED_MEAT,1,10,800}, {false,R_LEATHER,1,10,200},
-        {false,R_CLOTH,1,10,500}, LEND,LEND,LEND,LEND,LEND }, 3, 3, 1, 0 },
+        {false,R_CLOTH,1,10,500}, LOOT_END,LOOT_END,LOOT_END,LOOT_END,LOOT_END }, 3, 3, 1, 0 },
     /* 3 occupied (combat) */
     { { nullptr, nullptr, nullptr, nullptr },
       nullptr, SPE_NONE, true, 0, NOLOOT, 4, 1, 0 },
@@ -197,7 +197,7 @@ static const SpScene bf_scenes[] = {
       nullptr, SPE_NONE, false, 0,
       { {true,I_RIFLE,1,3,500}, {false,R_BULLETS,5,20,800}, {true,I_LASER_RIFLE,1,3,300},
         {false,R_ENERGY_CELL,5,10,500}, {true,I_GRENADE,1,5,500},
-        {false,R_ALIEN_ALLOY,1,1,300}, LEND,LEND }, 6,
+        {false,R_ALIEN_ALLOY,1,1,300}, LOOT_END,LOOT_END }, 6,
       0, 1, 0 },
 };
 
@@ -213,7 +213,7 @@ static const SpScene bh_scenes[] = {
         "castoff from the mammoth drills can still be found by the edges of the precipice.",
         nullptr },
       nullptr, SPE_NONE, false, 0,
-      { {false,R_ALIEN_ALLOY,1,3,1000}, LEND,LEND,LEND,LEND,LEND,LEND,LEND }, 1,
+      { {false,R_ALIEN_ALLOY,1,3,1000}, LOOT_END,LOOT_END,LOOT_END,LOOT_END,LOOT_END,LOOT_END,LOOT_END }, 1,
       0, 1, 0 },
 };
 
@@ -236,7 +236,7 @@ static const SpScene sh_scenes[] = {
 static const SetpieceEnemy im_enemies[] = {
     { 'T', "a large creature lunges, muscles rippling in the torchlight", 10, 4, 800, 2, false,
       { {false,R_TEETH,5,10,1000}, {false,R_SCALES,5,10,800},
-        {false,R_CLOTH,5,10,500}, LEND,LEND,LEND }, 3 },
+        {false,R_CLOTH,5,10,500}, LOOT_END,LOOT_END,LOOT_END }, 3 },
 };
 static const SpButton im_btns[] = {
     /* 0 start.enter   */ { "go inside", I_TORCH, true, 1, 0, 0 },   // -> enter (fight)
@@ -263,10 +263,10 @@ static const SpScene im_scenes[] = {
 // ===========================================================================
 static const SetpieceEnemy cm_enemies[] = {
     /* 0 man   */ { 'E', "a man joins the fight", 10, 3, 800, 2, false,
-        { {false,R_CURED_MEAT,1,5,800}, {false,R_CLOTH,1,5,800}, LEND,LEND,LEND,LEND }, 2 },
+        { {false,R_CURED_MEAT,1,5,800}, {false,R_CLOTH,1,5,800}, LOOT_END,LOOT_END,LOOT_END,LOOT_END }, 2 },
     /* 1 chief */ { 'D', "only the chief remains.", 20, 5, 800, 2, false,
         { {false,R_CURED_MEAT,5,10,1000}, {false,R_CLOTH,5,10,800},
-          {false,R_IRON,1,5,800}, LEND,LEND,LEND }, 3 },
+          {false,R_IRON,1,5,800}, LOOT_END,LOOT_END,LOOT_END }, 3 },
 };
 static const SpButton cm_btns[] = {
     /* 0 start.attack  */ { "attack", SP_NO_COST, false, 1, 0, 0 },     // -> a1
@@ -298,12 +298,12 @@ static const SpScene cm_scenes[] = {
 static const SetpieceEnemy sm_enemies[] = {
     /* 0 soldier */ { 'D', "a soldier, alerted, opens fire.", 50, 8, 800, 2, true,
         { {false,R_CURED_MEAT,1,5,800}, {false,R_BULLETS,1,5,500},
-          {true,I_RIFLE,1,1,200}, LEND,LEND,LEND }, 3 },
+          {true,I_RIFLE,1,1,200}, LOOT_END,LOOT_END,LOOT_END }, 3 },
     /* 1 soldier2*/ { 'D', "a second soldier joins the fight.", 50, 8, 800, 2, true,
         { {false,R_CURED_MEAT,1,5,800}, {false,R_BULLETS,1,5,500},
-          {true,I_RIFLE,1,1,200}, LEND,LEND,LEND }, 3 },
+          {true,I_RIFLE,1,1,200}, LOOT_END,LOOT_END,LOOT_END }, 3 },
     /* 2 veteran */ { 'D', "a grizzled soldier attacks, waving a bayonet.", 65, 10, 800, 2, false,
-        { {true,I_BAYONET,1,1,500}, {false,R_CURED_MEAT,1,5,800}, LEND,LEND,LEND,LEND }, 2 },
+        { {true,I_BAYONET,1,1,500}, {false,R_CURED_MEAT,1,5,800}, LOOT_END,LOOT_END,LOOT_END,LOOT_END }, 2 },
 };
 static const SpButton su_btns[] = {
     /* 0 start.attack  */ { "attack", SP_NO_COST, false, 1, 0, 0 },
@@ -335,15 +335,15 @@ static const SpScene su_scenes[] = {
 // ===========================================================================
 static const SetpieceEnemy cv_enemies[] = {
     /* 0 beast(small)  */ { 'R', "a startled beast defends its home", 5, 1, 800, 1, false,
-        { {false,R_FUR,1,10,1000}, {false,R_TEETH,1,5,800}, LEND,LEND,LEND,LEND }, 2 },
+        { {false,R_FUR,1,10,1000}, {false,R_TEETH,1,5,800}, LOOT_END,LOOT_END,LOOT_END,LOOT_END }, 2 },
     /* 1 beast(small2) */ { 'R', "a startled beast defends its home", 5, 1, 800, 1, false,
-        { {false,R_FUR,1,3,1000}, {false,R_TEETH,1,2,800}, LEND,LEND,LEND,LEND }, 2 },
+        { {false,R_FUR,1,3,1000}, {false,R_TEETH,1,2,800}, LOOT_END,LOOT_END,LOOT_END,LOOT_END }, 2 },
     /* 2 cave lizard   */ { 'R', "a cave lizard attacks", 6, 3, 800, 2, false,
-        { {false,R_SCALES,1,3,1000}, {false,R_TEETH,1,2,800}, LEND,LEND,LEND,LEND }, 2 },
+        { {false,R_SCALES,1,3,1000}, {false,R_TEETH,1,2,800}, LOOT_END,LOOT_END,LOOT_END,LOOT_END }, 2 },
     /* 3 large beast   */ { 'R', "a large beast charges out of the dark", 10, 3, 800, 2, false,
-        { {false,R_FUR,1,3,1000}, {false,R_TEETH,1,3,1000}, LEND,LEND,LEND,LEND }, 2 },
+        { {false,R_FUR,1,3,1000}, {false,R_TEETH,1,3,1000}, LOOT_END,LOOT_END,LOOT_END,LOOT_END }, 2 },
     /* 4 giant lizard  */ { 'T', "a giant lizard shambles forward", 10, 4, 800, 2, false,
-        { {false,R_SCALES,1,3,1000}, {false,R_TEETH,1,3,1000}, LEND,LEND,LEND,LEND }, 2 },
+        { {false,R_SCALES,1,3,1000}, {false,R_TEETH,1,3,1000}, LOOT_END,LOOT_END,LOOT_END,LOOT_END }, 2 },
 };
 static const SpProb cv_probs[] = {
     /* 0 start.enter    */ { 300, 1 }, { 600, 2 }, { 1000, 3 },   // a1 / a2 / a3
@@ -390,14 +390,14 @@ static const SpScene cv_scenes[] = {
         "bedrolls, torn and blackened, lay beneath a thin layer of dust.", nullptr, nullptr },
       nullptr, SPE_NONE, false, 0,
       { {false,R_CURED_MEAT,1,5,1000}, {true,I_TORCH,1,5,500},
-        {false,R_LEATHER,1,5,300}, LEND,LEND,LEND,LEND,LEND }, 3, 6, 2, 1 },
+        {false,R_LEATHER,1,5,300}, LOOT_END,LOOT_END,LOOT_END,LOOT_END,LOOT_END }, 3, 6, 2, 1 },
     /* 4 b1 (dead wanderer) */
     { { "the body of a wanderer lies in a small cavern.",
         "rot's been to work on it, and some of the pieces are missing.",
         "can't tell what left it here.", nullptr },
       nullptr, SPE_NONE, false, 0,
       { {true,I_IRON_SWORD,1,1,1000}, {false,R_CURED_MEAT,1,5,800},
-        {true,I_TORCH,1,3,500}, {false,R_MEDICINE,1,2,100}, LEND,LEND,LEND,LEND }, 4, 8, 2, 1 },
+        {true,I_TORCH,1,3,500}, {false,R_MEDICINE,1,2,100}, LOOT_END,LOOT_END,LOOT_END,LOOT_END }, 4, 8, 2, 1 },
     /* 5 b2 (torch dies) */
     { { "the torch sputters and dies in the damp air", "the darkness is absolute", nullptr, nullptr },
       "the torch goes out", SPE_NONE, false, 0, NOLOOT, 10, 2, 1 },
@@ -413,18 +413,18 @@ static const SpScene cv_scenes[] = {
     { { "the nest of a large animal lies at the back of the cave.", nullptr, nullptr, nullptr },
       nullptr, SPE_CLEAR_DUNGEON, false, 0,
       { {false,R_MEAT,5,10,1000}, {false,R_FUR,5,10,1000}, {false,R_SCALES,5,10,1000},
-        {false,R_TEETH,5,10,1000}, {false,R_CLOTH,5,10,500}, LEND,LEND,LEND }, 5, 20, 1, 0 },
+        {false,R_TEETH,5,10,1000}, {false,R_CLOTH,5,10,500}, LOOT_END,LOOT_END,LOOT_END }, 5, 20, 1, 0 },
     /* 11 end2 (supply cache) */
     { { "a small supply cache is hidden at the back of the cave.", nullptr, nullptr, nullptr },
       nullptr, SPE_CLEAR_DUNGEON, false, 0,
       { {false,R_CLOTH,5,10,1000}, {false,R_LEATHER,5,10,1000}, {false,R_IRON,5,10,1000},
         {false,R_CURED_MEAT,5,10,1000}, {false,R_STEEL,5,10,500},
-        {true,I_BOLAS,1,3,300}, {false,R_MEDICINE,1,4,150}, LEND }, 7, 20, 1, 0 },
+        {true,I_BOLAS,1,3,300}, {false,R_MEDICINE,1,4,150}, LOOT_END }, 7, 20, 1, 0 },
     /* 12 end3 (old case) */
     { { "an old case is wedged behind a rock, covered in a thick layer of dust.", nullptr, nullptr, nullptr },
       nullptr, SPE_CLEAR_DUNGEON, false, 0,
       { {true,I_STEEL_SWORD,1,1,1000}, {true,I_BOLAS,1,3,500},
-        {false,R_MEDICINE,1,3,300}, LEND,LEND,LEND,LEND,LEND }, 3, 20, 1, 0 },
+        {false,R_MEDICINE,1,3,300}, LOOT_END,LOOT_END,LOOT_END,LOOT_END,LOOT_END }, 3, 20, 1, 0 },
 };
 
 // ===========================================================================
@@ -434,7 +434,7 @@ static const SpScene cv_scenes[] = {
 static const SetpieceEnemy tw_enemies[] = {
     /* 0 thug */ { 'E', "ambushed on the street.", 30, 4, 800, 2, false,
         { {false,R_CLOTH,5,10,800}, {false,R_LEATHER,5,10,800},
-          {false,R_CURED_MEAT,1,5,500}, LEND,LEND,LEND }, 3 },
+          {false,R_CURED_MEAT,1,5,500}, LOOT_END,LOOT_END,LOOT_END }, 3 },
 };
 static const SpProb tw_probs[] = {
     { 500, 1 }, { 1000, 2 },     // start.explore -> thug / clinic
@@ -465,11 +465,11 @@ static const SpScene tw_scenes[] = {
         "picking the bones finds some useful trinkets.", nullptr },
       nullptr, SPE_CLEAR_DUNGEON, false, 0,
       { {false,R_CURED_MEAT,5,10,1000}, {false,R_IRON,5,10,1000}, {true,I_TORCH,1,5,1000},
-        {true,I_BOLAS,1,5,500}, {false,R_MEDICINE,1,2,100}, LEND,LEND,LEND }, 5, 6, 1, 0 },
+        {true,I_BOLAS,1,5,500}, {false,R_MEDICINE,1,2,100}, LOOT_END,LOOT_END,LOOT_END }, 5, 6, 1, 0 },
     /* 4 end_meds (clinic reward, clearDungeon) */
     { { "some medicine abandoned in the drawers.", nullptr, nullptr, nullptr },
       nullptr, SPE_CLEAR_DUNGEON, false, 0,
-      { {false,R_MEDICINE,2,5,1000}, LEND,LEND,LEND,LEND,LEND,LEND,LEND }, 1, 6, 1, 0 },
+      { {false,R_MEDICINE,2,5,1000}, LOOT_END,LOOT_END,LOOT_END,LOOT_END,LOOT_END,LOOT_END,LOOT_END }, 1, 6, 1, 0 },
 };
 
 // ===========================================================================
@@ -481,7 +481,7 @@ static const SetpieceEnemy ci_enemies[] = {
     /* 0 soldier */ { 'D', "the soldier steps out from between the buildings, rifle raised.",
         50, 8, 800, 2, true,
         { {false,R_CURED_MEAT,1,5,800}, {false,R_BULLETS,1,5,500},
-          {true,I_RIFLE,1,1,200}, LEND,LEND,LEND }, 3 },
+          {true,I_RIFLE,1,1,200}, LOOT_END,LOOT_END,LOOT_END }, 3 },
 };
 static const SpProb ci_probs[] = {
     { 500, 1 }, { 1000, 2 },     // start.explore -> soldier / subway
@@ -507,14 +507,14 @@ static const SpScene ci_scenes[] = {
         "bodies and supplies from both sides litter the ground.", nullptr },
       nullptr, SPE_CLEAR_DUNGEON, false, 0,
       { {true,I_RIFLE,1,1,800}, {false,R_BULLETS,1,5,800}, {true,I_LASER_RIFLE,1,1,300},
-        {false,R_ENERGY_CELL,1,5,300}, {false,R_ALIEN_ALLOY,1,1,300}, LEND,LEND,LEND }, 5, 4, 1, 0 },
+        {false,R_ENERGY_CELL,1,5,300}, {false,R_ALIEN_ALLOY,1,1,300}, LOOT_END,LOOT_END,LOOT_END }, 5, 4, 1, 0 },
     /* 3 end_outpost (post-soldier reward, clearDungeon) */
     { { "the small military outpost is well supplied.",
         "arms and munitions, relics from the war, are neatly arranged on the store-room floor.",
         "just as deadly now as they were then.", nullptr },
       nullptr, SPE_CLEAR_DUNGEON, false, 0,
       { {true,I_RIFLE,1,1,1000}, {false,R_BULLETS,1,10,1000}, {true,I_GRENADE,1,5,800},
-        LEND,LEND,LEND,LEND,LEND }, 3, 4, 1, 0 },
+        LOOT_END,LOOT_END,LOOT_END,LOOT_END,LOOT_END }, 3, 4, 1, 0 },
 };
 
 // ===========================================================================
@@ -542,7 +542,7 @@ static const SpDef SETPIECES[] = {
 };
 constexpr int SETPIECE_COUNT = (int)(sizeof(SETPIECES) / sizeof(SETPIECES[0]));
 #undef SPN
-#undef LEND
+#undef LOOT_END
 #undef NOLOOT
 
 // Is there a real setpiece for this SetpieceId?

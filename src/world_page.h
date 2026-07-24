@@ -72,9 +72,11 @@ private:
     // supersedes it. Keeps the page available() to show the death text after die()
     // has already dropped the trek (so ex.active is false).
 
-    // The tr() key of the landmark just stepped onto (STEP_LANDMARK, a 2.4 hook —
-    // name only, no event), shown in the HUD message slot; nullptr = no message.
-    // Cleared on any non-landmark step.
+    // The HUD message-slot tr() key for the step just taken: a StepResult.notice
+    // one-shot (meat/water just ran out, a danger-zone crossing, terrain-change
+    // narration — §3.1/§3.3/§7.3) when the engine set one, else the landmark's own
+    // name on a STEP_LANDMARK with no overlay (a 2.4 hook, name only, no event).
+    // nullptr = no message. Cleared on any step that carries neither.
     const char* m_msgKey = nullptr;
 
     mutable pages::Region m_regions[MAX_REGIONS];

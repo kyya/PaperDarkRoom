@@ -12,7 +12,7 @@
 //
 // Build (clang++ is the host toolchain on this box):
 //   clang++ -std=c++17 -I src tools/world_smoke.cpp src/world_state.cpp \
-//           src/game_state.cpp \
+//           src/game_state.cpp src/setpiece_engine.cpp \
 //           -DADR_SAVE_PATH='"world_smoke_game.json"' \
 //           -DADR_WORLD_PATH='"world_smoke_world.bin"' \
 //           -DADR_TREK_PATH='"world_smoke_trek.bin"' \
@@ -210,6 +210,151 @@ int main() {
         CHECK(steps == 12, "death on step 12 (water 10 -> 0 @10, warn @11, die @12)");
     }
 
+    printf("== [notice] meat/water one-shot \"just ran out\" fires once, distinct from the\n"
+           "            persisting starving/thirsty latch (§3.3) ==\n");
+    {
+        GameState gs; gs.init();
+        WorldState w; w.init(); w.generateMap(9003);
+        int16_t out[RES_COUNT] = { 0 }; out[R_CURED_MEAT] = 1;
+        gs.items[I_WATER_TANK] = 1;             // 60 water: thirst can't race the meat
+        w.embark(gs, out, nullptr, 1);
+        for (int i = 0; i < WORLD_CELLS; i++) w.ex.tiles[i] = T_FOREST;
+        // step1: water-- only (plenty left, no notice). step2: eats the last piece.
+        StepResult r1 = w.move(gs, DIR_EAST);
+        CHECK(r1.notice == nullptr, "step1: no meat/water notice yet");
+        StepResult r2 = w.move(gs, DIR_EAST);
+        CHECK(r2.notice != nullptr && strcmp(r2.notice, "the meat has run out") == 0,
+              "step2: \"the meat has run out\" fires the instant the last piece is eaten");
+        StepResult r3 = w.move(gs, DIR_EAST);   // movesPerFood=2: no food tick this step
+        CHECK(r3.notice == nullptr, "step3: no food tick (movesPerFood=2), no repeat notice");
+        StepResult r4 = w.move(gs, DIR_EAST);   // the starving LATCH sets here
+        CHECK(r4.notice == nullptr,
+              "step4: \"starvation sets in\" is the persisting latch, not a one-shot notice");
+        CHECK(w.ex.starving, "step4: ex.starving latched (hudMessage's own channel)");
+    }
+
+    printf("== [notice] water one-shot \"there is no more water\" fires once ==\n");
+    {
+        GameState gs; gs.init();
+        WorldState w; w.init(); w.generateMap(9004);
+        int16_t out[RES_COUNT] = { 0 }; out[R_CURED_MEAT] = 100;   // meat can't run out
+        w.embark(gs, out, nullptr, 1);          // no water upgrade -> maxWater 10
+        for (int i = 0; i < WORLD_CELLS; i++) w.ex.tiles[i] = T_FOREST;
+        StepResult r; const char* firedAt = nullptr; int fireStep = -1;
+        for (int step = 1; step <= 10; step++) {
+            r = w.move(gs, DIR_EAST);
+            if (r.notice) { firedAt = r.notice; fireStep = step; }
+        }
+        CHECK(fireStep == 10 && firedAt && strcmp(firedAt, "there is no more water") == 0,
+              "\"there is no more water\" fires exactly on step 10 (water 10 -> 0)");
+        StepResult r11 = w.move(gs, DIR_EAST);   // step11: the thirsty LATCH sets here
+        CHECK(r11.notice == nullptr, "step11: thirst latch is persisting state, not r.notice");
+        CHECK(w.ex.thirsty, "step11: ex.thirsty latched");
+    }
+
+    printf("== [danger] checkDanger edge-triggers at the armour/distance thresholds (§3.1/§4.4) ==\n");
+    {
+        GameState gs; gs.init();
+        WorldState w; w.init(); w.generateMap(9001);
+        int16_t out[RES_COUNT] = { 0 }; out[R_CURED_MEAT] = 3;
+        w.embark(gs, out, nullptr, 1);
+        // T_ROAD: not terrain, so neither narrateMove nor a random encounter can
+        // fire and mask/compete with the danger notice under test.
+        for (int i = 0; i < WORLD_CELLS; i++) w.ex.tiles[i] = T_ROAD;
+        w.ex.tiles[VILLAGE_Y * WORLD_DIM + VILLAGE_X] = T_VILLAGE;
+        w.ex.outfitRes[R_CURED_MEAT] = 30000;
+        w.ex.maxWater = 30000; w.ex.water = 30000;   // supplies can't run out mid-walk
+
+        // No armour: the notice fires exactly once, at Manhattan distance 8.
+        int fireAt = -1, fireCount = 0;
+        for (int d = 1; d <= 12; d++) {
+            StepResult r = w.move(gs, DIR_EAST);
+            if (r.notice) { fireCount++; fireAt = d; }
+        }
+        CHECK(fireCount == 1 && fireAt == 8, "no armour: single danger notice, exactly at distance 8");
+
+        // Walking back below 8 fires the "safer here" transition exactly once.
+        fireCount = 0; int leaveAt = -1;
+        for (int d = 11; d >= 1; d--) {
+            StepResult r = w.move(gs, DIR_WEST);
+            if (r.notice) { fireCount++; leaveAt = d; }
+        }
+        CHECK(fireCount == 1 && leaveAt == 7, "walking back to safety fires once, at distance 7");
+    }
+    {
+        GameState gs; gs.init();
+        gs.items[I_I_ARMOUR] = 1;                 // iron+ satisfies the 8-away gate
+        WorldState w; w.init(); w.generateMap(9002);
+        int16_t out[RES_COUNT] = { 0 }; out[R_CURED_MEAT] = 3;
+        w.embark(gs, out, nullptr, 1);
+        for (int i = 0; i < WORLD_CELLS; i++) w.ex.tiles[i] = T_ROAD;
+        w.ex.tiles[VILLAGE_Y * WORLD_DIM + VILLAGE_X] = T_VILLAGE;
+        w.ex.outfitRes[R_CURED_MEAT] = 30000;
+        w.ex.maxWater = 30000; w.ex.water = 30000;
+        int fireAt = -1, fireCount = 0;
+        for (int d = 1; d <= 20; d++) {
+            StepResult r = w.move(gs, DIR_EAST);
+            if (r.notice) { fireCount++; fireAt = d; }
+        }
+        CHECK(fireCount == 1 && fireAt == 18,
+              "iron armour: no notice at 8, fires at the steel threshold 18");
+    }
+
+    printf("== [narrate] terrain-change notice fires only across two DIFFERENT plain-terrain\n"
+           "             tiles (§7.3) ==\n");
+    {
+        GameState gs; gs.init();
+        WorldState w; w.init(); w.generateMap(9005);
+        int16_t out[RES_COUNT] = { 0 }; out[R_CURED_MEAT] = 30000;
+        w.embark(gs, out, nullptr, 1);
+        w.ex.outfitRes[R_CURED_MEAT] = 30000;
+        w.ex.maxWater = 30000; w.ex.water = 30000;
+        // village -> forest -> field -> field(same) -> barrens -> road, due east.
+        w.ex.tiles[VILLAGE_Y * WORLD_DIM + (VILLAGE_X + 1)] = T_FOREST;
+        w.ex.tiles[VILLAGE_Y * WORLD_DIM + (VILLAGE_X + 2)] = T_FIELD;
+        w.ex.tiles[VILLAGE_Y * WORLD_DIM + (VILLAGE_X + 3)] = T_FIELD;
+        w.ex.tiles[VILLAGE_Y * WORLD_DIM + (VILLAGE_X + 4)] = T_BARRENS;
+        w.ex.tiles[VILLAGE_Y * WORLD_DIM + (VILLAGE_X + 5)] = T_ROAD;
+        StepResult r1 = w.move(gs, DIR_EAST);   // village -> forest: village isn't terrain
+        CHECK(r1.notice == nullptr, "leaving the village doesn't narrate (village isn't terrain)");
+        StepResult r2 = w.move(gs, DIR_EAST);   // forest -> field
+        CHECK(r2.notice != nullptr && strcmp(r2.notice,
+              "the trees yield to dry grass. the yellowed brush rustles in the wind.") == 0,
+              "forest -> field narrates");
+        StepResult r3 = w.move(gs, DIR_EAST);   // field -> field
+        CHECK(r3.notice == nullptr, "same-terrain step doesn't narrate");
+        StepResult r4 = w.move(gs, DIR_EAST);   // field -> barrens
+        CHECK(r4.notice != nullptr &&
+              strcmp(r4.notice, "the grasses thin. soon, only dust remains.") == 0,
+              "field -> barrens narrates");
+        StepResult r5 = w.move(gs, DIR_EAST);   // barrens -> road: road isn't terrain
+        CHECK(r5.notice == nullptr, "stepping onto a road doesn't narrate (road isn't terrain)");
+    }
+
+    printf("== [compass] compassFromVillage: 8-way direction from the ship on the\n"
+           "             COMMITTED map (§2.7, the one-time compass-purchase notice) ==\n");
+    {
+        WorldState w; w.init(); w.generateMap(31337);
+        auto plantShip = [&](int dx, int dy) {
+            for (int i = 0; i < WORLD_CELLS; i++) if (w.tiles[i] == T_SHIP) w.tiles[i] = T_BARRENS;
+            w.tiles[(VILLAGE_Y + dy) * WORLD_DIM + (VILLAGE_X + dx)] = T_SHIP;
+        };
+        char key[40];
+        plantShip(0, -10);                        // due north
+        CHECK(w.compassFromVillage(key, sizeof key) &&
+              strcmp(key, "the compass points north") == 0, "ship due north of the village");
+        plantShip(10, 10);                        // equal axes -> diagonal
+        w.compassFromVillage(key, sizeof key);
+        CHECK(strcmp(key, "the compass points southeast") == 0,
+              "ship southeast (equal axes -> diagonal)");
+        plantShip(-20, 1);                        // strongly west
+        w.compassFromVillage(key, sizeof key);
+        CHECK(strcmp(key, "the compass points west") == 0,
+              "ship strongly west -> primary axis west");
+        for (int i = 0; i < WORLD_CELLS; i++) if (w.tiles[i] == T_SHIP) w.tiles[i] = T_BARRENS;
+        CHECK(!w.compassFromVillage(key, sizeof key), "no ship on the committed map -> false");
+    }
+
     printf("== [goHome] commit: mine unlock + loot bank + tile/fog persist ==\n");
     {
         GameState gs; gs.init();
@@ -261,6 +406,79 @@ int main() {
         CHECK(gs.buildings[B_COAL_MINE] == 0, "coal mine NOT unlocked (died before goHome)");
         CHECK(gs.whole(R_CURED_MEAT) == 0, "bag forfeited: the 5 embarked meat is lost");
         CHECK(w.ex.outfitRes[R_CURED_MEAT] == 0, "bag emptied on death");
+    }
+
+    printf("== [outpost] one-shot use persists across expeditions; die() discards ==\n");
+    {
+        GameState gs; gs.init();
+        WorldState w; w.init(); w.generateMap(31337);
+        const int ox = VILLAGE_X + 1, oy = VILLAGE_Y;   // outpost right next to home
+        w.tiles[oy * WORLD_DIM + ox] = T_OUTPOST;
+        w.saveWorld();
+        auto stock = [&]() {                            // re-arm the embark gate
+            gs.stores[R_CURED_MEAT] = 5 * FP;
+        };
+        int16_t out[RES_COUNT] = { 0 }; out[R_CURED_MEAT] = 5;
+
+        // Trip 1: step onto the fresh outpost (a landmark event), then DIE.
+        stock();
+        CHECK(w.embark(gs, out, nullptr, 1), "trip1 embark");
+        StepResult r = w.move(gs, DIR_EAST);
+        CHECK(r.kind == STEP_LANDMARK && r.scene == SP_OUTPOST,
+              "trip1: fresh outpost fires its setpiece");
+        w.die();                                        // trip1's use is discarded
+
+        // Trip 2: the outpost is STILL fresh (die() dropped trip1's use), then
+        // walk home so goHome commits the use into the committed layer.
+        out[R_CURED_MEAT] = 5; stock();
+        CHECK(w.embark(gs, out, nullptr, 1), "trip2 embark");
+        r = w.move(gs, DIR_EAST);
+        CHECK(r.kind == STEP_LANDMARK,
+              "trip2: outpost still fresh after a death (die discards its use)");
+        r = w.move(gs, DIR_WEST);                       // back onto the village
+        CHECK(r.kind == STEP_HOME, "trip2: reached home -> goHome commits the used flag");
+
+        // Trip 3: the outpost is now permanently spent (committed one-shot).
+        out[R_CURED_MEAT] = 5; stock();
+        CHECK(w.embark(gs, out, nullptr, 1), "trip3 embark");
+        r = w.move(gs, DIR_EAST);
+        CHECK(r.kind == STEP_MOVED,
+              "trip3: used outpost is safe, no event (persisted across expeditions)");
+
+        // ...and it survives a committed world.bin round-trip.
+        CHECK(w.saveWorld(), "save committed world (with the used-outpost mask)");
+        WorldState wl; wl.init();
+        CHECK(wl.loadWorld(), "reload committed world");
+        GameState gs2; gs2.init(); gs2.stores[R_CURED_MEAT] = 5 * FP;
+        int16_t out2[RES_COUNT] = { 0 }; out2[R_CURED_MEAT] = 5;
+        CHECK(wl.embark(gs2, out2, nullptr, 1), "embark on the reloaded map");
+        r = wl.move(gs2, DIR_EAST);
+        CHECK(r.kind == STEP_MOVED, "used-outpost flag survived the world.bin round-trip");
+    }
+
+    printf("== [death cooldown] embark locked for DEATH_COOLDOWN_S after a death ==\n");
+    {
+        WorldState w; w.init(); w.generateMap(4242);
+        int16_t out[RES_COUNT] = { 0 }; out[R_CURED_MEAT] = 5;
+
+        // A death at epoch 100000 (UI stamps gs.deathAt at the death frame).
+        GameState gs; gs.init(); gs.stores[R_CURED_MEAT] = 5 * FP; gs.deathAt = 100000;
+        CHECK(!w.embark(gs, out, nullptr, 1, 100000),
+              "embark refused at the instant of death");
+        CHECK(!w.embark(gs, out, nullptr, 1, 100000 + DEATH_COOLDOWN_S - 1),
+              "embark refused 1s before the cooldown expires");
+        CHECK(w.embark(gs, out, nullptr, 1, 100000 + DEATH_COOLDOWN_S),
+              "embark allowed exactly when the cooldown elapses");
+
+        // Fail-open: a 0 (no-RTC) clock read never traps the player in a lockout.
+        GameState gs2; gs2.init(); gs2.stores[R_CURED_MEAT] = 5 * FP; gs2.deathAt = 100000;
+        int16_t out2[RES_COUNT] = { 0 }; out2[R_CURED_MEAT] = 5;
+        CHECK(w.embark(gs2, out2, nullptr, 1, 0), "no-RTC (epoch 0) fails open -> embark allowed");
+
+        // No death recorded -> never locked.
+        GameState gs3; gs3.init(); gs3.stores[R_CURED_MEAT] = 5 * FP;
+        int16_t out3[RES_COUNT] = { 0 }; out3[R_CURED_MEAT] = 5;
+        CHECK(w.embark(gs3, out3, nullptr, 1, 500000), "no death recorded -> embark always allowed");
     }
 
     printf("== [drawRoad] L-path of ROAD connects a cleared point to the village ==\n");
