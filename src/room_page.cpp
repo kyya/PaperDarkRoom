@@ -9,6 +9,7 @@
 // vertical budget (24px CJK, <=20 汉字/行, >=80px long-press bands, paginate
 // rather than compress). See room_page.h for the region model.
 #include "room_page.h"
+#include "action_band.h"        // shared band renderer (v0.10.1, room+outside)
 #include "cjk_text.h"
 #include "pomo_page.h"          // PAD (shared layout authority)
 #include "page_tabs.h"          // shared two-tab header (生火间 │ 小型村落)
@@ -27,49 +28,66 @@ using namespace adr;
 
 namespace {
 constexpr int SCALE     = 2;                 // 12px grid x2 = 24px CJK (log stream)
-constexpr int BTN_SCALE = 3;                 // 12px grid x3 = 36px CJK (button labels,
-                                             // v0.3.3: 原作「框大字小」— see drawBand)
+constexpr int GLYPH     = 12 * SCALE;        // 24px line box (log)
 constexpr int CONTENT_W = 540 - 2 * PAD;     // 492px usable (§9.2)
-constexpr int BTN_GLYPH = 12 * BTN_SCALE;    // 36px line box (button label)
 constexpr int MAX_ROWS  = 5;                 // matches RoomPage::MAX_BANDS (rows)
 constexpr int MAX_COLS  = 2;                 // two-column button grid
 constexpr int MAX_SLOTS = MAX_ROWS * MAX_COLS;   // 10 action cells / page
 
 // ---- vertical budget (§9.4): the two-tab header (page_tabs::TAB_H = 72px) owns
-// the top band, so the log stream reflows BELOW it. Long-press bands shrank
-// from 92 to 80px (§9.3's hard floor — do not go lower) to answer "buttons too
-// big"; the 68px this frees (5*92+4*12=508 -> 5*80+4*10=440) goes entirely to
-// the log: LOG_LINES 8 -> 10 (+60px) and the log/button gap 16 -> 24px (+8px),
-// so BTN_TOP moves from 372 to 440 and the grid still ends at 880 (< 928 status
-// bar) — the bottom margin is unchanged. Resource/inventory summary lives on
-// the Outside page's lower band.
+// the top band, so the log stream reflows BELOW it.
+// v0.10.0 ("每个有消耗的按钮下方标明消耗"): every priced action band carries a
+// small cost sub-row below its label — but the label+cost block was CENTERED in
+// a height that only shrank for a coolable band (light/stoke), so light/stoke's
+// title sat measurably higher than every other priced button, reading as a size
+// mismatch ("添柴和火把按钮文字高度不一致").
+// v0.10.1 ("align bottom" + "主标题偏大" + "第一页按钮没对齐") fixes both
+// reported issues together: (1) the label+cost block now BOTTOM-ANCHORS at a
+// fixed offset from the band's own bottom edge, the SAME offset regardless of
+// whether the action is ALSO coolable, and a FREE band (no cost) uses that same
+// fixed label baseline too instead of centering itself independently — see
+// action_band.h for the shared rule (every band's label sits at the exact SAME
+// y, priced or free, coolable or not — action_band::labelY); (2) the button
+// LABEL itself shrinks 36px -> 24px (action_band::BTN_SCALE) — the app-wide
+// 36px verb-label convention (assign/path/trade) draws its name and count/cost
+// SIDE BY SIDE on one full-width row, so it never competes with a subtitle for
+// vertical room; Room's narrow 240px column instead STACKS the cost line under
+// the label, and that stack needs its own smaller scale to (a) read less
+// "oversized" now that every priced band carries a second line, and (b) fit the
+// label + a rare 2-line cost + the cooldown-bar gutter back inside the original
+// 96px band (an interim bottom-anchor-only draft, kept only in this file's own
+// history, had pushed it to 120px before the label also shrank). MAX_ROWS stays
+// 5 and LOG_LINES stays 9 — unchanged from v0.10.0. 5 rows x 96 + 4x10 gaps =
+// 520, landing BTN_AREA_BOTTOM at 886 (< 928 status bar, 42px margin — matches
+// the original v0.10.0 number). Resource/inventory summary lives on the
+// Outside page's lower band.
 // v0.3.1 feedback 1 ("火堆熊熊燃烧 房间很热不应该常驻 原作也没有常驻"): the
 // persistent fire/temp state line that used to open this band (STATE_Y, 76..
 // 116) is gone — upstream never shows it as a fixed header either, only as a
 // notification on change (see game_state.cpp onFireChange/adjustTemp, which
 // now push "the fire is {0}" / "the room is {0}" into the log on every
-// change). The log reclaims that band: it moves up to LOG_TOP=76 and gains the
-// freed line back (LOG_LINES 10 -> 11), landing well clear of BTN_TOP (440)
-// with room to spare. --------------------------------------------------------
+// change). The log reclaims that band: it moves up to LOG_TOP=76. ------------
 constexpr int LOG_TOP   = page_tabs::CONTENT_TOP + 4;   // log stream top (76)
 constexpr int LOG_LINEH = 30;
-constexpr int LOG_LINES = 11;                // 11 x 30 = 330px band -> ends 406,
-                                             // 34px clear of BTN_TOP
-constexpr int BTN_TOP   = 440;               // first action row top (was 372)
-constexpr int ROOM_BTN_H = 80;               // long-press band (§9.3: >=80px, floor)
+constexpr int LOG_LINES = 9;                 // 9 x 30 = 270px band -> ends 346,
+                                             // 20px clear of BTN_TOP
+constexpr int BTN_TOP   = 366;               // first action row top
+constexpr int ROOM_BTN_H = 96;               // long-press band (§9.3 floor is 80;
+                                             // grown for the cost sub-row, see above)
 constexpr int BTN_GAP   = 10;                // vertical gap between rows
 // Two columns of 240px with a 12px gutter fill the 492px content width; each
-// band's 36px label (v0.3.3) centers in its column. Widest measured label at
-// 36px is "更多 (n/n)" = 180px and any 4-glyph craft name (狩猎小屋 = 144px),
-// both << the ~232px column text budget (scratchpad/measure_labels), so every
-// action fits at the larger size — pure two-column, no full-width exceptions.
-// x < COL_MID picks the left column (onLocalAction).
+// band's label centers in its column. Widest measured label even at the old
+// 36px scale was "更多 (n/n)" = 180px and any 4-glyph craft name (狩猎小屋 =
+// 144px), both << the ~232px column text budget (scratchpad/measure_labels) —
+// at v0.10.1's smaller 24px scale (action_band::BTN_SCALE) every label clears
+// with even more room, so the two-column grid still needs no full-width
+// exceptions. x < COL_MID picks the left column (onLocalAction).
 constexpr int COL_GAP   = 12;
 constexpr int COL_W     = (CONTENT_W - COL_GAP) / 2;         // 240
 constexpr int COL_X0[MAX_COLS] = { PAD, PAD + COL_W + COL_GAP };   // {24, 276}
 constexpr int COL_MID   = 540 / 2;           // 270: x < MID => left column
 constexpr int BTN_AREA_BOTTOM = BTN_TOP + (MAX_ROWS - 1) * (ROOM_BTN_H + BTN_GAP)
-                                + ROOM_BTN_H;   // 880 (5 rows, clears status bar)
+                                + ROOM_BTN_H;   // 886 (5 rows, clears status bar)
 
 // Action codes carried in a Region param (uint8). 0..4 are the fixed verbs;
 // A_CRAFT_BASE+craftId means "build/craft that craftable". Craft ids run
@@ -84,6 +102,8 @@ enum : uint8_t {
 struct BandView {
     uint8_t code;
     char    label[48];
+    char    cost[64];                // "-500 木头  -50 毛皮"; empty for a free action
+    bool    hasCost;
     bool    enabled;                 // false -> render as unavailable (dashed)
     int     coolLeft, coolTotal;
 };
@@ -247,6 +267,56 @@ bool isActionEnabled(uint8_t code, uint32_t now) {
     }
 }
 
+// A craftable's current cost sub-line, e.g. "-500 木头  -50 毛皮" — same
+// "-amount name" convention (and the same two-space join) trade_page.cpp /
+// event_modal.cpp / setpiece_modal.cpp already use for their own cost lines, so
+// this reuses the established reading rather than inventing a new one (v0.10.0:
+// "每个有消耗的按钮下方以小字标明消耗"). The wood entry folds in the
+// count-scaling surcharge (room.js woodIncrPerN) so the shown number always
+// matches what isActionEnabled just checked. Returns false (empty) only if the
+// craftable were ever free (none are, in practice).
+bool craftCostLine(uint8_t id, char* out, size_t cap) {
+    out[0] = 0;
+    const Craftable& c = CRAFT[id];
+    if (c.cost[0].res == RA_END) return false;
+    bool bld = craftIsBuilding(id);
+    uint8_t slot = craftSlot(id);
+    int count = bld ? g_game.buildings[slot] : g_game.items[slot];
+    size_t used = 0;
+    for (int i = 0; i < 3 && c.cost[i].res != RA_END; i++) {
+        int32_t amt = c.cost[i].amt;
+        if (c.cost[i].res == R_WOOD) amt += (int32_t)c.woodIncrPerN * count;
+        const char* rz = tr(RES_KEY[c.cost[i].res]);
+        int wrote = snprintf(out + used, cap - used, "%s-%ld %s",
+                             used ? "  " : "", (long)amt, rz);
+        if (wrote < 0) break;
+        used += (size_t)wrote;
+        if (used >= cap) { used = cap - 1; break; }
+    }
+    return used > 0;
+}
+
+// The cost sub-line for any action code, or false (empty) for a free action —
+// gather wood / check traps cost nothing (their yield is a random drop, not a
+// fixed price) and "more" is UI chrome, so none of the three get a subtitle.
+// The two fire verbs have a fixed one-resource wood cost (room.js constants);
+// every craftable delegates to craftCostLine above.
+bool costLineFor(uint8_t code, char* out, size_t cap) {
+    switch (code) {
+        case A_LIGHT:
+            snprintf(out, cap, "-%d %s", LIGHT_FIRE_WOOD, tr(RES_KEY[R_WOOD]));
+            return true;
+        case A_STOKE:
+            snprintf(out, cap, "-%d %s", STOKE_FIRE_WOOD, tr(RES_KEY[R_WOOD]));
+            return true;
+        case A_GATHER: case A_TRAPS: case A_MORE:
+            out[0] = 0;
+            return false;
+        default:
+            return craftCostLine((uint8_t)(code - A_CRAFT_BASE), out, cap);
+    }
+}
+
 // Ordered action list for the current game state: fire verb, then every
 // offerable craftable. Returns the count. (gather wood / check traps are野外
 // actions — upstream outside.js, not room.js — so they live on the Outside page;
@@ -324,6 +394,7 @@ int layoutBands(pages::Region* regionsOut, uint8_t* slotCodes, BandView* views,
     for (int s = 0; s < slotCount; s++) {
         views[s].code = slotCodes[s];
         labelFor(slotCodes[s], pg, numPages, views[s].label, sizeof(views[s].label));
+        views[s].hasCost = costLineFor(slotCodes[s], views[s].cost, sizeof(views[s].cost));
         views[s].enabled = isActionEnabled(slotCodes[s], now);
         int ch, tot; cooldownFor(slotCodes[s], ch, tot);
         views[s].coolTotal = tot;
@@ -378,50 +449,16 @@ void repaintLog(m5gfx::M5Canvas& c) {
     drawLog(c);
 }
 
-// 1px dashed rectangle, 4px on / 4px off — the unavailable-button frame.
-void drawDashedRect(m5gfx::M5Canvas& c, int x, int y, int w, int h) {
-    const int on = 4, per = 8;
-    int xr = x + w - 1, yb = y + h - 1;
-    for (int i = 0; i < w; i++)
-        if (i % per < on) { c.drawPixel(x + i, y, TFT_BLACK);
-                            c.drawPixel(x + i, yb, TFT_BLACK); }
-    for (int i = 0; i < h; i++)
-        if (i % per < on) { c.drawPixel(x, y + i, TFT_BLACK);
-                            c.drawPixel(xr, y + i, TFT_BLACK); }
-}
-
-// One half-width action band at column origin x0. Frame carries the availability
-// cue: enabled = the two solid rings (2px); unavailable (condition not met /
-// cooling) = a single 1px dashed outer frame, no inner ring. A cooling band
-// draws a thin progress bar hugging the band's inner bottom edge (v0.3.3: the
-// whole-button grey fill of v0.3.2 read as too heavy on the real panel — reverted
-// to the earlier thin-bar affordance, geometry matching commit 6304244~1's
-// drawBand): an 8px-tall outlined bar inset 12px, its inner fill width = the
-// fraction of the cooldown remaining, draining left-anchored back to 0 as time
-// passes. The 36px label centers in the band, clear above the bar (label ink
-// ends ~top+54, bar sits at top+64 — no overlap). All geometry is clipped to
-// this column's [x0, x0+COL_W) so the two columns never bleed into each other.
+// One half-width action band at column origin x0 — thin wrapper around the
+// shared action_band::draw (v0.10.1; pulled into its own module since
+// outside_page.cpp needs the identical thing, see action_band.h for the full
+// rationale). All geometry is clipped to this column's [x0, x0+COL_W) so the
+// two columns never bleed into each other.
 void drawBand(m5gfx::M5Canvas& c, int x0, int top, const char* label,
-              bool enabled, int coolLeft, int coolTotal) {
-    if (enabled) {
-        c.drawRect(x0, top, COL_W, ROOM_BTN_H, TFT_BLACK);
-        c.drawRect(x0 + 1, top + 1, COL_W - 2, ROOM_BTN_H - 2, TFT_BLACK);
-    } else {
-        drawDashedRect(c, x0, top, COL_W, ROOM_BTN_H);
-    }
-
-    int lw = cjk::textWidth(label, BTN_SCALE);
-    cjk::drawText(c, x0 + (COL_W - lw) / 2, top + (ROOM_BTN_H - BTN_GLYPH) / 2 - 4,
-                  label, BTN_SCALE);
-
-    if (coolTotal > 0 && coolLeft > 0) {                      // draining cooldown
-        int barX0 = x0 + 12, barX1 = x0 + COL_W - 12;
-        int barY = top + ROOM_BTN_H - 16, barH = 8;
-        c.drawRect(barX0, barY, barX1 - barX0, barH, TFT_BLACK);
-        int inner = barX1 - barX0 - 4;
-        int fw = (int)((int64_t)inner * coolLeft / coolTotal);   // drains L-anchored
-        if (fw > 0) c.fillRect(barX0 + 2, barY + 2, fw, barH - 4, TFT_BLACK);
-    }
+              const char* cost, bool hasCost, bool enabled,
+              int coolLeft, int coolTotal) {
+    action_band::draw(c, x0, top, COL_W, ROOM_BTN_H, label, cost, hasCost,
+                      enabled, coolLeft, coolTotal);
 }
 
 // Paint the whole button area (clears it first) from the given slot views,
@@ -432,8 +469,8 @@ void paintButtons(m5gfx::M5Canvas& c, const BandView* views, int slotCount) {
     for (int s = 0; s < slotCount; s++) {
         int row = s / MAX_COLS, col = s % MAX_COLS;
         int top = BTN_TOP + row * (ROOM_BTN_H + BTN_GAP);
-        drawBand(c, COL_X0[col], top, views[s].label, views[s].enabled,
-                 views[s].coolLeft, views[s].coolTotal);
+        drawBand(c, COL_X0[col], top, views[s].label, views[s].cost, views[s].hasCost,
+                 views[s].enabled, views[s].coolLeft, views[s].coolTotal);
     }
 }
 
