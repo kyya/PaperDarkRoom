@@ -3,7 +3,7 @@
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 //
 // World (荒芜世界) map-exploration page — Phase 2 milestone 2.2. The upstream
-// "A Barren World" screen: a player-centred viewport onto the 61x61 map with a
+// "A Barren World" screen: a player-following viewport onto the 61x61 map with a
 // survival HUD (water / cured meat / hp / compass). Reached by embarking from
 // the Path page (path_page doEmbark jumps to ringIndexByName("world")); left by
 // walking home (goHome commits the trip) or dying. The whole engine (map,
@@ -20,10 +20,13 @@
 // ASCII (font covers 0x20..0x7E), not tr() text.
 //
 // Layout (540x960): 36px title (16..52) · HUD line A 水/熏肉/生命 (68) · HUD line
-// B 罗盘指向 + 消息位 (96) · a 19-col x 33-row player-centred viewport of 24px
-// cells (map 42..498 x 124..916), clearing the 32px status bar (< 928). The map
-// area is ONE touch region; a press resolves to N/S/E/W by its dominant axis
-// relative to the centred player (pressRect returns w=0 — no flash, the map's own
+// B 罗盘指向 + 消息位 (96) · a 19-col x 33-row viewport of 24px cells (map
+// 42..498 x 124..916), clearing the 32px status bar (< 928). The viewport is a
+// freeze/recenter camera (world_page.cpp updateCamera, m_camX/m_camY): held still
+// between recenters so a plain step moves only the '@' — the e-ink throttle that
+// keeps a step from full-refreshing the whole scrolling map. The map area is ONE
+// touch region; a press resolves to N/S/E/W by its dominant axis relative to the
+// wanderer's live on-screen cell (pressRect returns w=0 — no flash, the map's own
 // redraw is the feedback). A death frame replaces the map on STEP_DIED (any press
 // returns to the village); the expedition itself was already discarded by die().
 //
@@ -82,6 +85,19 @@ private:
     mutable pages::Region m_regions[MAX_REGIONS];
     mutable int           m_regionCount = 0;
 
+    // Viewport camera — the world coord of the top-left visible cell. Held STILL
+    // between recenters so an ordinary step moves only the '@' glyph (two cells
+    // change, not the whole scrolling map); updateCamera() recenters on the
+    // wanderer ONLY when it reaches the look-ahead margin (or on embark/resume,
+    // when the player lands outside the stale window). This is the e-ink throttle
+    // the "全屏刷新太多" report needed: the EPD per-pixel diff then drives just the
+    // two changed cells on a normal step and the whole viewport only on the
+    // ~1-in-N recenter, instead of re-driving all 456x792 every step. mutable:
+    // written from the const draw path (drawMapAndHud), read from const resolveDir.
+    mutable int16_t m_camX = 0, m_camY = 0;
+    mutable bool    m_camInit = false;
+
     void drawMapAndHud(m5gfx::M5Canvas& c) const;   // the per-step repaint body
+    void updateCamera() const;                      // hold-still / recenter-on-margin
     uint8_t resolveDir(int x, int y) const;         // press -> N/S/E/W (dominant axis)
 };

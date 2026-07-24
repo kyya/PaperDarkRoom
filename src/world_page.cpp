@@ -49,10 +49,12 @@ constexpr int HUD_A_Y = 68;    // 水 N/M · 熏肉 xK · 生命 N/M
 constexpr int HUD_B_Y = 96;    // 罗盘指向X · message slot
 
 // ---- viewport geometry ----------------------------------------------------
-// 24px cells (12px glyph x2), an ODD 19x33 window so the player sits exactly at
-// the centre cell. 19 cols x 24 = 456px, centred (x 42..498, inside the 24px
-// tap-safe margin); 33 rows x 24 = 792px from y 124, ending 916 < 928 (status
-// bar). CENTER_COL/ROW is the wanderer's fixed on-screen cell.
+// 24px cells (12px glyph x2), an ODD 19x33 window. 19 cols x 24 = 456px, centred
+// (x 42..498, inside the 24px tap-safe margin); 33 rows x 24 = 792px from y 124,
+// ending 916 < 928 (status bar). CENTER_COL/ROW is where a recenter re-parks the
+// wanderer — NOT its fixed cell every step: the camera holds still between
+// recenters (updateCamera) so a plain step only moves the '@', which is the whole
+// point of the per-step e-ink throttle. See m_camX/m_camY in world_page.h.
 constexpr int CELL       = 24;
 constexpr int COLS       = 19;
 constexpr int ROWS       = 33;
@@ -66,6 +68,16 @@ constexpr int CENTER_ROW = ROWS / 2;                    // 16
 
 // Per-step partial-refresh band: the HUD rows + the whole map (title unchanged).
 constexpr int REPAINT_TOP = HUD_A_Y - 4;                // 64
+
+// Look-ahead margin (cells) the wanderer must reach before the camera recenters.
+// Between recenters the viewport is frozen, so a step only moves the '@' glyph and
+// the EPD diff drives two cells, not the whole map. Smaller = fewer recenters
+// (fewer full-map refreshes) but less terrain visible ahead; 4 keeps 4 cells of
+// look-ahead in the travel direction and still recenters only every ~5 (a
+// horizontal run, CENTER_COL 9 - margin 4) / ~12 (vertical, CENTER_ROW 16 - 4)
+// straight steps. MUST stay < CENTER_COL and < CENTER_ROW so a fresh recenter
+// (which parks the player at CENTER) doesn't immediately re-trip the margin.
+constexpr int RECENTER_MARGIN = 4;
 
 static inline int iabs(int v) { return v < 0 ? -v : v; }
 
@@ -153,26 +165,40 @@ void drawHud(m5gfx::M5Canvas& c, const char* landmarkKey) {
     int mw = cjk::textWidth(mbuf, SCALE);
     cjk::drawText(c, (540 - mw) / 2, HUD_A_Y, mbuf, SCALE);            // 熏肉 xK (centre)
 
+    // Compass (left) and message (right) share HUD line B. A step notice can be a
+    // full terrain-narration sentence (world_state.cpp TERRAIN_CHANGE / the danger
+    // warning) far longer than the landmark-name hints this row was sized for, so
+    // it can reach back past the compass's own text and paint over it. The message
+    // is the transient, higher-priority one (matches hudMessage's own starving/
+    // thirsty-beats-msgKey ordering above) and the compass recomputes fresh next
+    // frame regardless, so on a width collision the compass just sits this one
+    // frame out instead of the two overlapping.
     char ckey[40];
-    if (shipCompassKey(ckey, sizeof ckey))
-        cjk::drawText(c, PAD, HUD_B_Y, tr(ckey), SCALE);              // 罗盘指向X (left)
+    bool showCompass = shipCompassKey(ckey, sizeof ckey);
 
     const char* msg = hudMessage(landmarkKey);
-    if (msg) {
-        int w = cjk::textWidth(msg, SCALE);
-        cjk::drawText(c, 540 - PAD - w, HUD_B_Y, msg, SCALE);         // message (right)
+    int msgW = msg ? cjk::textWidth(msg, SCALE) : 0;
+    if (showCompass && msg) {
+        int compassW = cjk::textWidth(tr(ckey), SCALE);
+        if (compassW + msgW >= (540 - 2 * PAD)) showCompass = false;
     }
+
+    if (showCompass) cjk::drawText(c, PAD, HUD_B_Y, tr(ckey), SCALE);  // 罗盘指向X (left)
+    if (msg) cjk::drawText(c, 540 - PAD - msgW, HUD_B_Y, msg, SCALE);  // message (right)
 }
 
-// The player-centred viewport. Off-map, fogged (unrevealed), and T_VOID cells are
-// left blank (upstream fog §2.5); the wanderer's own cell is '@' over its tile.
-void drawMap(m5gfx::M5Canvas& c) {
+// The viewport anchored at camera origin (camX,camY = world coord of the top-left
+// visible cell). Off-map, fogged (unrevealed), and T_VOID cells are left blank
+// (upstream fog §2.5); the wanderer's own cell is '@' over its tile. The camera is
+// held still between recenters (updateCamera), so most steps only shift the '@'
+// within a static frame — the two-cell EPD diff the flash fix relies on.
+void drawMap(m5gfx::M5Canvas& c, int camX, int camY) {
     int px = g_world.ex.x, py = g_world.ex.y;
     for (int vr = 0; vr < ROWS; vr++) {
-        int my = py - CENTER_ROW + vr;
+        int my = camY + vr;
         int cellY = MAP_Y0 + vr * CELL;
         for (int vc = 0; vc < COLS; vc++) {
-            int mx = px - CENTER_COL + vc;
+            int mx = camX + vc;
             int cellX = MAP_X0 + vc * CELL;
             char ch;
             if (mx == px && my == py) {
@@ -240,17 +266,45 @@ bool WorldPage::draw(m5gfx::M5Canvas& c) {
 }
 
 void WorldPage::drawMapAndHud(m5gfx::M5Canvas& c) const {
+    updateCamera();   // freeze / recenter the viewport BEFORE painting this frame
     // Clear the HUD+map band: harmless after draw()'s fillSprite, and required on
     // the per-step partial-repaint path (the title + surrounding pixels stay).
     c.fillRect(0, REPAINT_TOP, 540, MAP_Y1 - REPAINT_TOP, TFT_WHITE);
     drawHud(c, m_msgKey);
-    drawMap(c);
+    drawMap(c, m_camX, m_camY);
 }
 
-// Press -> N/S/E/W by the dominant axis of the offset from the centred player.
+// Freeze the viewport between recenters. On an ordinary step the wanderer stays
+// inside the look-ahead margin so the camera doesn't move — drawMap then repaints
+// an unchanged frame except the '@' that shifted one cell, and the EPD per-pixel
+// diff (see onLocalAction's FASTEST push) drives only those two cells rather than
+// re-driving the whole scrolling map. The camera recenters (parks the player back
+// at CENTER, a one-frame whole-map redraw) only when it reaches the margin, or
+// when m_camInit is false / the player is off the current window (embark, resume,
+// goHome-and-re-embark, the death-frame return). That recenter is the ONE full
+// refresh that replaces what used to be a full refresh every single step.
+void WorldPage::updateCamera() const {
+    int px = g_world.ex.x, py = g_world.ex.y;
+    int col = px - m_camX, row = py - m_camY;    // player's current on-screen cell
+    if (!m_camInit ||
+        col < RECENTER_MARGIN || col >= COLS - RECENTER_MARGIN ||
+        row < RECENTER_MARGIN || row >= ROWS - RECENTER_MARGIN) {
+        m_camX = (int16_t)(px - CENTER_COL);
+        m_camY = (int16_t)(py - CENTER_ROW);
+        m_camInit = true;
+    }
+}
+
+// Press -> N/S/E/W by the dominant axis of the offset from the player's ACTUAL
+// on-screen cell. With the freeze/recenter camera the wanderer is no longer pinned
+// to CENTER, so the reference point is its live camera-relative cell (px-camX,
+// py-camY) — computed against the frame currently on the panel (resolveDir runs at
+// tap time, before move() and the next draw), so a tap above the '@' is always
+// north, below is south, wherever the '@' happens to sit this frame.
 uint8_t WorldPage::resolveDir(int x, int y) const {
-    int cx = MAP_X0 + CENTER_COL * CELL + CELL / 2;
-    int cy = MAP_Y0 + CENTER_ROW * CELL + CELL / 2;
+    int pcol = g_world.ex.x - m_camX, prow = g_world.ex.y - m_camY;
+    int cx = MAP_X0 + pcol * CELL + CELL / 2;
+    int cy = MAP_Y0 + prow * CELL + CELL / 2;
     int dx = x - cx, dy = y - cy;
     if (iabs(dx) >= iabs(dy)) return dx < 0 ? DIR_WEST : DIR_EAST;
     return dy < 0 ? DIR_NORTH : DIR_SOUTH;
@@ -331,8 +385,13 @@ void WorldPage::onLocalAction(uint8_t param, int x, int y) {
             return;
     }
     // A plain step: repaint the HUD + map under FASTEST — no press-flash, no
-    // per-step beep (the map's own redraw is the feedback). The driver's pixel
-    // diff flips only the cells that actually changed.
+    // per-step beep (the map's own redraw is the feedback). The push RECT is
+    // unchanged (the whole HUD+map band): shrinking it would save no flicker — the
+    // EPD driver diffs per-pixel and only drives changed pixels (927b072). What
+    // makes this cheap now is drawMapAndHud's frozen camera (updateCamera): on an
+    // ordinary step the frame is identical except the '@' that moved one cell, so
+    // the diff drives just those two cells instead of the whole scrolling map. The
+    // full-map redraw is spent only on the ~1-in-N recenter, not every step.
     drawMapAndHud(canvas);
     pager::partialRefresh(pages::Rect{ 0, REPAINT_TOP, 540, MAP_Y1 - REPAINT_TOP },
                           pages::RefreshMode::FASTEST);
