@@ -2,8 +2,8 @@
 // License, v. 2.0. If a copy of the MPL was not distributed with this
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 //
-// Landmark setpiece modal (fw 0.6.x, milestone 2.4) — the FOURTH pager-scheduled
-// full-screen overlay, after preview.cpp, event_modal.cpp and fight_modal.cpp. A
+// Landmark setpiece modal (fw 0.6.x, milestone 2.4) — the THIRD pager-scheduled
+// full-screen overlay, after event_modal.cpp and fight_modal.cpp. A
 // landmark step (world_state move() -> STEP_LANDMARK) opens a narrative choice
 // panel exactly like the event modal, but backed by the setpiece_engine (which
 // drives the World EXPEDITION, not the village) and able to hand a combat SCENE

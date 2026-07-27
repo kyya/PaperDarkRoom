@@ -35,11 +35,13 @@ int  currentRingIndex();        // clamped to [0, ringCount)
 // Displayable-page statistics for the status bar's page dots. A ring slot is
 // "visible" when its Page::available() is true (draw() would paint, not be
 // skipped by showPageOrNext) — so a conditionally-hidden game page (un-unlocked
-// Outside/Trade, a closed AssignPage) drops out of the count. visibleCount() is
-// how many dots to draw; visibleIndexOf(ringIdx) is which of those the given
-// ring index maps to (its 0-based ordinal among visible pages, = the count of
-// visible pages before it). The bar draws no dots at all when visibleCount()<=1
-// (a single reachable page has no page-turn to advertise).
+// Outside/Trade, a closed AssignPage) drops out of the count. ringAvailable(ring) is that predicate for one slot (false out of
+// range); visibleCount() is how many dots to draw; visibleIndexOf(ringIdx) is
+// which of those the given ring index maps to (its 0-based ordinal among
+// visible pages, = the count of visible pages before it). The bar draws no dots
+// at all when visibleCount()<=1 (a single reachable page has no page-turn to
+// advertise).
+bool ringAvailable(int ring);
 int  visibleCount();
 int  visibleIndexOf(int ringIdx);
 const char* currentName();      // the current page's name() ("srv:0", "pomo")

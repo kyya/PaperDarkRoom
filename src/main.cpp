@@ -43,6 +43,7 @@
 #include "fight_modal.h"        // World combat overlay (P2.3)
 #include "assign_page.h"        // assign_page::isOpen/close (adr:reset re-hides it)
 #include "path_page.h"          // path_page::isOpen/close (adr:reset re-hides it)
+#include "tech_page.h"          // tech_page::isOpen/close (adr:reset re-hides it)
 #include <time.h>
 
 #ifndef CARD_VERSION
@@ -210,6 +211,7 @@ static void applyPendingGameCmd() {
         events::reset();                     // drop any RAM-only on-screen event latch
         if (assign_page::isOpen()) assign_page::close();   // its ring slot re-hides
         if (path_page::isOpen()) path_page::close();       // ditto for the Path sub-page
+        if (tech_page::isOpen()) tech_page::close();       // ditto for the tech-tree sub-page
         // World (P2.2) is now a visible ring slot gated on the trek / committed
         // map — a factory wipe must drop it too, else a stale expedition would
         // survive the reset and re-render over the wiped game. init() clears the
@@ -399,8 +401,8 @@ void setup() {
     cfg.clear_display = false;     // keep the last frame on the EPD
     M5.begin(cfg);
 
-    // GT911 factory config reports only 2 touch points — the multi-finger
-    // gestures (preview switcher) need more. Volatile: re-apply every cold boot.
+    // GT911 factory config reports only 2 touch points — the grip-graze slot scan
+    // and the multi-finger guard need more. Volatile: re-apply every cold boot.
     if (auto t = M5.Display.touch())
         static_cast<lgfx::Touch_GT911*>(t)->setTouchNums(5);
 
