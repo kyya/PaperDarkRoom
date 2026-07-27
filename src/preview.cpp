@@ -17,14 +17,19 @@ int  focusIndex() { return s_focus; }
 
 // Focus-style geometry (540x960 panel). Header owns 0..HDR_BOT, the status bar
 // owns the bottom BAR_H band; the body between them holds a big FOCUS thumbnail
-// on the left and a vertical RAIL of mini thumbnails (the whole ring, <=6 today:
-// 5 server + pomo) on the right.
+// on the left and a vertical RAIL of mini thumbnails on the right. The rail
+// lists the REACHABLE ring pages, not raw ring slots: a slot earns a cell when
+// pager::ringAvailable() is true, the same predicate the status bar's page dots
+// count and showPageOrNext steps over. So the ring can hold more pages than
+// there are cells (closed sub-pages — Path, Assign, the tech tree — take no
+// cell), and every cell maps back to a real ring index.
 static const int MARGIN      = 18;                             // host pad
 static const int CONTENT_TOP = 124;                            // just below rule (112)
 static const int BAR_H       = 32;                             // status_bar band
 static const int CONTENT_BOT = 960 - BAR_H;                    // 928
 static const int CONTENT_H   = CONTENT_BOT - CONTENT_TOP;      // 804
-static const int MAX_CELLS   = 6;                              // ring is <=6 (spec)
+static const int MAX_CELLS   = 6;                              // defensive clamp only
+                                                               // (reachable pages <= 5)
 
 // Big pane: 9:16 at scale 330/540 (~0.611), left column, vcentered in the body.
 static const int BIG_X = MARGIN;                               // 18
@@ -40,13 +45,22 @@ static const int MINI_W = 71;
 static const int MINI_H = 127;                                 // ~= 71 * 16/9
 static const int MINI_X = RAIL_X + (RAIL_W - MINI_W) / 2;      // 405
 
+// The rail's cell -> ring-index map, rebuilt on every render and hit-test
+// because reachability moves with game state (a sub-page opens, a building goes
+// up) and the view outlives none of it. Fills s_visible in ring order and
+// returns the cell count; MAX_CELLS is a defensive clamp, never reached in
+// practice (at most 5 pages are reachable at once).
+static int s_visible[MAX_CELLS];
+static int buildVisible() {
+    int n = 0, rc = pager::ringCount();
+    for (int r = 0; r < rc && n < MAX_CELLS; r++)
+        if (pager::ringAvailable(r)) s_visible[n++] = r;
+    return n;
+}
+
 // Rail cells are spread evenly down the body: n cells with n+1 equal gaps (a gap
 // above the first, between each, and below the last), so the stack always reads
-// centered whatever the ring count.
-static int railN() {
-    int rc = pager::ringCount();
-    return rc < MAX_CELLS ? rc : MAX_CELLS;
-}
+// centered whatever the cell count.
 static int railGap(int n) { return n > 0 ? (CONTENT_H - n * MINI_H) / (n + 1) : 0; }
 static int cellY(int i, int n) { int g = railGap(n); return CONTENT_TOP + g + i * (MINI_H + g); }
 
@@ -81,12 +95,15 @@ static void drawBig(m5gfx::M5Canvas& c) {
     c.drawRect(BIG_X, BIG_Y, BIG_W, BIG_H, TFT_BLACK);
 }
 
-// One rail mini cell. Server page -> micro thumbnail (or a small dot when
-// missing); client page (pomo) -> centered 22px tomato. The FOCUS cell gets a
-// 3px frame, every other cell 1px; the cell that is the CURRENT page also gets a
-// 4px solid dot in its bottom-right corner (focus != current -> both markers).
-static void drawMini(m5gfx::M5Canvas& c, int ring, int n, int cur) {
-    int x = MINI_X, y = cellY(ring, n);
+// One rail mini cell: `slot` places it in the stack of `n` cells, `ring` is the
+// ring index it stands for (the two differ once a hidden page sits between two
+// reachable ones). Server page -> micro thumbnail (or a small dot when missing);
+// client page -> centered 22px tomato. The FOCUS cell gets a 3px frame, every
+// other cell 1px; the cell that is the CURRENT page also gets a 4px solid dot in
+// its bottom-right corner (focus != current -> both markers). Both markers
+// compare ring indices, so they follow the page, not the slot.
+static void drawMini(m5gfx::M5Canvas& c, int slot, int ring, int n, int cur) {
+    int x = MINI_X, y = cellY(slot, n);
     int nSrv = frame_store::pageCount();
     if (ring < nSrv) {
         size_t len = 0;
@@ -108,10 +125,10 @@ static void render() {
     canvas.fillSprite(TFT_WHITE);
     page_header::draw(canvas);
     status_bar::drawVersionOnto(canvas);        // fw version chrome, header top-right
-    int n   = railN();
+    int n   = buildVisible();
     int cur = pager::currentRingIndex();
     drawBig(canvas);
-    for (int i = 0; i < n; i++) drawMini(canvas, i, n, cur);
+    for (int i = 0; i < n; i++) drawMini(canvas, i, s_visible[i], n, cur);
     status_bar::drawOnto(canvas);               // clock/battery/dots bottom band
 }
 
@@ -129,7 +146,11 @@ void enter() {
 }
 
 void setFocus(int idx) {
-    if (idx < 0 || idx >= railN()) return;
+    // `idx` is a RING index (what hitCell hands back), so accept it only when it
+    // still owns a rail cell — an unreachable page has none and can't be focused.
+    int n = buildVisible(), ok = 0;
+    for (int i = 0; i < n; i++) if (s_visible[i] == idx) { ok = 1; break; }
+    if (!ok) return;
     s_focus = idx;
     render();
     // Full-panel epd_fast re-push (not two clipped partial rects): the big pane
@@ -145,10 +166,11 @@ void setFocus(int idx) {
 int hitCell(int x, int y) {
     if (x >= BIG_X && x < BIG_X + BIG_W && y >= BIG_Y && y < BIG_Y + BIG_H)
         return HIT_BIG;
-    int n = railN();
+    int n = buildVisible();
     for (int i = 0; i < n; i++) {
         int cy = cellY(i, n);
-        if (x >= MINI_X && x < MINI_X + MINI_W && y >= cy && y < cy + MINI_H) return i;
+        if (x >= MINI_X && x < MINI_X + MINI_W && y >= cy && y < cy + MINI_H)
+            return s_visible[i];                   // the cell's RING index
     }
     return HIT_NONE;
 }

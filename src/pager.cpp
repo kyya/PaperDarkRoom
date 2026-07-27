@@ -172,6 +172,15 @@ static pages::Page* pageAt(int ring) {
     return client_pages::at(ring - nSrv);
 }
 
+// Is ring slot `ring` currently displayable? The single reachability predicate
+// behind the counters below and the preview rail: Page::available() is what
+// draw() gates on and what showPageOrNext steps over, so anything built on this
+// agrees with where the user can actually land. Out-of-range slots are not.
+bool ringAvailable(int ring) {
+    pages::Page* pg = pageAt(ring);
+    return pg && pg->available();
+}
+
 // How many ring slots are currently displayable (Page::available() true) — the
 // status bar draws exactly this many page dots. A conditionally-hidden game page
 // (un-unlocked Outside/Trade, a closed AssignPage) is available()==false and
@@ -179,10 +188,7 @@ static pages::Page* pageAt(int ring) {
 // the same predicate draw() gates on, so a dot never lies about reachability.
 int visibleCount() {
     int n = ringCount(), c = 0;
-    for (int r = 0; r < n; r++) {
-        pages::Page* pg = pageAt(r);
-        if (pg && pg->available()) c++;
-    }
+    for (int r = 0; r < n; r++) if (ringAvailable(r)) c++;
     return c;
 }
 
@@ -192,10 +198,7 @@ int visibleCount() {
 // the visible total.
 int visibleIndexOf(int ringIdx) {
     int n = ringCount(), idx = 0;
-    for (int r = 0; r < ringIdx && r < n; r++) {
-        pages::Page* pg = pageAt(r);
-        if (pg && pg->available()) idx++;
-    }
+    for (int r = 0; r < ringIdx && r < n; r++) if (ringAvailable(r)) idx++;
     return idx;
 }
 
