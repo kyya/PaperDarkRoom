@@ -18,11 +18,13 @@
 #include "page_tabs.h"          // shared tab header (生火间 │ 村落 │ 贸易站)
 #include "pager.h"
 #include "game_state.h"
+#include "world_state.h"        // g_world.ex.outfitItem — the packed-for-a-trek copy
 #include <M5Unified.h>
 #include <stdio.h>
 
-// main.cpp owns the game model.
-extern adr::GameState g_game;
+// main.cpp owns both models.
+extern adr::GameState  g_game;
+extern adr::WorldState g_world;
 
 using namespace adr;
 
@@ -119,9 +121,21 @@ const char* entryName(uint8_t id) {
 // kinds: the repeatable weapons (CT_WEAPON, maximum -1 — "held" means at least
 // one in stock) and the one-shot upgrades (CT_UPGRADE, maximum 1 — count >= 1 is
 // the same test). 拳头 is always held.
+//   The village stock alone is NOT the whole answer while a trek is live: embark
+// MOVES the packed units out of items[] into ex.outfitItem[] (world_state.cpp),
+// and the Room — hence this sub-page — stays reachable mid-expedition. Packing
+// the last bone spear would otherwise hollow its marker while it is in hand, so
+// the carried copy counts too. Only the weapon rows can actually take that path
+// (path_page's CARRY table packs weapons/consumables; armour, water containers
+// and the carry upgrades are never packed, so their items[] count never leaves
+// the village), but the outfit slot is the same items[] index for every row, so
+// one test covers the whole table. goHome banks the bag back and die() empties
+// it along with ex.active, so both endings settle on the items[] test again.
 bool held(uint8_t id) {
     if (id == CRAFT_NONE) return true;
-    return g_game.items[craftSlot(id)] > 0;
+    uint8_t slot = craftSlot(id);
+    if (g_game.items[slot] > 0) return true;
+    return g_world.ex.active && g_world.ex.outfitItem[slot] > 0;
 }
 
 // An entry's price, e.g. "-500 木头  -100 铁" — the same "-amount name"
