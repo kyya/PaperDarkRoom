@@ -10,6 +10,7 @@
 // rather than compress). See room_page.h for the region model.
 #include "room_page.h"
 #include "action_band.h"        // shared band renderer (v0.10.1, room+outside)
+#include "tech_page.h"          // 升级树 cell opens the tech-tree sub-page
 #include "cjk_text.h"
 #include "pomo_page.h"          // PAD (shared layout authority)
 #include "page_tabs.h"          // shared two-tab header (生火间 │ 小型村落)
@@ -89,13 +90,14 @@ constexpr int COL_MID   = 540 / 2;           // 270: x < MID => left column
 constexpr int BTN_AREA_BOTTOM = BTN_TOP + (MAX_ROWS - 1) * (ROOM_BTN_H + BTN_GAP)
                                 + ROOM_BTN_H;   // 886 (5 rows, clears status bar)
 
-// Action codes carried in a Region param (uint8). 0..4 are the fixed verbs;
+// Action codes carried in a Region param (uint8). 0..5 are the fixed verbs;
 // A_CRAFT_BASE+craftId means "build/craft that craftable". Craft ids run
 // [10, 10+24) = 34. (Trading-post buying moved to its own page in v0.3.3 — see
 // trade_page.cpp — so the Room stays build/craft-focused; the A_TRADE_BASE code
 // range this page carried in v0.3.2 is gone with it.)
 enum : uint8_t {
     A_LIGHT  = 0, A_STOKE = 1, A_GATHER = 2, A_TRAPS = 3, A_MORE = 4,
+    A_TECH   = 5,
     A_CRAFT_BASE = 10
 };
 
@@ -238,6 +240,7 @@ bool craftOfferable(uint8_t id) {
 bool isActionEnabled(uint8_t code, uint32_t now) {
     switch (code) {
         case A_MORE:  return true;                       // page flip is always live
+        case A_TECH:  return true;                       // read-only sub-page, always live
         case A_LIGHT:
             if (g_game.cooldownLeft(0, now) > 0) return false;
             // free first light while wood is still "undefined" (room.js quirk)
@@ -298,9 +301,9 @@ bool craftCostLine(uint8_t id, char* out, size_t cap) {
 
 // The cost sub-line for any action code, or false (empty) for a free action —
 // gather wood / check traps cost nothing (their yield is a random drop, not a
-// fixed price) and "more" is UI chrome, so none of the three get a subtitle.
-// The two fire verbs have a fixed one-resource wood cost (room.js constants);
-// every craftable delegates to craftCostLine above.
+// fixed price) and "more" / 升级树 are UI chrome and pure navigation, so none of
+// the four get a subtitle. The two fire verbs have a fixed one-resource wood
+// cost (room.js constants); every craftable delegates to craftCostLine above.
 bool costLineFor(uint8_t code, char* out, size_t cap) {
     switch (code) {
         case A_LIGHT:
@@ -309,7 +312,7 @@ bool costLineFor(uint8_t code, char* out, size_t cap) {
         case A_STOKE:
             snprintf(out, cap, "-%d %s", STOKE_FIRE_WOOD, tr(RES_KEY[R_WOOD]));
             return true;
-        case A_GATHER: case A_TRAPS: case A_MORE:
+        case A_GATHER: case A_TRAPS: case A_MORE: case A_TECH:
             out[0] = 0;
             return false;
         default:
@@ -317,13 +320,18 @@ bool costLineFor(uint8_t code, char* out, size_t cap) {
     }
 }
 
-// Ordered action list for the current game state: fire verb, then every
-// offerable craftable. Returns the count. (gather wood / check traps are野外
-// actions — upstream outside.js, not room.js — so they live on the Outside page;
-// trading-post buying moved to the Trade page in v0.3.3.)
+// Ordered action list for the current game state: fire verb, the 升级树 entry,
+// then every offerable craftable. Returns the count. (gather wood / check traps
+// are野外 actions — upstream outside.js, not room.js — so they live on the
+// Outside page; trading-post buying moved to the Trade page in v0.3.3.)
+// 升级树 sits second, right beside the fire verb, so it lands in the FIRST batch
+// no matter how long the craftable list grows — a growth-line explainer the
+// player has to page to would miss the very players who don't know the growth
+// line exists.
 int buildActions(uint8_t* out, int cap) {
     int n = 0;
     if (n < cap) out[n++] = (g_game.fire == FIRE_DEAD) ? A_LIGHT : A_STOKE;
+    if (n < cap) out[n++] = A_TECH;
     if (g_game.craftablesUnlocked)
         for (uint8_t id = 0; id < CRAFT_COUNT && n < cap; id++)
             if (craftOfferable(id)) out[n++] = (uint8_t)(A_CRAFT_BASE + id);
@@ -343,13 +351,16 @@ void cooldownFor(uint8_t code, int& channel, int& total) {
 
 // Button label, all via tr(). "more" is UI chrome with no upstream key, so it
 // uses the two closure-present glyphs 更/多 plus an ASCII page indicator
-// pointing at the batch a press will reveal.
+// pointing at the batch a press will reveal; 升级树 is a firmware-only page name
+// with no upstream key either and reuses closure-present glyphs the same way
+// (see tech_page.h for why it is not 科技树).
 void labelFor(uint8_t code, int page, int numPages, char* out, size_t cap) {
     switch (code) {
         case A_LIGHT:  snprintf(out, cap, "%s", tr("light fire"));  break;
         case A_STOKE:  snprintf(out, cap, "%s", tr("stoke fire"));  break;
         case A_GATHER: snprintf(out, cap, "%s", tr("gather wood")); break;
         case A_TRAPS:  snprintf(out, cap, "%s", tr("check traps")); break;
+        case A_TECH:   snprintf(out, cap, "升级树");                 break;
         case A_MORE:
             snprintf(out, cap, "更多 (%d/%d)",
                      (page + 1 < numPages ? page + 2 : 1), numPages);
@@ -573,6 +584,16 @@ void RoomPage::onLocalAction(uint8_t param, int x, int y) {
         m_page++;
         M5.Speaker.tone(1800, 80);
         pager::showPage(pager::currentRingIndex(), false);
+        return;
+    }
+
+    if (code == A_TECH) {
+        // Pure navigation (the Outside 分工 cell's exact shape): latch the
+        // sub-page visible, then jump to its ring slot by name. It navigates
+        // away, so there is no tick here to re-baseline.
+        tech_page::open();
+        M5.Speaker.tone(1800, 80);
+        pager::showPage(pager::ringIndexByName("tech"), false);
         return;
     }
 

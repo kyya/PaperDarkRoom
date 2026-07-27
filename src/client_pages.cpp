@@ -5,6 +5,7 @@
 #include "assign_page.h"
 #include "path_page.h"
 #include "world_page.h"
+#include "tech_page.h"
 #include "event_engine.h"
 #include "fight_modal.h"
 #include "setpiece_modal.h"
@@ -42,8 +43,14 @@ static PathPage s_path;
 // last so PathPage's doEmbark, which jumps to ringIndexByName("world"), resolves
 // this stable ring slot by name.
 static WorldPage s_world;
+// TechPage (v0.11.0) is the Room's read-only sub-page — reached from the Room
+// 升级树 cell, latched on tech_page::isOpen() and hidden (draw() returns false)
+// until opened, exactly like AssignPage. Appended last so the earlier slots keep
+// the ring indices they already had; the Room's open jump resolves it by name
+// (pager::ringIndexByName), not by position.
+static TechPage s_tech;
 static pages::Page* s_reg[] = { &s_room, &s_outside, &s_trade, &s_assign, &s_path,
-                                &s_world };
+                                &s_world, &s_tech };
 
 int count() { return (int)(sizeof(s_reg) / sizeof(s_reg[0])); }
 

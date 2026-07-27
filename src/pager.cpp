@@ -10,6 +10,7 @@
 #include "page_tabs.h"
 #include "assign_page.h"
 #include "path_page.h"
+#include "tech_page.h"
 #include <M5Unified.h>
 #include <climits>
 #include <cstring>
@@ -656,6 +657,7 @@ bool handleTouch() {
             if (ring >= 0 && ring != currentRingIndex()) {
                 if (assign_page::isOpen()) assign_page::close();
                 if (path_page::isOpen()) path_page::close();   // village sub-page: re-hide its slot
+                if (tech_page::isOpen()) tech_page::close();   // Room sub-page: ditto
                 showPage(ring, false);
             }
             s_lastActMs = nowMs;
