@@ -2,10 +2,10 @@
 // License, v. 2.0. If a copy of the MPL was not distributed with this
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 //
-// Random-event modal (fw 0.3.0) — the SECOND pager-scheduled overlay state
-// (research.md §4.1's modal exception; the first is preview.cpp). A random event
-// is interruptive narrative + a forced choice, so it earns a full-screen panel
-// that the铁律's "no modal" rule explicitly exempts. Mirrors preview's active()
+// Random-event modal (fw 0.3.0) — the FIRST pager-scheduled overlay state
+// (research.md §4.1's modal exception). A random event is interruptive
+// narrative + a forced choice, so it earns a full-screen panel
+// that the铁律's "no modal" rule explicitly exempts. Sets the active()
 // guard model: while up it intercepts pager::showPage / tickCurrent (background
 // pushes and page ticks no-op) and pager::handleTouch (a long-press selects a
 // button band; short taps and page turns are inert). Exit repaints the page
@@ -20,9 +20,8 @@
 
 namespace event_modal {
 
-// True while the panel owns the screen (the guard pager reads, same role as
-// preview::active()). Set by show(), cleared on exit (a choose that ends the
-// event, or the idle timeout).
+// True while the panel owns the screen (the guard pager reads). Set by show(),
+// cleared on exit (a choose that ends the event, or the idle timeout).
 bool active();
 
 // Bring the panel up for the currently-active engine event: one epd_quality

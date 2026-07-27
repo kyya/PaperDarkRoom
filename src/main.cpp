@@ -401,8 +401,8 @@ void setup() {
     cfg.clear_display = false;     // keep the last frame on the EPD
     M5.begin(cfg);
 
-    // GT911 factory config reports only 2 touch points — the multi-finger
-    // gestures (preview switcher) need more. Volatile: re-apply every cold boot.
+    // GT911 factory config reports only 2 touch points — the grip-graze slot scan
+    // and the multi-finger guard need more. Volatile: re-apply every cold boot.
     if (auto t = M5.Display.touch())
         static_cast<lgfx::Touch_GT911*>(t)->setTouchNums(5);
 

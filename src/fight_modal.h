@@ -2,8 +2,8 @@
 // License, v. 2.0. If a copy of the MPL was not distributed with this
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 //
-// World combat overlay (Phase 2 milestone 2.3) — the THIRD pager-scheduled
-// full-screen state, after preview.cpp and event_modal.cpp. A random encounter
+// World combat overlay (Phase 2 milestone 2.3) — the SECOND pager-scheduled
+// full-screen state, after event_modal.cpp. A random encounter
 // (world_state move() -> STEP_FIGHT) is interruptive real-time combat, so it
 // earns a full-screen panel that the "no modal" 铁律 exempts exactly like the
 // event modal. Mirrors event_modal's active() guard model: while up it intercepts

@@ -3,7 +3,6 @@
 #include "status_bar.h"
 #include "page.h"
 #include "client_pages.h"
-#include "preview.h"
 #include "event_modal.h"
 #include "fight_modal.h"
 #include "setpiece_modal.h"
@@ -173,9 +172,9 @@ static pages::Page* pageAt(int ring) {
 }
 
 // Is ring slot `ring` currently displayable? The single reachability predicate
-// behind the counters below and the preview rail: Page::available() is what
-// draw() gates on and what showPageOrNext steps over, so anything built on this
-// agrees with where the user can actually land. Out-of-range slots are not.
+// behind the counters below: Page::available() is what draw() gates on and what
+// showPageOrNext steps over, so anything built on this agrees with where the
+// user can actually land. Out-of-range slots are not.
 bool ringAvailable(int ring) {
     pages::Page* pg = pageAt(ring);
     return pg && pg->available();
@@ -255,13 +254,10 @@ const char* currentName() {
 }
 
 bool showPage(int ring, bool quality) {
-    // The grid page-switcher owns the panel while it's up: refuse every redraw
-    // (background BLE push, auto-rotate, pomo phase flip) so none can clobber
-    // the grid. The single central guard the whole preview state relies on;
-    // preview::exit() clears it before the caller redraws the chosen page.
-    if (preview::active()) return false;
-    // Same guard for the event modal (research.md §4.1): while a random event is
-    // on screen no background push / tick can repaint the page under it.
+    // A modal owns the panel while it's up: refuse every redraw (background BLE
+    // push, auto-rotate, pomo phase flip) so none can clobber it. The event modal
+    // (research.md §4.1) first: while a random event is on screen no background
+    // push / tick can repaint the page under it.
     // event_modal::closeAndRestore() clears the flag before its own showPage.
     if (event_modal::active()) return false;
     // And the same for the combat overlay (P2.3): it owns the panel while a fight
@@ -397,11 +393,12 @@ void payGhostDebtIfDue() {
 // the most recent (largest base_msec = the deliberate tap, not the earlier
 // graze); and never turn a page on an edge-band click. Rotation was ruled out —
 // coords are already rotation-corrected live (0.8.7 investigation).
-// Three-finger long-press = global grid page-switcher toggle. GT911 tracks up
-// to 5 points; >=3 held continuously for >=600ms fires once (edge-triggered),
-// then all touch is swallowed until every finger lifts (s_ignoreUntilClear) so
-// the 3-finger release can't read as a preview cell tap. A steady 3-finger grip
-// keeps the count at 3; a momentary dip to <3 restarts the timer — acceptable.
+// Sustained multi-finger grip guard. GT911 tracks up to 5 points; >=3 held
+// continuously for >=600ms is the holding hand settling on the panel, never
+// intent, so it latches once (edge-triggered) and all touch is swallowed until
+// every finger lifts (s_ignoreUntilClear) — the release of that grip can't read
+// as a tap or a page turn. A steady 3-finger grip keeps the count at 3; a
+// momentary dip to <3 restarts the timer — acceptable.
 static const uint32_t THREE_FINGER_MS = 600;
 
 // Hit-test the current page's region table at (tx,ty) and dispatch the matching
@@ -454,8 +451,8 @@ bool handleTouch() {
     int tc = M5.Touch.getCount();
     uint32_t nowMs = millis();
 
-    // Swallow everything until all fingers lift once, after a gesture fired —
-    // keeps the multi-touch release out of the normal/preview tap paths.
+    // Swallow everything until all fingers lift once, after a multi-finger grip
+    // latched — keeps that release out of the normal tap paths.
     static bool s_ignoreUntilClear = false;
     if (s_ignoreUntilClear) {
         if (tc != 0) return true;                  // still interacting, consumed
@@ -468,8 +465,8 @@ bool handleTouch() {
     // accepts a SHORT TAP as well as a long-press, so the modal's choice buttons
     // are tappable like everything else. Page turns and tab switches stay inert
     // here (this branch consumes everything and never falls through); a >=3-finger
-    // grip is swallowed too, so the preview switcher can't open over a live event.
-    // Sits before the three-finger branch precisely to win that race.
+    // grip is swallowed too. Sits before the multi-finger branch precisely to win
+    // that race.
     if (event_modal::active()) {
         for (int i = 0; tc <= 1 && i < tc; i++) {
             auto t = M5.Touch.getDetail(i);
@@ -533,7 +530,9 @@ bool handleTouch() {
         return true;                               // consume anything else / multi-touch
     }
 
-    // Three-finger long-press detection (before any single-finger handling).
+    // Multi-finger grip detection (before any single-finger handling): >=3 points
+    // down is a hand, not a tap — consume every such frame, and once the grip has
+    // been held out latch the swallow-until-lift so its release is inert too.
     static uint32_t s_multiStart = 0;
     static bool     s_multiFired = false;
     if (tc >= 3) {
@@ -541,47 +540,11 @@ bool handleTouch() {
         if (!s_multiFired && nowMs - s_multiStart >= THREE_FINGER_MS) {
             s_multiFired = true;
             s_ignoreUntilClear = true;
-            M5.Speaker.tone(2000, 60);             // switcher feedback
-            if (preview::active()) {               // second gesture -> back to origin
-                preview::exit();
-                showPage(currentRingIndex(), false);
-            } else {
-                preview::enter();
-            }
         }
         return true;                               // 3 fingers down = interaction
     } else {
         s_multiStart = 0;
         s_multiFired = false;
-    }
-
-    // Preview modal (focus view): three outcomes — a RAIL cell tap moves the
-    // focus to that page and stays in preview (repaint); a BIG-pane tap jumps to
-    // the focus page and leaves; any other tap returns to the origin page. Tap
-    // regions and the page-turn halves are inert here (state-mutually-exclusive).
-    // Pick the most recent click across slots (same graze rule as normal path).
-    if (preview::active()) {
-        int chosen = -1; uint32_t chosenMsec = 0;
-        for (int i = 0; i < tc; i++) {
-            auto t = M5.Touch.getDetail(i);
-            if (!t.wasClicked()) continue;
-            if (chosen < 0 || t.base_msec > chosenMsec) { chosen = i; chosenMsec = t.base_msec; }
-        }
-        if (chosen < 0) return false;              // no tap yet — still on the view
-        auto t = M5.Touch.getDetail(chosen);
-        int hit = preview::hitCell(t.x, t.y);      // HIT_BIG / rail idx / HIT_NONE
-        Serial.printf("[preview] tap x=%d y=%d -> hit=%d\n", t.x, t.y, hit);
-        if (hit >= 0) {                            // rail cell: refocus, stay in view
-            preview::setFocus(hit);
-        } else if (hit == preview::HIT_BIG) {      // big pane: jump to focus, leave
-            int f = preview::focusIndex();
-            preview::exit();
-            showPage(f, false);
-        } else {                                   // outside: back to origin page
-            preview::exit();
-            showPage(currentRingIndex(), false);
-        }
-        return true;
     }
 
     // Long-press (M5Unified's own hold detection, default 500ms threshold)
@@ -694,12 +657,11 @@ bool handleTouch() {
 // Drive the current page's time axis (seconds counter, header clock). Called
 // every loop() pass; no-op for pages whose tick() is empty (ServerPage).
 void tickCurrent(uint32_t nowMs) {
-    // Suppress every page-tick draw side effect while the switcher is up — a
-    // running pomo's per-second partialRefresh would otherwise paint MM:SS over
-    // the grid. Least-intrusive choke point (one guard covers all page ticks);
-    // the pomo service keeps counting, only its VIEW repaint is held off.
-    if (preview::active()) return;
-    if (event_modal::active()) return;   // event modal owns the panel too
+    // Suppress every page-tick draw side effect while a modal is up — a running
+    // pomo's per-second partialRefresh would otherwise paint MM:SS over it. Least-
+    // intrusive choke point (one guard covers all page ticks); the pomo service
+    // keeps counting, only its VIEW repaint is held off.
+    if (event_modal::active()) return;   // event modal owns the panel
     if (fight_modal::active()) return;   // combat overlay drives its own tick (main.cpp)
     if (setpiece_modal::active()) return;  // setpiece overlay owns the panel too
     pages::Page* p = pageAt(currentRingIndex());

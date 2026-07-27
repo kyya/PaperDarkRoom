@@ -32,11 +32,10 @@ bool showPageOrNext(int startIdx, int dir, bool quality);
 int  ringCount();
 int  currentRingIndex();        // clamped to [0, ringCount)
 
-// Displayable-page statistics for the status bar's page dots and the preview
-// rail. A ring slot is "visible" when its Page::available() is true (draw()
-// would paint, not be skipped by showPageOrNext) — so a conditionally-hidden
-// game page (un-unlocked Outside/Trade, a closed AssignPage) drops out of the
-// count. ringAvailable(ring) is that predicate for one slot (false out of
+// Displayable-page statistics for the status bar's page dots. A ring slot is
+// "visible" when its Page::available() is true (draw() would paint, not be
+// skipped by showPageOrNext) — so a conditionally-hidden game page (un-unlocked
+// Outside/Trade, a closed AssignPage) drops out of the count. ringAvailable(ring) is that predicate for one slot (false out of
 // range); visibleCount() is how many dots to draw; visibleIndexOf(ringIdx) is
 // which of those the given ring index maps to (its 0-based ordinal among
 // visible pages, = the count of visible pages before it). The bar draws no dots
