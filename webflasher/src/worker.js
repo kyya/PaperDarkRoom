@@ -40,19 +40,53 @@ const parseVersion = (key) => {
   return m ? m[1] : null;
 };
 
-/** Descending semver-ish compare; numeric segments compared as numbers. */
+/** `1.2.3-rc.1+build` -> core numbers plus the prerelease tag, if any. */
+const splitSemver = (v) => {
+  const [core, pre = null] = v.split("+")[0].split(/-(.*)/s);
+  return { core: core.split(".").map(Number), pre };
+};
+
+/**
+ * Descending semver precedence. Build metadata is ignored.
+ *
+ * The subtlety is semver rule 11: a release outranks every prerelease of the
+ * same core version (`1.0.0-beta` < `1.0.0`). Comparing the dotted segments
+ * uniformly gets that backwards — the release simply runs out of segments, the
+ * missing one reads as empty, and the prerelease sorts first and gets labelled
+ * "最新". So prerelease has to be a separate step, not another segment.
+ */
 const compareVersionDesc = (a, b) => {
-  const sa = a.split(/[.\-+]/);
-  const sb = b.split(/[.\-+]/);
-  for (let i = 0; i < Math.max(sa.length, sb.length); i++) {
-    const na = Number(sa[i]);
-    const nb = Number(sb[i]);
-    if (Number.isNaN(na) || Number.isNaN(nb)) {
-      const ca = (sa[i] ?? "").localeCompare(sb[i] ?? "");
-      if (ca !== 0) return -ca;
-    } else if (na !== nb) {
-      return nb - na;
-    }
+  const va = splitSemver(a);
+  const vb = splitSemver(b);
+
+  for (let i = 0; i < Math.max(va.core.length, vb.core.length); i++) {
+    const na = va.core[i] ?? 0;
+    const nb = vb.core[i] ?? 0;
+    if (na !== nb) return nb - na;
+  }
+
+  // Same core version: a release comes first.
+  if (va.pre === null || vb.pre === null) {
+    if (va.pre === vb.pre) return 0;
+    return va.pre === null ? -1 : 1;
+  }
+
+  // Both prereleases: compare dot-separated identifiers. Numeric ones compare
+  // as numbers and rank below alphanumeric ones; a shorter run of identifiers
+  // ranks below a longer one that matches so far.
+  const ia = va.pre.split(".");
+  const ib = vb.pre.split(".");
+  for (let i = 0; i < Math.max(ia.length, ib.length); i++) {
+    const x = ia[i];
+    const y = ib[i];
+    if (x === undefined) return 1;
+    if (y === undefined) return -1;
+    if (x === y) continue;
+    const nx = /^\d+$/.test(x);
+    const ny = /^\d+$/.test(y);
+    if (nx && ny) return Number(y) - Number(x);
+    if (nx !== ny) return nx ? 1 : -1;
+    return x < y ? 1 : -1;
   }
   return 0;
 };
