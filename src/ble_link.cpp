@@ -6,6 +6,7 @@
 #include <M5Unified.h>
 #include <esp_heap_caps.h>
 #include <esp_ota_ops.h>
+#include <esp_partition.h>
 #include <nvs.h>
 #include <BLEDevice.h>
 #include <BLEServer.h>
@@ -93,6 +94,34 @@ static void otaFail(const char* reason) {
     s_otaErr[sizeof(s_otaErr) - 1] = 0;
     s_ota = OTA_ERR;
     Serial.printf("[ota] err:%s\n", s_otaErr);
+}
+
+// Guard against a third-party bootloader/partition-table swap (e.g. the
+// bmorcelli/Launcher multi-firmware boot manager): it repoints the flash's
+// partition table to its own layout and installs itself into an OTA app
+// slot, so under a foreign table "the other slot" found by
+// esp_ota_get_next_update_partition() may well be the Launcher itself —
+// writing our OTA image there would brick the boot menu, not just our game.
+// Our own partitions.csv (the "big-nvs" layout, see its header) has a
+// distinctive fingerprint: the `nvs` data/nvs partition sits at 0xC90000
+// with size 0x100000, far outside where any stock/Launcher table would put
+// it. Treat a mismatch as "not our table" and refuse the whole OTA session;
+// a firmware update in that mode has to go through Launcher's own installer
+// instead. The partition table is immutable at runtime, so the result is
+// cached after the first check.
+static bool onNativeLayout() {
+    static int cached = -1;   // -1 = not yet checked
+    if (cached < 0) {
+        const esp_partition_t* nvsPart = esp_partition_find_first(
+            ESP_PARTITION_TYPE_DATA, ESP_PARTITION_SUBTYPE_DATA_NVS, "nvs");
+        cached = (nvsPart && nvsPart->address == 0xC90000 &&
+                  nvsPart->size == 0x100000) ? 1 : 0;
+        if (!cached)
+            Serial.printf("[ota] foreign partition table detected (nvs @ %#lx size %#lx)\n",
+                          nvsPart ? (unsigned long)nvsPart->address : 0ul,
+                          nvsPart ? (unsigned long)nvsPart->size : 0ul);
+    }
+    return cached == 1;
 }
 
 class CtrlCb : public BLECharacteristicCallbacks {
@@ -194,6 +223,7 @@ class OtaCb : public BLECharacteristicCallbacks {
         uint32_t total = u32le(p);
         uint32_t crc   = u32le(p + 4);
         if (s_ota == OTA_ACTIVE) esp_ota_abort(s_otaHandle);  // restart cleanly
+        if (!onNativeLayout()) { otaFail("foreign"); return; }
         s_otaPart = esp_ota_get_next_update_partition(NULL);
         if (!s_otaPart) { otaFail("nopart"); return; }
         esp_err_t e = esp_ota_begin(s_otaPart, OTA_SIZE_UNKNOWN, &s_otaHandle);

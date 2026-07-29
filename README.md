@@ -60,6 +60,16 @@ python tools/ble_ota.py
 
 > **GATT 缓存陷阱**：新增/改动 BLE characteristic 后，Windows/WinRT 可能缓存旧的特征表，导致新特征"隐形"（`BleakCharacteristicNotFoundError`）。首次从 dashboard 固件互刷过来后，若 OTA 脚本报特征找不到，在 Windows 蓝牙设置里删除设备重新配对一次即可。不要在 tray/其它 BLE 中心设备仍连接着的情况下跑 `ble_ota.py`（一对多中心会冲突）。
 
+### 通过 Launcher 安装（多固件启动管理器）
+
+[bmorcelli/Launcher](https://github.com/bmorcelli/Launcher) 等第三方多固件启动管理器接管 bootloader 与分区表，用户从菜单里选一个 app-only `.bin` 由 Launcher 自己刷进它管理的 OTA 槽。这种形态下应使用 `python tools/make_dist.py` 额外产出的 `dist/adarkroom-<版本>-launcher.bin`，拷进 SD 卡后走 Launcher 自身的安装流程，**不要**整包刷 0x0（那是给 merged.bin 用的）。
+
+注意事项：
+
+1. Launcher 形态下固件内置的 BLE OTA 会被主动禁用——写入前会校验分区表指纹，识别到非本项目分区表（比如 Launcher 自己的表）就拒绝整个 OTA 会话，防止误把 Launcher 本体覆盖掉。这种形态下升级请通过 Launcher 重新安装新版 `launcher.bin`，不要指望游戏内 BLE OTA。
+2. Launcher 分区表的 `nvs` 分区通常只有 20 KB 且与 PHY 校准数据共享（本项目自己的分区表把 `nvs` 挪到了 1 MB 就是为了绕开这个问题，见 `partitions.csv` 头部注释）。在 Launcher 下长期高频冷启动，`partitions.csv` 注释里描述的"nvs 写满被静默擦除、BLE 配对信息丢失"问题可能会回归——这是试玩形态的已知限制，非本项目代码的 bug。
+3. 想恢复完整形态（大 nvs、自有分区表、BLE OTA 可用），用 `dist/adarkroom-<版本>-merged.bin` 整包刷回 0x0 即可。
+
 ## 生成器工具
 
 游戏文本与 CJK 字体是从上游官方简体中文表构建期生成的，不手改生成产物：
