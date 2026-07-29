@@ -231,6 +231,16 @@ async def main() -> int:
                 if disconnected.is_set():
                     print("[ota] disconnected mid-transfer — aborting")
                     return 1
+                # The device can reject the image mid-stream (e.g. the
+                # firmware's foreign-layout guard in ble_link.cpp otaFail()).
+                # STATUS notifies every 2s, so failed["reason"] flips within
+                # one cycle; without this check we'd keep pushing acknowledged
+                # writes for the rest of the ~1.4 MB image — several more
+                # minutes of pure waste — before noticing after the loop.
+                if failed["reason"]:
+                    print(f"[ota] device reported {failed['reason']} — "
+                          f"aborting stream")
+                    return 1
                 await client.write_gatt_char(DATA, image[off:off + chunk],
                                              response=True)
                 if args.throttle:

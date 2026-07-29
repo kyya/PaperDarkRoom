@@ -23,9 +23,14 @@ the merged image boots identically to a USB flash.
 Usage (venv python):
   ~/.ai-desk-card/venv/Scripts/python.exe tools/make_dist.py [--skip-build]
 
-Output: dist/adarkroom-<version>-merged.bin, where <version> is read from
-platformio.ini's -DCARD_VERSION build flag (e.g. "0.4.2-adarkroom" -> "0.4.2").
-Flash the whole image starting at 0x0.
+Output:
+  dist/adarkroom-<version>-merged.bin   - flash the whole image at 0x0
+  dist/adarkroom-<version>-launcher.bin - app-only image for bmorcelli/
+                                           Launcher (or any third-party boot
+                                           manager); copy to SD, install via
+                                           Launcher
+<version> is read from platformio.ini's -DCARD_VERSION build flag (e.g.
+"0.4.2-adarkroom" -> "0.4.2").
 """
 from __future__ import annotations
 import argparse
@@ -160,6 +165,31 @@ def main() -> int:
     print(f"[done] sha256={sha256}")
     print("[done] flash the whole file starting at 0x0 (M5Burner: single "
           "image, address 0x0)")
+
+    # App-only image for third-party boot managers (e.g. bmorcelli/Launcher):
+    # Launcher owns bootloader + partition table + its own OTA app slot, and
+    # installs a user-picked app-only .bin into that slot. An ESP32 app image
+    # is position-independent w.r.t. partition offset, so firmware.bin as-is
+    # boots fine there — no merge/offsets needed, just a copy under a name
+    # that says what it's for.
+    launcher_out = dist_dir / f"adarkroom-{version}-launcher.bin"
+    shutil.copyfile(firmware, launcher_out)
+    print(f"[launcher] copied {firmware} -> {launcher_out}")
+
+    launcher_data = launcher_out.read_bytes()
+    if not launcher_data:
+        print("[launcher] output file is empty")
+        return 1
+    if launcher_data[0] != 0xE9:
+        print(f"[launcher] bad magic at offset 0: {launcher_data[0]:#04x}")
+        return 1
+    if len(launcher_data) <= 512 * 1024:
+        print(f"[launcher] suspiciously small: {len(launcher_data)} bytes")
+        return 1
+    print(f"[launcher] magic=0xE9 size={len(launcher_data)} "
+          f"({len(launcher_data) / 1024:.1f} KiB) OK")
+    print("[launcher] for bmorcelli/Launcher: copy to SD card and install "
+          "via Launcher (do not flash at 0x0 directly)")
     return 0
 
 
