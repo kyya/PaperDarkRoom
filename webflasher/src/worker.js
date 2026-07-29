@@ -17,13 +17,21 @@ const MERGED_SUFFIX = "-merged.bin";
 // adarkroom-0.12.0-merged.bin -> "0.12.0"
 const VERSION_RE = /-(\d+(?:\.\d+)*(?:[-+][0-9A-Za-z.-]+)?)-merged\.bin$/;
 
-const json = (body, init = {}) =>
+// A firmware name carries its version and the bytes behind it never change, so
+// the image is safe to keep forever. The listing is the one thing that has to
+// stay fresh — a short window is enough to blunt refresh storms without hiding
+// a new upload for long.
+const IMMUTABLE = "public, max-age=31536000, immutable";
+const LISTING_TTL = "public, max-age=60";
+// The manifest is derived purely from the file name, but it 404s on a missing
+// object, so keep it short enough that deleting a firmware takes effect.
+const MANIFEST_TTL = "public, max-age=86400";
+
+const json = (body, cacheControl) =>
   new Response(JSON.stringify(body), {
-    ...init,
     headers: {
       "content-type": "application/json; charset=utf-8",
-      "cache-control": "no-store",
-      ...init.headers,
+      "cache-control": cacheControl,
     },
   });
 
@@ -76,18 +84,41 @@ async function listFirmwares(env) {
   return out;
 }
 
-async function serveFirmware(env, key) {
-  if (!key.endsWith(MERGED_SUFFIX)) return new Response("Not found", { status: 404 });
-  const obj = await env.FW.get(key);
-  if (!obj) return new Response("Not found", { status: 404 });
-
+const firmwareHeaders = (obj) => {
   const headers = new Headers();
   obj.writeHttpMetadata(headers);
   headers.set("content-type", "application/octet-stream");
   headers.set("content-length", String(obj.size));
   headers.set("etag", obj.httpEtag);
-  headers.set("cache-control", "public, max-age=3600");
-  return new Response(obj.body, { headers });
+  headers.set("cache-control", IMMUTABLE);
+  return headers;
+};
+
+async function serveFirmware(request, env, ctx, key) {
+  if (!key.endsWith(MERGED_SUFFIX)) return new Response("Not found", { status: 404 });
+
+  // HEAD only needs the metadata; pulling the body just to throw it away would
+  // be a wasted R2 read.
+  if (request.method === "HEAD") {
+    const head = await env.FW.head(key);
+    if (!head) return new Response("Not found", { status: 404 });
+    return new Response(null, { headers: firmwareHeaders(head) });
+  }
+
+  // These images are ~1.4 MB and every player downloads the same handful, so
+  // park them in the edge cache: repeat downloads are then served without an R2
+  // read at all. Cache API keys on the request, and only GET may be stored.
+  const cache = caches.default;
+  const cached = await cache.match(request);
+  if (cached) return cached;
+
+  const obj = await env.FW.get(key);
+  if (!obj) return new Response("Not found", { status: 404 });
+
+  const response = new Response(obj.body, { headers: firmwareHeaders(obj) });
+  // Don't make the user wait on the cache write.
+  ctx.waitUntil(cache.put(request, response.clone()));
+  return response;
 }
 
 async function serveManifest(env, name) {
@@ -99,29 +130,32 @@ async function serveManifest(env, name) {
   const head = await env.FW.head(key);
   if (!head) return new Response("Not found", { status: 404 });
 
-  return json({
-    name: "PaperDarkRoom",
-    version,
-    // The device speaks no Improv Serial, so skip the probe entirely instead of
-    // making every user sit through the post-install wait.
-    new_install_improv_wait_time: 0,
-    // Show the "Erase device" checkbox rather than silently full-erasing. First
-    // install / major upgrades want it checked (nvs must be re-paired); minor
-    // updates can leave it off.
-    new_install_prompt_erase: true,
-    builds: [
-      {
-        // merged image already contains bootloader + partition table + app,
-        // laid out at their real offsets, so it is written whole at 0x0.
-        chipFamily: "ESP32-S3",
-        parts: [{ path: `/fw/${key}`, offset: 0 }],
-      },
-    ],
-  });
+  return json(
+    {
+      name: "PaperDarkRoom",
+      version,
+      // The device speaks no Improv Serial, so skip the probe entirely instead
+      // of making every user sit through the post-install wait.
+      new_install_improv_wait_time: 0,
+      // Show the "Erase device" checkbox rather than silently full-erasing.
+      // First install / major upgrades want it checked (nvs must be re-paired);
+      // minor updates can leave it off.
+      new_install_prompt_erase: true,
+      builds: [
+        {
+          // merged image already contains bootloader + partition table + app,
+          // laid out at their real offsets, so it is written whole at 0x0.
+          chipFamily: "ESP32-S3",
+          parts: [{ path: `/fw/${key}`, offset: 0 }],
+        },
+      ],
+    },
+    MANIFEST_TTL,
+  );
 }
 
 export default {
-  async fetch(request, env) {
+  async fetch(request, env, ctx) {
     const url = new URL(request.url);
     const { pathname } = url;
 
@@ -130,11 +164,16 @@ export default {
     }
 
     if (pathname === "/api/firmwares") {
-      return json(await listFirmwares(env));
+      return json(await listFirmwares(env), LISTING_TTL);
     }
 
     if (pathname.startsWith("/fw/")) {
-      return serveFirmware(env, decodeURIComponent(pathname.slice("/fw/".length)));
+      return serveFirmware(
+        request,
+        env,
+        ctx,
+        decodeURIComponent(pathname.slice("/fw/".length)),
+      );
     }
 
     if (pathname.startsWith("/manifest/") && pathname.endsWith(".json")) {
