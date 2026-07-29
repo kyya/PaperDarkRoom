@@ -180,7 +180,7 @@ static bool tryTrigger(uint32_t epochNow) {
     return startEvent(pool[pick], epochNow);
 }
 
-void tick(uint32_t nowMs, uint32_t epochNow) {
+void tick(uint32_t nowMs, uint32_t epochNow, bool trekActive) {
     (void)nowMs;
     if (!gs) return;
 
@@ -206,7 +206,10 @@ void tick(uint32_t nowMs, uint32_t epochNow) {
             gs->nextEventAt = epochNow + 60 + (gs->nextRand() % 61u);
             return;
         }
-        if (!tryTrigger(epochNow)) {
+        // trekActive mirrors upstream's Engine.activeModule == Room/Outside gate:
+        // while out on the World map the home-event pool is unavailable, same as
+        // tryTrigger finding nothing.
+        if (trekActive || !tryTrigger(epochNow)) {
             // No available event: retry sooner (upstream scale 0.5).
             int mins = EVENT_MIN_MIN + randBelow(EVENT_MAX_MIN - EVENT_MIN_MIN);
             uint32_t half = (uint32_t)(mins * 60) / 2;

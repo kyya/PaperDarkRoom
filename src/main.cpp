@@ -584,7 +584,7 @@ void loop() {
     static uint32_t s_evTick = 0;
     if (now - s_evTick >= 1000) {
         s_evTick = now;
-        events::tick(now, epochNow());
+        events::tick(now, epochNow(), g_world.trekActive());
     }
     // A random event never pops OVER a live fight (the fight owns the panel); a
     // queued event waits and shows once the fight ends. The combat overlay drives

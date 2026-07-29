@@ -482,7 +482,7 @@ int main() {
         e.stores[R_FUR] = 500 * FP;                // Room fur events available
         events::bind(&e);
         // Fresh: nextEventAt==0 -> first tick seeds it 3-5 min out, fires nothing.
-        events::tick(0, t);
+        events::tick(0, t, false);
         CHECK(events::nextEventAt() >= t + 180 && events::nextEventAt() <= t + 300,
               "fresh tick seeds next event 3-5 min out");
         CHECK(!events::active(), "no event on the seeding tick");
@@ -490,7 +490,7 @@ int main() {
         // Wake past the due time (long gap = deep sleep): must NOT fire on the
         // waking instant; re-arms to now+60..120s.
         uint32_t w = events::nextEventAt() + 10000;
-        events::tick(0, w);
+        events::tick(0, w, false);
         CHECK(!events::active(), "waking past due does not fire immediately");
         CHECK(events::nextEventAt() >= w + 60 && events::nextEventAt() <= w + 120,
               "wake re-arms to now+60..120s");
@@ -500,7 +500,7 @@ int main() {
         uint32_t due = events::nextEventAt();
         e.rng = 1;
         for (uint32_t s = w + 1; s <= due + 1 && !events::active(); s++)
-            events::tick(0, s);
+            events::tick(0, s, false);
         CHECK(events::active(), "an available event fires when due while awake");
         events::dismissDefault();
         CHECK(!events::active() && events::nextEventAt() > due,
