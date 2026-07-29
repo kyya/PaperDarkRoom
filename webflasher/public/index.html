@@ -27,10 +27,6 @@
         --bad: #e06666;
         --warn: #c9a227;
         --xhs: #e0203c;
-        --fire: #ff9d3c;
-        --fire-glow: 0 0 6px rgba(255, 140, 0, 0.55), 0 0 16px rgba(255, 70, 0, 0.28);
-        --ash: #5a5a5a;
-        --smoke: #4a4f4a;
       }
       :root[data-theme="light"] {
         --bg: #f4f1e8;
@@ -42,10 +38,6 @@
         --bad: #b3261e;
         --warn: #8a6d1f;
         --xhs: #ff2442;
-        --fire: #8a8478;
-        --fire-glow: none;
-        --ash: #8a8478;
-        --smoke: #a3a89e;
       }
       @media (prefers-color-scheme: light) {
         :root:not([data-theme]) {
@@ -58,10 +50,6 @@
           --bad: #b3261e;
           --warn: #8a6d1f;
           --xhs: #ff2442;
-          --fire: #8a8478;
-          --fire-glow: none;
-          --ash: #8a8478;
-          --smoke: #a3a89e;
         }
       }
 
@@ -102,11 +90,27 @@
         font-size: 18px; font-weight: normal; letter-spacing: 0.25em;
         margin: 0 0 4px; color: var(--hot);
       }
-      h2 {
-        font-size: 14px; font-weight: normal; letter-spacing: 0.2em;
-        color: var(--dim); margin: 44px 0 12px;
-      }
       .sub { color: var(--dim); margin: 0 0 32px; }
+
+      /* The game's own fieldset frame (src/outside_page.cpp drawFieldset): a
+         plain box with the legend sitting on the top border, the border
+         breaking for it with a small gap each side. Native <fieldset>/<legend>
+         gives exactly that once the UA's rounding and padding are cleared. */
+      fieldset {
+        border: 1px solid var(--fg);
+        border-radius: 0;
+        min-width: 0;
+        margin: 0 0 26px;
+        padding: 10px 12px 14px;
+        transition: border-color 0.35s ease;
+      }
+      legend {
+        margin-left: 20px;
+        padding: 0 6px;
+        color: var(--fg);
+        font-size: 13px;
+        letter-spacing: 0.2em;
+      }
       code { color: var(--hot); }
       a { color: var(--dim); }
 
@@ -159,31 +163,37 @@
       .warn { color: var(--warn); }
 
       /* --- campfire ---------------------------------------------------- */
-      .fire-block { text-align: center; margin: 52px 0 8px; }
+      /* 16x16 pixel sprite on a <canvas>, drawn one fillRect per sprite pixel
+         at an integer scale, so it is sharp by construction. `pixelated` is
+         belt-and-braces for the devicePixelRatio upscale. */
+      .fire-block { text-align: center; margin: 44px 0 8px; }
       #fire {
-        display: inline-block;
-        text-align: left;
-        margin: 0;
-        font: inherit;
-        line-height: 1.25;
-        white-space: pre;
-        color: var(--fire);
-        text-shadow: var(--fire-glow);
-        transition: color 0.5s ease, text-shadow 0.5s ease;
+        display: block;
+        margin: 0 auto;
+        image-rendering: pixelated;
       }
-      #fire .smoke { color: var(--smoke); animation: drift 5s ease-in-out infinite; }
-      #fire .ember { color: var(--ash); }
+      #fire.burning { animation: ember 2.4s ease-in-out infinite; }
+      @keyframes ember {
+        0%, 100% {
+          filter: drop-shadow(0 0 3px rgba(255, 140, 0, 0.5))
+                  drop-shadow(0 0 9px rgba(255, 70, 0, 0.26));
+        }
+        50% {
+          filter: drop-shadow(0 0 5px rgba(255, 165, 0, 0.72))
+                  drop-shadow(0 0 17px rgba(255, 80, 0, 0.42));
+        }
+      }
       .fire-caption {
         color: var(--dim); font-size: 12px; margin: 10px 0 0;
         letter-spacing: 0.15em;
       }
-      @keyframes drift {
-        0%, 100% { opacity: 0.25; }
-        50% { opacity: 0.7; }
-      }
       @media (prefers-reduced-motion: reduce) {
-        #fire .smoke { animation: none; opacity: 0.45; }
-        body, #fire { transition: none; }
+        #fire.burning {
+          animation: none;
+          filter: drop-shadow(0 0 4px rgba(255, 140, 0, 0.55))
+                  drop-shadow(0 0 12px rgba(255, 70, 0, 0.3));
+        }
+        body { transition: none; }
       }
 
       /* --- footer ------------------------------------------------------ */
@@ -213,33 +223,42 @@
       <h1>PAPERDARKROOM</h1>
       <p class="sub">网页刷机 · 把固件直接写进 USB 上的 M5PaperS3</p>
 
-      <h2>浏览器</h2>
-      <div id="support"></div>
-      <p class="hint">网页刷机依赖 WebSerial，需要桌面版 Chrome 或 Edge 113+。</p>
+      <fieldset>
+        <legend>浏览器</legend>
+        <div id="support"></div>
+        <p class="hint">网页刷机依赖 WebSerial，需要桌面版 Chrome 或 Edge 113+。</p>
+      </fieldset>
 
-      <h2>固件</h2>
-      <div id="list"><div class="status">正在读取固件列表…</div></div>
+      <fieldset>
+        <legend>固件</legend>
+        <div id="list"><div class="status">正在读取固件列表…</div></div>
+      </fieldset>
 
-      <h2>说明</h2>
-      <ul>
-        <li>
-          用 USB-C 数据线把 M5PaperS3 接到电脑，点「刷入」，在弹出的串口选择框里选中设备。
-          若列表里没有设备，换一根<strong>能传数据</strong>的线再试。
-        </li>
-        <li>若初始化失败，按住机身 <code>BOOT</code> 键再点「刷入」，进入下载模式。</li>
-        <li class="warn">
-          首次刷入、或跨大版本升级时，请在弹窗里勾选 <code>Erase device</code> 再点 Next
-          —— nvs 需要清空重新配对，不清会带着旧配置起不来。小版本更新可以不勾。
-        </li>
-        <li>
-          <strong>SD 卡存档不受影响。</strong>Erase 擦的是板载 flash，游戏存档在 SD 卡上，
-          怎么刷都还在。
-        </li>
-        <li>刷完拔线重新上电即可。整包镜像已含 bootloader 与分区表，写入地址固定 0x0。</li>
-      </ul>
+      <fieldset>
+        <legend>说明</legend>
+        <ul>
+          <li>
+            用 USB-C 数据线把 M5PaperS3 接到电脑，点「刷入」，在弹出的串口选择框里选中设备。
+          </li>
+          <li>
+            M5PaperS3 用的是 ESP32-S3 原生 USB，<strong>不需要装 CP210x / CH34x 驱动</strong>。
+            若列表里没有设备，先检查数据线（不能是只能充电的电源线），并确认设备已开机。
+          </li>
+          <li>若初始化失败，按住机身 <code>BOOT</code> 键再点「刷入」，进入下载模式。</li>
+          <li class="warn">
+            首次刷入、或跨大版本升级时，请在弹窗里勾选「擦除设备」再点下一步
+            —— nvs 需要清空重新配对，不清会带着旧配置起不来。小版本更新可以不勾。
+          </li>
+          <li>
+            <strong>SD 卡存档不受影响。</strong>擦除擦的是板载 flash，游戏存档在 SD 卡上，
+            怎么刷都还在。
+          </li>
+          <li>刷完拔线重新上电即可。整包镜像已含 bootloader 与分区表，写入地址固定 0x0。</li>
+        </ul>
+      </fieldset>
 
       <div class="fire-block">
-        <pre id="fire" aria-hidden="true"></pre>
+        <canvas id="fire" aria-hidden="true"></canvas>
         <p class="fire-caption" id="fire-caption"></p>
       </div>
 
@@ -297,19 +316,90 @@
       document.getElementById("xhs-icon").innerHTML = xiaohongshu;
 
       /* ---------------- campfire ---------------- */
-      // A Dark Room is pure text, so the fire is too. Frames are 4 lines of
-      // monospace; only the flame rows change, the logs stay put.
-      const LOGS = " \\__#__/";
-      const BURNING = [
-        "    (\n   ) )\n  ( ( (\n" + LOGS,
-        "   )\n  ( (\n  ) ) )\n" + LOGS,
-        "    )\n   ( )\n  ) ( (\n" + LOGS,
-        "   (\n   ) (\n  ( ) )\n" + LOGS,
+      // 16x16 pixel sprites, one character per pixel indexing into a palette.
+      // '.' is transparent. Flame shades run 3 (deep red rim) -> 2 (orange) ->
+      // 1 (yellow) -> 0 (white-hot core); k/w/W are the logs.
+      const SPRITE = 16;
+      const PIXEL = 5; // CSS px per sprite pixel -> 80x80 on screen
+
+      const FIRE_PAL = {
+        0: "#fff2b0", 1: "#ffd23f", 2: "#f97316", 3: "#a3210b",
+        k: "#241a12", w: "#5a3a1e", W: "#7d5230",
+      };
+      const DEAD_PAL = {
+        s: "#9aa09a", k: "#2f2b27", w: "#4e483f", W: "#6f665b", a: "#9c9284",
+      };
+
+      // Logs are identical across the burning frames so the flame reads as the
+      // only thing moving.
+      const LOGS = [
+        "..k3wWWwwWWw3k..",
+        ".kWwwkkwwkkwwWk.",
+        ".kwWWwwkkwwWWwk.",
+        "..kkkkkkkkkkkk..",
       ];
-      const DEAD =
-        '<span class="smoke">    ~\n   \'</span>\n<span class="ember">  . .\n \\__=__/</span>';
+      // Tip walks 8 -> 6 -> 9 -> 7 and the body height rises and falls, so the
+      // flame licks side to side instead of pulsing in place.
+      const BURNING = [
+        ["........3.......", ".......33.......", ".......323......",
+         "......32123.....", ".....3211123....", ".....3210123....",
+         "....321000123...", "....321000123...", "...32110001123..",
+         "...32211011223..", "..332211112233..", "..333222222333..", ...LOGS],
+        ["................", "......3.........", ".....33.........",
+         ".....323........", "....33213.......", "....332103......",
+         "....32100123....", "....321000123...", "...32110001123..",
+         "...32210011223..", "..332211112233..", "..333222222333..", ...LOGS],
+        [".........3......", "........33......", "........323.....",
+         ".......33213....", "......332103....", ".....3210013....",
+         "....321000123...", "....321000123...", "...32100001123..",
+         "...32211011223..", "..332211112233..", "..333222222333..", ...LOGS],
+        ["................", ".......3........", "......323.......",
+         "......3213......", ".....332103.....", ".....3210023....",
+         "....32100023....", "....321000123...", "...32110001123..",
+         "...32210011223..", "..332211112233..", "..333222222333..", ...LOGS],
+      ];
+      // Burnt out: charred logs on an ash bed, one thread of smoke curling up.
+      const EMBERS = ["..aakwWwwWwkaa..", ".kWwwkkwwkkwwWk.",
+                      ".kwWWwwkkwwWWwk.", "..aaaaaaaaaaaa.."];
+      const DEAD = [
+        ["......s.........", "......s.........", ".......s........",
+         ".......s........", "........s.......", "........s.......",
+         ".......s........", ".......s........", "........s.......",
+         "........s.......", ".......s........", ".......s........", ...EMBERS],
+        [".......s........", ".......s........", "......s.........",
+         "......s.........", ".......s........", ".......s........",
+         "........s.......", "........s.......", ".......s........",
+         ".......s........", "........s.......", ".......s........", ...EMBERS],
+      ];
 
       const fireEl = document.getElementById("fire");
+      const ctx = fireEl.getContext("2d");
+      const dpr = Math.max(1, Math.round(window.devicePixelRatio || 1));
+      const cell = PIXEL * dpr; // integer -> every pixel lands on a device pixel
+      fireEl.width = SPRITE * cell;
+      fireEl.height = SPRITE * cell;
+      fireEl.style.width = SPRITE * PIXEL + "px";
+      fireEl.style.height = SPRITE * PIXEL + "px";
+      ctx.imageSmoothingEnabled = false;
+
+      function drawSprite(rows, pal) {
+        ctx.clearRect(0, 0, fireEl.width, fireEl.height);
+        const last = rows.length - 1;
+        for (let y = 0; y <= last; y++) {
+          const row = rows[y];
+          for (let x = 0; x < row.length; x++) {
+            const ch = row[x];
+            const colour = pal[ch];
+            if (!colour) continue;
+            // Smoke thins out as it rises.
+            ctx.globalAlpha = ch === "s" ? 0.22 + 0.55 * (y / last) : 1;
+            ctx.fillStyle = colour;
+            ctx.fillRect(x * cell, y * cell, cell, cell);
+          }
+        }
+        ctx.globalAlpha = 1;
+      }
+
       const captionEl = document.getElementById("fire-caption");
       const still = window.matchMedia("(prefers-reduced-motion: reduce)");
       let frame = 0;
@@ -318,22 +408,18 @@
       function paintFire() {
         clearInterval(timer);
         timer = null;
-        if (effective() === "light") {
-          // Daylight: the fire is out. Charred logs, ash, a thread of smoke.
-          fireEl.innerHTML = DEAD;
-          captionEl.textContent = "火堆熄灭了";
-          return;
-        }
-        captionEl.textContent = "火堆熊熊燃烧";
-        if (still.matches) {
-          fireEl.textContent = BURNING[0];
-          return;
-        }
-        fireEl.textContent = BURNING[frame % BURNING.length];
+        const light = effective() === "light";
+        const frames = light ? DEAD : BURNING;
+        const pal = light ? DEAD_PAL : FIRE_PAL;
+        fireEl.classList.toggle("burning", !light);
+        captionEl.textContent = light ? "火堆熄灭了" : "火堆熊熊燃烧";
+        frame = 0;
+        drawSprite(frames[0], pal);
+        if (still.matches) return;
         timer = setInterval(() => {
-          frame++;
-          fireEl.textContent = BURNING[frame % BURNING.length];
-        }, 260);
+          frame = (frame + 1) % frames.length;
+          drawSprite(frames[frame], pal);
+        }, light ? 900 : 240);
       }
       still.addEventListener("change", paintFire);
 
