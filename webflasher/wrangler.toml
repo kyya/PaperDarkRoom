@@ -1,0 +1,15 @@
+# Deploy: npm ci && npm run deploy
+# `deploy` regenerates public/vendor/ (gitignored build output) before shipping.
+
+name = "paperdarkroom-flasher"
+main = "src/worker.js"
+compatibility_date = "2026-07-01"
+
+# Static page + self-hosted esp-web-tools bundle. Assets win for paths that exist
+# on disk; everything else (/api/*, /fw/*, /manifest/*) falls through to the Worker.
+[assets]
+directory = "./public"
+
+[[r2_buckets]]
+binding = "FW"
+bucket_name = "paperdarkroom-fw"
