@@ -144,16 +144,15 @@
       }
       .status { color: var(--dim); padding: 14px 0; }
 
-      /* esp-web-tools' dialog is a self-contained light Material card, but it
-         never sets `color` on its host - so the page's text colour inherits
-         straight into that white surface and turns unreadable in dark mode.
-         Pin it to the Material on-surface ink in both themes. */
-      ewt-install-dialog {
-        color: #1d1b20;
-        --esp-tools-button-color: var(--xhs);
-        --esp-tools-button-text-color: #fff;
-        --esp-tools-button-border-radius: 0;
-      }
+      /* esp-web-tools' dialog is a self-contained light Material card, and it
+         stays light in both themes - it is readable either way. But it never
+         sets `color` on its host, so the page's ink inherits straight into that
+         white surface and turns unreadable in dark mode. Pin it to the Material
+         on-surface ink.
+         (Its `--esp-tools-button-*` custom properties are deliberately unused:
+         they only style the built-in fallback "Connect" button, which never
+         renders because we always fill the `activate` slot with our own.) */
+      ewt-install-dialog { color: #1d1b20; }
 
       ul { padding-left: 1.4em; margin: 0; }
       li { margin-bottom: 10px; }
