@@ -5,88 +5,218 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>PaperDarkRoom · 网页刷机</title>
     <meta name="description" content="在浏览器里给 M5PaperS3 刷入 PaperDarkRoom 固件" />
+    <script>
+      // Applied before first paint so the page never flashes the wrong theme.
+      (function () {
+        var saved = null;
+        try { saved = localStorage.getItem("pdr-theme"); } catch (e) {}
+        if (saved === "light" || saved === "dark") {
+          document.documentElement.dataset.theme = saved;
+        }
+      })();
+    </script>
     <style>
+      /* Dark = A Dark Room at night. Light = the e-ink panel itself: paper and ink. */
       :root {
-        color-scheme: dark;
+        --bg: #000;
         --fg: #d0d0d0;
         --dim: #6b6b6b;
         --line: #333;
         --hot: #fff;
+        --ok: #6cc06c;
+        --bad: #e06666;
+        --warn: #c9a227;
+        --xhs: #e0203c;
+        --fire: #ff9d3c;
+        --fire-glow: 0 0 6px rgba(255, 140, 0, 0.55), 0 0 16px rgba(255, 70, 0, 0.28);
+        --ash: #5a5a5a;
+        --smoke: #4a4f4a;
       }
+      :root[data-theme="light"] {
+        --bg: #f4f1e8;
+        --fg: #1c1c1a;
+        --dim: #7a766c;
+        --line: #cfc8b8;
+        --hot: #000;
+        --ok: #2f7d32;
+        --bad: #b3261e;
+        --warn: #8a6d1f;
+        --xhs: #ff2442;
+        --fire: #8a8478;
+        --fire-glow: none;
+        --ash: #8a8478;
+        --smoke: #a3a89e;
+      }
+      @media (prefers-color-scheme: light) {
+        :root:not([data-theme]) {
+          --bg: #f4f1e8;
+          --fg: #1c1c1a;
+          --dim: #7a766c;
+          --line: #cfc8b8;
+          --hot: #000;
+          --ok: #2f7d32;
+          --bad: #b3261e;
+          --warn: #8a6d1f;
+          --xhs: #ff2442;
+          --fire: #8a8478;
+          --fire-glow: none;
+          --ash: #8a8478;
+          --smoke: #a3a89e;
+        }
+      }
+
       * { box-sizing: border-box; }
-      html, body {
-        margin: 0;
-        background: #000;
-        color: var(--fg);
+      html { color-scheme: dark; }
+      :root[data-theme="light"] { color-scheme: light; }
+      @media (prefers-color-scheme: light) {
+        :root:not([data-theme]) { color-scheme: light; }
       }
+      html, body { margin: 0; background: var(--bg); color: var(--fg); }
       body {
         font-family: "SFMono-Regular", Menlo, Consolas, "DejaVu Sans Mono",
           "Noto Sans Mono CJK SC", "Microsoft YaHei", monospace;
         font-size: 14px;
         line-height: 1.8;
-        padding: 48px 20px 80px;
+        padding: 28px 20px 72px;
+        transition: background-color 0.35s ease, color 0.35s ease;
       }
       main { max-width: 660px; margin: 0 auto; }
+
+      .topbar { display: flex; justify-content: flex-end; margin-bottom: 20px; }
+      #theme-toggle {
+        font: inherit;
+        display: inline-flex;
+        align-items: center;
+        gap: 8px;
+        background: none;
+        color: var(--dim);
+        border: 1px solid var(--line);
+        padding: 4px 12px;
+        cursor: pointer;
+        transition: color 0.2s, border-color 0.2s;
+      }
+      #theme-toggle:hover { color: var(--hot); border-color: var(--fg); }
+      #theme-toggle svg { width: 15px; height: 15px; display: block; }
+
       h1 {
-        font-size: 18px;
-        font-weight: normal;
-        letter-spacing: 0.25em;
-        margin: 0 0 4px;
-        color: var(--hot);
+        font-size: 18px; font-weight: normal; letter-spacing: 0.25em;
+        margin: 0 0 4px; color: var(--hot);
       }
       h2 {
-        font-size: 14px;
-        font-weight: normal;
-        letter-spacing: 0.2em;
-        color: var(--dim);
-        margin: 48px 0 12px;
+        font-size: 14px; font-weight: normal; letter-spacing: 0.2em;
+        color: var(--dim); margin: 44px 0 12px;
       }
-      .sub { color: var(--dim); margin: 0 0 40px; }
-      hr { border: 0; border-top: 1px solid var(--line); margin: 0; }
+      .sub { color: var(--dim); margin: 0 0 32px; }
+      code { color: var(--hot); }
+      a { color: var(--dim); }
 
-      .fw {
+      /* --- support banner --------------------------------------------- */
+      .banner {
+        border: 1px solid currentColor;
+        padding: 10px 14px;
+        margin-bottom: 8px;
         display: flex;
-        align-items: baseline;
-        gap: 12px;
-        flex-wrap: wrap;
-        padding: 14px 0;
-        border-bottom: 1px solid var(--line);
+        gap: 10px;
+        align-items: flex-start;
+      }
+      .banner.ok { color: var(--ok); }
+      .banner.bad { color: var(--bad); }
+      .banner .mark { flex: none; font-weight: bold; }
+      .banner .msg { color: var(--fg); }
+      .hint { color: var(--dim); font-size: 12px; margin: 0 0 4px; }
+
+      /* --- firmware list ---------------------------------------------- */
+      .fw {
+        display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap;
+        padding: 14px 0; border-bottom: 1px solid var(--line);
       }
       .fw:first-of-type { border-top: 1px solid var(--line); }
       .fw .ver { color: var(--hot); min-width: 5em; }
       .fw .meta { color: var(--dim); font-size: 12px; flex: 1; }
       .fw .act { margin-left: auto; }
-
       button.flash {
-        font: inherit;
-        background: none;
-        color: var(--fg);
-        border: 1px solid var(--fg);
-        padding: 2px 16px;
-        cursor: pointer;
+        font: inherit; background: none; color: var(--fg);
+        border: 1px solid var(--fg); padding: 2px 16px; cursor: pointer;
       }
-      button.flash:hover { background: var(--fg); color: #000; }
+      button.flash:hover:not(:disabled) { background: var(--fg); color: var(--bg); }
+      button.flash:disabled {
+        color: var(--dim); border-color: var(--line); cursor: not-allowed;
+      }
+      .status { color: var(--dim); padding: 14px 0; }
+
+      /* esp-web-tools' dialog is a self-contained light Material card, but it
+         never sets `color` on its host - so the page's text colour inherits
+         straight into that white surface and turns unreadable in dark mode.
+         Pin it to the Material on-surface ink in both themes. */
+      ewt-install-dialog {
+        color: #1d1b20;
+        --esp-tools-button-color: var(--xhs);
+        --esp-tools-button-text-color: #fff;
+        --esp-tools-button-border-radius: 0;
+      }
 
       ul { padding-left: 1.4em; margin: 0; }
       li { margin-bottom: 10px; }
-      code { color: var(--hot); }
-      .warn { color: #c9a227; }
-      .status { color: var(--dim); padding: 14px 0; }
-      esp-web-install-button[install-unsupported] .unsupported { color: #a33; }
-      footer {
-        margin-top: 56px;
-        color: var(--dim);
-        font-size: 12px;
-        border-top: 1px solid var(--line);
-        padding-top: 14px;
+      .warn { color: var(--warn); }
+
+      /* --- campfire ---------------------------------------------------- */
+      .fire-block { text-align: center; margin: 52px 0 8px; }
+      #fire {
+        display: inline-block;
+        text-align: left;
+        margin: 0;
+        font: inherit;
+        line-height: 1.25;
+        white-space: pre;
+        color: var(--fire);
+        text-shadow: var(--fire-glow);
+        transition: color 0.5s ease, text-shadow 0.5s ease;
       }
-      a { color: var(--dim); }
+      #fire .smoke { color: var(--smoke); animation: drift 5s ease-in-out infinite; }
+      #fire .ember { color: var(--ash); }
+      .fire-caption {
+        color: var(--dim); font-size: 12px; margin: 10px 0 0;
+        letter-spacing: 0.15em;
+      }
+      @keyframes drift {
+        0%, 100% { opacity: 0.25; }
+        50% { opacity: 0.7; }
+      }
+      @media (prefers-reduced-motion: reduce) {
+        #fire .smoke { animation: none; opacity: 0.45; }
+        body, #fire { transition: none; }
+      }
+
+      /* --- footer ------------------------------------------------------ */
+      footer {
+        margin-top: 44px; color: var(--dim); font-size: 12px;
+        border-top: 1px solid var(--line); padding-top: 16px; text-align: center;
+      }
+      .xhs {
+        display: inline-flex; align-items: center; gap: 8px;
+        color: var(--xhs); text-decoration: none;
+        opacity: 0.82; transition: opacity 0.2s;
+      }
+      .xhs:hover { opacity: 1; }
+      .xhs svg { width: 30px; height: 30px; display: block; }
+      .xhs .label { color: var(--dim); }
+      .credits { margin-top: 14px; }
     </style>
   </head>
   <body>
     <main>
+      <div class="topbar">
+        <button id="theme-toggle" type="button" aria-label="切换主题">
+          <span id="theme-icon"></span><span id="theme-label"></span>
+        </button>
+      </div>
+
       <h1>PAPERDARKROOM</h1>
       <p class="sub">网页刷机 · 把固件直接写进 USB 上的 M5PaperS3</p>
+
+      <h2>浏览器</h2>
+      <div id="support"></div>
+      <p class="hint">网页刷机依赖 WebSerial，需要桌面版 Chrome 或 Edge 113+。</p>
 
       <h2>固件</h2>
       <div id="list"><div class="status">正在读取固件列表…</div></div>
@@ -94,41 +224,173 @@
       <h2>说明</h2>
       <ul>
         <li>
-          只有 <code>Chrome</code> / <code>Edge</code>（桌面版，113 以上）支持
-          WebSerial。Safari、Firefox、以及手机浏览器都刷不了。
+          用 USB-C 数据线把 M5PaperS3 接到电脑，点「刷入」，在弹出的串口选择框里选中设备。
+          若列表里没有设备，换一根<strong>能传数据</strong>的线再试。
         </li>
-        <li>
-          用 USB-C 数据线把 M5PaperS3 接到电脑，点上面的「刷入」，在弹出的串口选择框里
-          选中设备即可。若列表里没有设备，换一根<strong>能传数据</strong>的线再试。
-        </li>
-        <li>
-          若初始化失败，按住机身 <code>BOOT</code> 键再点「刷入」，进入下载模式。
-        </li>
+        <li>若初始化失败，按住机身 <code>BOOT</code> 键再点「刷入」，进入下载模式。</li>
         <li class="warn">
-          首次刷入、或跨大版本升级时，请在弹窗里勾选 <code>Erase device</code> 再点
-          Next —— nvs 需要清空重新配对，不清会带着旧配置起不来。小版本更新可以不勾。
+          首次刷入、或跨大版本升级时，请在弹窗里勾选 <code>Erase device</code> 再点 Next
+          —— nvs 需要清空重新配对，不清会带着旧配置起不来。小版本更新可以不勾。
         </li>
         <li>
           <strong>SD 卡存档不受影响。</strong>Erase 擦的是板载 flash，游戏存档在 SD 卡上，
           怎么刷都还在。
         </li>
-        <li>
-          刷完拔线重新上电即可。整包镜像已含 bootloader 与分区表，写入地址固定 0x0。
-        </li>
+        <li>刷完拔线重新上电即可。整包镜像已含 bootloader 与分区表，写入地址固定 0x0。</li>
       </ul>
 
+      <div class="fire-block">
+        <pre id="fire" aria-hidden="true"></pre>
+        <p class="fire-caption" id="fire-caption"></p>
+      </div>
+
       <footer>
-        A Dark Room © Doublespeak Games（MPL-2.0）· 非官方社区移植 ·
-        <a href="https://github.com/kyya/PaperDarkRoom">github.com/kyya/PaperDarkRoom</a>
+        <a
+          class="xhs"
+          href="https://www.xiaohongshu.com/user/profile/5fb0a0ef000000000100730d"
+          target="_blank"
+          rel="noopener"
+        >
+          <span id="xhs-icon"></span>
+          <span class="label">小红书 · PaperDarkRoom</span>
+        </a>
+        <div class="credits">
+          A Dark Room © Doublespeak Games（MPL-2.0）· 非官方社区移植 ·
+          <a href="https://github.com/kyya/PaperDarkRoom">github.com/kyya/PaperDarkRoom</a>
+        </div>
       </footer>
     </main>
 
-    <script type="module" src="/vendor/esp-web-tools/install-button.js"></script>
-    <script>
-      const listEl = document.getElementById("list");
+    <script type="module">
+      import { sun, moon, xiaohongshu } from "/vendor/icons/icons.js";
 
+      /* ---------------- theme ---------------- */
+      const root = document.documentElement;
+      const media = window.matchMedia("(prefers-color-scheme: light)");
+      const iconEl = document.getElementById("theme-icon");
+      const labelEl = document.getElementById("theme-label");
+      const toggle = document.getElementById("theme-toggle");
+
+      const effective = () =>
+        root.dataset.theme || (media.matches ? "light" : "dark");
+
+      function paintToggle() {
+        const dark = effective() === "dark";
+        // Show what you'd switch *to*.
+        iconEl.innerHTML = dark ? sun : moon;
+        labelEl.textContent = dark ? "亮" : "暗";
+        toggle.setAttribute("aria-label", dark ? "切换到亮色主题" : "切换到暗色主题");
+      }
+
+      toggle.addEventListener("click", () => {
+        const next = effective() === "dark" ? "light" : "dark";
+        root.dataset.theme = next;
+        try { localStorage.setItem("pdr-theme", next); } catch (e) {}
+        paintToggle();
+        paintFire();
+      });
+
+      // Follow the OS only while the user hasn't picked explicitly.
+      media.addEventListener("change", () => {
+        if (!root.dataset.theme) { paintToggle(); paintFire(); }
+      });
+
+      document.getElementById("xhs-icon").innerHTML = xiaohongshu;
+
+      /* ---------------- campfire ---------------- */
+      // A Dark Room is pure text, so the fire is too. Frames are 4 lines of
+      // monospace; only the flame rows change, the logs stay put.
+      const LOGS = " \\__#__/";
+      const BURNING = [
+        "    (\n   ) )\n  ( ( (\n" + LOGS,
+        "   )\n  ( (\n  ) ) )\n" + LOGS,
+        "    )\n   ( )\n  ) ( (\n" + LOGS,
+        "   (\n   ) (\n  ( ) )\n" + LOGS,
+      ];
+      const DEAD =
+        '<span class="smoke">    ~\n   \'</span>\n<span class="ember">  . .\n \\__=__/</span>';
+
+      const fireEl = document.getElementById("fire");
+      const captionEl = document.getElementById("fire-caption");
+      const still = window.matchMedia("(prefers-reduced-motion: reduce)");
+      let frame = 0;
+      let timer = null;
+
+      function paintFire() {
+        clearInterval(timer);
+        timer = null;
+        if (effective() === "light") {
+          // Daylight: the fire is out. Charred logs, ash, a thread of smoke.
+          fireEl.innerHTML = DEAD;
+          captionEl.textContent = "火堆熄灭了";
+          return;
+        }
+        captionEl.textContent = "火堆熊熊燃烧";
+        if (still.matches) {
+          fireEl.textContent = BURNING[0];
+          return;
+        }
+        fireEl.textContent = BURNING[frame % BURNING.length];
+        timer = setInterval(() => {
+          frame++;
+          fireEl.textContent = BURNING[frame % BURNING.length];
+        }, 260);
+      }
+      still.addEventListener("change", paintFire);
+
+      paintToggle();
+      paintFire();
+
+      /* ---------------- WebSerial support probe ---------------- */
+      const supportEl = document.getElementById("support");
+      const hasSerial = "serial" in navigator;
+      const secure = window.isSecureContext;
+      const supported = hasSerial && secure;
+
+      function diagnose() {
+        if (supported) return null;
+        const ua = navigator.userAgent;
+        const uad = navigator.userAgentData;
+        const mobile =
+          uad && typeof uad.mobile === "boolean"
+            ? uad.mobile
+            : /Android|iPhone|iPad|iPod|IEMobile|Opera Mini|Mobile Safari/i.test(ua);
+        if (mobile) {
+          return "手机 / 平板浏览器不支持网页刷机，请换用桌面版 Chrome 或 Edge。";
+        }
+        if (!secure) {
+          return "当前页面不是安全上下文（HTTPS），浏览器已禁用 WebSerial。";
+        }
+        if (/Firefox\//.test(ua)) {
+          return "Firefox 不支持 WebSerial，请改用 Chrome 或 Edge（113+）。";
+        }
+        // Safari's UA also contains "Safari", so check it last and exclude the
+        // Chromium family that borrows the token.
+        if (/Safari\//.test(ua) && !/Chrome|Chromium|Edg\//.test(ua)) {
+          return "Safari 不支持 WebSerial，请改用 Chrome 或 Edge（113+）。";
+        }
+        return "此浏览器不支持 WebSerial，请改用 Chrome 或 Edge（113+）。";
+      }
+
+      const problem = diagnose();
+      const banner = document.createElement("div");
+      banner.className = "banner " + (supported ? "ok" : "bad");
+      const mark = document.createElement("span");
+      mark.className = "mark";
+      mark.textContent = supported ? "✓" : "✕";
+      const msg = document.createElement("span");
+      msg.className = "msg";
+      msg.textContent = supported ? "当前浏览器支持网页刷机" : problem;
+      banner.append(mark, msg);
+      supportEl.replaceChildren(banner);
+
+      /* ---------------- firmware list ---------------- */
+      const listEl = document.getElementById("list");
       const fmtSize = (n) => (n / 1024 / 1024).toFixed(2) + " MB";
-      const fmtDate = (iso) => iso.slice(0, 10);
+
+      if (supported) {
+        import("/vendor/esp-web-tools/install-button.js");
+      }
 
       fetch("/api/firmwares")
         .then((r) => {
@@ -152,20 +414,30 @@
               const meta = document.createElement("span");
               meta.className = "meta";
               meta.textContent =
-                fmtSize(fw.size) + " · " + fmtDate(fw.uploaded) + (i === 0 ? " · 最新" : "");
+                fmtSize(fw.size) +
+                " · " +
+                fw.uploaded.slice(0, 10) +
+                (i === 0 ? " · 最新" : "");
 
               const act = document.createElement("span");
               act.className = "act";
-              // `-merged.bin` -> `-merged`, matching the Worker's manifest route.
-              const stem = fw.name.replace(/\.bin$/, "");
-              act.innerHTML =
-                '<esp-web-install-button manifest="/manifest/' +
-                encodeURIComponent(stem) +
-                '.json">' +
-                '<button class="flash" slot="activate">刷入</button>' +
-                '<span slot="unsupported" class="unsupported">浏览器不支持 WebSerial</span>' +
-                '<span slot="not-allowed" class="unsupported">需要 HTTPS 页面</span>' +
-                "</esp-web-install-button>";
+              if (supported) {
+                // `-merged.bin` -> `-merged`, matching the Worker's manifest route.
+                const stem = fw.name.replace(/\.bin$/, "");
+                act.innerHTML =
+                  '<esp-web-install-button manifest="/manifest/' +
+                  encodeURIComponent(stem) +
+                  '.json"><button class="flash" slot="activate">刷入</button>' +
+                  "</esp-web-install-button>";
+              } else {
+                const btn = document.createElement("button");
+                btn.className = "flash";
+                btn.type = "button";
+                btn.disabled = true;
+                btn.textContent = "刷入";
+                btn.title = problem;
+                act.append(btn);
+              }
 
               row.append(ver, meta, act);
               return row;

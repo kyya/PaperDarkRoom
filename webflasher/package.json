@@ -5,11 +5,13 @@
   "description": "WebSerial firmware flasher for PaperDarkRoom (Cloudflare Worker + R2)",
   "type": "module",
   "scripts": {
-    "vendor": "node scripts/vendor-esp-web-tools.mjs",
+    "vendor": "node scripts/vendor-esp-web-tools.mjs && node scripts/vendor-icons.mjs",
     "dev": "wrangler dev",
     "deploy": "npm run vendor && wrangler deploy"
   },
   "devDependencies": {
-    "esp-web-tools": "^10.4.0"
+    "esp-web-tools": "^10.4.0",
+    "lucide-static": "^1.27.0",
+    "simple-icons": "^16.27.1"
   }
 }
