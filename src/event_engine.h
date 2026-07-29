@@ -40,7 +40,11 @@ void reset();
 // Drive once per awake second. nowMs is the millis() clock (reserved for future
 // panel-blink timing); epochNow is the RTC epoch used for scheduling and echo
 // redemption. Safe to call every loop pass — self-gated on epoch seconds.
-void tick(uint32_t nowMs, uint32_t epochNow);
+// trekActive mirrors upstream's Engine.activeModule == Room/Outside gate: while
+// an expedition is out on the World map, the "home event" pool is treated as
+// having no available event (the same 0.5x retry path as a genuinely empty
+// pool), so no home event triggers mid-trek.
+void tick(uint32_t nowMs, uint32_t epochNow, bool trekActive);
 
 // ---- commands ----
 // Resolve the current scene's button `localBtn` (0..btnCount-1): pays cost,

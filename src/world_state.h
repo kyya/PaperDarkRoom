@@ -252,6 +252,10 @@ public:
     // share the trek stream so a setpiece plays deterministically for a trek seed.
     int     spRand1000();
 
+    // Expedition-active accessor (world_page / event scheduler gating): true
+    // while the wanderer is out on the World map (trek.bin loaded/active).
+    bool    trekActive() const { return ex.active; }
+
     // combat read helpers (fight_modal renderer)
     bool    fightActive() const { return cx.active; }
     bool    fightWon() const { return cx.won; }
