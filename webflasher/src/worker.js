@@ -14,8 +14,13 @@
  */
 
 const MERGED_SUFFIX = "-merged.bin";
-// adarkroom-0.12.0-merged.bin -> "0.12.0"
-const VERSION_RE = /-(\d+(?:\.\d+)*(?:[-+][0-9A-Za-z.-]+)?)-merged\.bin$/;
+// adarkroom-0.12.0-merged.bin              -> "0.12.0"
+// adarkroom-1.2.3-rc.1+build.5-merged.bin  -> "1.2.3-rc.1+build.5"
+// Prerelease (`-rc.1`) and build metadata (`+build.5`) are independent optional
+// segments, the same shape splitSemver() takes apart below. Treating the suffix
+// as one `[-+]...` blob rejected a version carrying both.
+const VERSION_RE =
+  /-(\d+(?:\.\d+)*(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?)-merged\.bin$/;
 
 // A firmware name carries its version and the bytes behind it never change, so
 // the image is safe to keep forever. The listing is the one thing that has to
@@ -35,7 +40,9 @@ const json = (body, cacheControl) =>
     },
   });
 
-const parseVersion = (key) => {
+// Exported for scripts/test-version.mjs; the Worker itself uses only the
+// default export.
+export const parseVersion = (key) => {
   const m = VERSION_RE.exec(key);
   return m ? m[1] : null;
 };
@@ -55,7 +62,7 @@ const splitSemver = (v) => {
  * missing one reads as empty, and the prerelease sorts first and gets labelled
  * "最新". So prerelease has to be a separate step, not another segment.
  */
-const compareVersionDesc = (a, b) => {
+export const compareVersionDesc = (a, b) => {
   const va = splitSemver(a);
   const vb = splitSemver(b);
 
