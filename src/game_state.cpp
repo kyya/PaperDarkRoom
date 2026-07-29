@@ -121,8 +121,30 @@ int GameState::cooldownLeft(int action, uint32_t now) const {
 // ===================== settle (offline / awake economy) ===================
 
 uint32_t GameState::settle(uint32_t nowEpoch, bool offline) {
+    // epochNow's mktime() failed to produce a valid reading (invalid RTC) —
+    // bail before touching any anchor rather than latching lastSettleTs to 0,
+    // which would masquerade as "never settled" and re-arm the clock-rewind
+    // path below on the next call with a real reading.
+    if (nowEpoch == 0) return 0;
     if (lastSettleTs == 0) { lastSettleTs = nowEpoch; return 0; }
-    if (nowEpoch <= lastSettleTs) return 0;
+    if (nowEpoch < lastSettleTs) {
+        // Clock rewind: the BM8563 RTC is powered by the main battery, and a
+        // full battery drain resets it to ~2000-01-01. On the next boot,
+        // nowEpoch (~2000) is permanently behind every persisted future
+        // epoch (lastSettleTs, nextEventAt, echoDueEpoch), which without this
+        // re-anchor makes the `nowEpoch <= lastSettleTs` guard below early-out
+        // forever — the builder state machine / unlockForest / income /
+        // population all freeze, and the player is stuck in the fire-lighting
+        // room until the RTC happens to be recalibrated (e.g. via BLE time
+        // sync). Re-anchor the whole persisted timeline onto the new clock
+        // instead of trying to preserve elapsed-time bookkeeping across a
+        // discontinuity that upstream never has to model.
+        lastSettleTs = nowEpoch;
+        nextEventAt = 0;              // reroll on next tick (existing 0 = unscheduled path)
+        if (echoRes != ECHO_NONE) echoDueEpoch = nowEpoch;  // redeem on next check
+        return 0;
+    }
+    if (nowEpoch == lastSettleTs) return 0;
     uint32_t elapsed = nowEpoch - lastSettleTs;
     uint32_t steps = elapsed / INCOME_TICK_S;
     const uint32_t maxSteps = SETTLE_MAX_S / INCOME_TICK_S;   // 8640 (24h)
