@@ -12,6 +12,7 @@
   "devDependencies": {
     "esp-web-tools": "^10.4.0",
     "lucide-static": "^1.27.0",
-    "simple-icons": "^16.27.1"
+    "simple-icons": "^16.27.1",
+    "wrangler": "^4.114.0"
   }
 }
