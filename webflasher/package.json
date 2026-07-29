@@ -1,0 +1,15 @@
+{
+  "name": "paperdarkroom-flasher",
+  "version": "0.1.0",
+  "private": true,
+  "description": "WebSerial firmware flasher for PaperDarkRoom (Cloudflare Worker + R2)",
+  "type": "module",
+  "scripts": {
+    "vendor": "node scripts/vendor-esp-web-tools.mjs",
+    "dev": "wrangler dev",
+    "deploy": "npm run vendor && wrangler deploy"
+  },
+  "devDependencies": {
+    "esp-web-tools": "^10.4.0"
+  }
+}

@@ -1,0 +1,181 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>PaperDarkRoom · 网页刷机</title>
+    <meta name="description" content="在浏览器里给 M5PaperS3 刷入 PaperDarkRoom 固件" />
+    <style>
+      :root {
+        color-scheme: dark;
+        --fg: #d0d0d0;
+        --dim: #6b6b6b;
+        --line: #333;
+        --hot: #fff;
+      }
+      * { box-sizing: border-box; }
+      html, body {
+        margin: 0;
+        background: #000;
+        color: var(--fg);
+      }
+      body {
+        font-family: "SFMono-Regular", Menlo, Consolas, "DejaVu Sans Mono",
+          "Noto Sans Mono CJK SC", "Microsoft YaHei", monospace;
+        font-size: 14px;
+        line-height: 1.8;
+        padding: 48px 20px 80px;
+      }
+      main { max-width: 660px; margin: 0 auto; }
+      h1 {
+        font-size: 18px;
+        font-weight: normal;
+        letter-spacing: 0.25em;
+        margin: 0 0 4px;
+        color: var(--hot);
+      }
+      h2 {
+        font-size: 14px;
+        font-weight: normal;
+        letter-spacing: 0.2em;
+        color: var(--dim);
+        margin: 48px 0 12px;
+      }
+      .sub { color: var(--dim); margin: 0 0 40px; }
+      hr { border: 0; border-top: 1px solid var(--line); margin: 0; }
+
+      .fw {
+        display: flex;
+        align-items: baseline;
+        gap: 12px;
+        flex-wrap: wrap;
+        padding: 14px 0;
+        border-bottom: 1px solid var(--line);
+      }
+      .fw:first-of-type { border-top: 1px solid var(--line); }
+      .fw .ver { color: var(--hot); min-width: 5em; }
+      .fw .meta { color: var(--dim); font-size: 12px; flex: 1; }
+      .fw .act { margin-left: auto; }
+
+      button.flash {
+        font: inherit;
+        background: none;
+        color: var(--fg);
+        border: 1px solid var(--fg);
+        padding: 2px 16px;
+        cursor: pointer;
+      }
+      button.flash:hover { background: var(--fg); color: #000; }
+
+      ul { padding-left: 1.4em; margin: 0; }
+      li { margin-bottom: 10px; }
+      code { color: var(--hot); }
+      .warn { color: #c9a227; }
+      .status { color: var(--dim); padding: 14px 0; }
+      esp-web-install-button[install-unsupported] .unsupported { color: #a33; }
+      footer {
+        margin-top: 56px;
+        color: var(--dim);
+        font-size: 12px;
+        border-top: 1px solid var(--line);
+        padding-top: 14px;
+      }
+      a { color: var(--dim); }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>PAPERDARKROOM</h1>
+      <p class="sub">网页刷机 · 把固件直接写进 USB 上的 M5PaperS3</p>
+
+      <h2>固件</h2>
+      <div id="list"><div class="status">正在读取固件列表…</div></div>
+
+      <h2>说明</h2>
+      <ul>
+        <li>
+          只有 <code>Chrome</code> / <code>Edge</code>（桌面版，113 以上）支持
+          WebSerial。Safari、Firefox、以及手机浏览器都刷不了。
+        </li>
+        <li>
+          用 USB-C 数据线把 M5PaperS3 接到电脑，点上面的「刷入」，在弹出的串口选择框里
+          选中设备即可。若列表里没有设备，换一根<strong>能传数据</strong>的线再试。
+        </li>
+        <li>
+          若初始化失败，按住机身 <code>BOOT</code> 键再点「刷入」，进入下载模式。
+        </li>
+        <li class="warn">
+          首次刷入、或跨大版本升级时，请在弹窗里勾选 <code>Erase device</code> 再点
+          Next —— nvs 需要清空重新配对，不清会带着旧配置起不来。小版本更新可以不勾。
+        </li>
+        <li>
+          <strong>SD 卡存档不受影响。</strong>Erase 擦的是板载 flash，游戏存档在 SD 卡上，
+          怎么刷都还在。
+        </li>
+        <li>
+          刷完拔线重新上电即可。整包镜像已含 bootloader 与分区表，写入地址固定 0x0。
+        </li>
+      </ul>
+
+      <footer>
+        A Dark Room © Doublespeak Games（MPL-2.0）· 非官方社区移植 ·
+        <a href="https://github.com/kyya/PaperDarkRoom">github.com/kyya/PaperDarkRoom</a>
+      </footer>
+    </main>
+
+    <script type="module" src="/vendor/esp-web-tools/install-button.js"></script>
+    <script>
+      const listEl = document.getElementById("list");
+
+      const fmtSize = (n) => (n / 1024 / 1024).toFixed(2) + " MB";
+      const fmtDate = (iso) => iso.slice(0, 10);
+
+      fetch("/api/firmwares")
+        .then((r) => {
+          if (!r.ok) throw new Error("HTTP " + r.status);
+          return r.json();
+        })
+        .then((firmwares) => {
+          if (!firmwares.length) {
+            listEl.innerHTML = '<div class="status">暂无可刷入的固件。</div>';
+            return;
+          }
+          listEl.replaceChildren(
+            ...firmwares.map((fw, i) => {
+              const row = document.createElement("div");
+              row.className = "fw";
+
+              const ver = document.createElement("span");
+              ver.className = "ver";
+              ver.textContent = "v" + fw.version;
+
+              const meta = document.createElement("span");
+              meta.className = "meta";
+              meta.textContent =
+                fmtSize(fw.size) + " · " + fmtDate(fw.uploaded) + (i === 0 ? " · 最新" : "");
+
+              const act = document.createElement("span");
+              act.className = "act";
+              // `-merged.bin` -> `-merged`, matching the Worker's manifest route.
+              const stem = fw.name.replace(/\.bin$/, "");
+              act.innerHTML =
+                '<esp-web-install-button manifest="/manifest/' +
+                encodeURIComponent(stem) +
+                '.json">' +
+                '<button class="flash" slot="activate">刷入</button>' +
+                '<span slot="unsupported" class="unsupported">浏览器不支持 WebSerial</span>' +
+                '<span slot="not-allowed" class="unsupported">需要 HTTPS 页面</span>' +
+                "</esp-web-install-button>";
+
+              row.append(ver, meta, act);
+              return row;
+            }),
+          );
+        })
+        .catch((err) => {
+          listEl.innerHTML =
+            '<div class="status">固件列表读取失败：' + err.message + "</div>";
+        });
+    </script>
+  </body>
+</html>
