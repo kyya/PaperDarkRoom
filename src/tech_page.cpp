@@ -2,7 +2,7 @@
 // License, v. 2.0. If a copy of the MPL was not distributed with this
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 //
-// Tech-tree (升级树) page — see tech_page.h for the why and the layout budget.
+// Tech-tree (科技树) page — see tech_page.h for the why and the layout budget.
 // Every item name comes from tr(CRAFT[id].key) and every price from that same
 // CRAFT row, so only the official Simplified-Chinese translation reaches the
 // sparse 12px CJK face — the §8.3 glyph-closure iron law. The handful of
@@ -30,7 +30,7 @@ using namespace adr;
 
 namespace tech_page {
 // Visibility latch — the page is drawable (and thus a reachable ring slot) only
-// between open() and close(). Cleared on boot; the Room 升级树 cell sets it.
+// between open() and close(). Cleared on boot; the Room 科技树 cell sets it.
 static bool s_active = false;
 void open()  { s_active = true;  }
 void close() { s_active = false; }
@@ -220,7 +220,7 @@ pages::Rect TechPage::pressRect(const pages::Region& rg, int x, int y) const {
 }
 
 // Drawable only while open: returning false makes showPageOrNext skip this ring
-// slot, so the page is invisible + untappable unless the Room 升级树 cell opened
+// slot, so the page is invisible + untappable unless the Room 科技树 cell opened
 // it — the same skip mechanism AssignPage/PathPage use. Nothing else gates it:
 // the ladders are the same from the first fire onward, which is the whole point
 // of the page (available() holds that one predicate for draw() and the status

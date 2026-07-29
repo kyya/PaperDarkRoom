@@ -10,7 +10,7 @@
 // rather than compress). See room_page.h for the region model.
 #include "room_page.h"
 #include "action_band.h"        // shared band renderer (v0.10.1, room+outside)
-#include "tech_page.h"          // 升级树 cell opens the tech-tree sub-page
+#include "tech_page.h"          // 科技树 cell opens the tech-tree sub-page
 #include "cjk_text.h"
 #include "pomo_page.h"          // PAD (shared layout authority)
 #include "page_tabs.h"          // shared two-tab header (生火间 │ 小型村落)
@@ -301,7 +301,7 @@ bool craftCostLine(uint8_t id, char* out, size_t cap) {
 
 // The cost sub-line for any action code, or false (empty) for a free action —
 // gather wood / check traps cost nothing (their yield is a random drop, not a
-// fixed price) and "more" / 升级树 are UI chrome and pure navigation, so none of
+// fixed price) and "more" / 科技树 are UI chrome and pure navigation, so none of
 // the four get a subtitle. The two fire verbs have a fixed one-resource wood
 // cost (room.js constants); every craftable delegates to craftCostLine above.
 bool costLineFor(uint8_t code, char* out, size_t cap) {
@@ -320,11 +320,11 @@ bool costLineFor(uint8_t code, char* out, size_t cap) {
     }
 }
 
-// Ordered action list for the current game state: fire verb, the 升级树 entry,
+// Ordered action list for the current game state: fire verb, the 科技树 entry,
 // then every offerable craftable. Returns the count. (gather wood / check traps
 // are野外 actions — upstream outside.js, not room.js — so they live on the
 // Outside page; trading-post buying moved to the Trade page in v0.3.3.)
-// 升级树 sits second, right beside the fire verb, so it lands in the FIRST batch
+// 科技树 sits second, right beside the fire verb, so it lands in the FIRST batch
 // no matter how long the craftable list grows — a growth-line explainer the
 // player has to page to would miss the very players who don't know the growth
 // line exists.
@@ -351,16 +351,16 @@ void cooldownFor(uint8_t code, int& channel, int& total) {
 
 // Button label, all via tr(). "more" is UI chrome with no upstream key, so it
 // uses the two closure-present glyphs 更/多 plus an ASCII page indicator
-// pointing at the batch a press will reveal; 升级树 is a firmware-only page name
-// with no upstream key either and reuses closure-present glyphs the same way
-// (see tech_page.h for why it is not 科技树).
+// pointing at the batch a press will reveal; 科技树 is a firmware-only page name
+// with no upstream key either — see tech_page.h for the FIRMWARE_LITERAL_CHARS
+// registration that put 科/技 in the closure.
 void labelFor(uint8_t code, int page, int numPages, char* out, size_t cap) {
     switch (code) {
         case A_LIGHT:  snprintf(out, cap, "%s", tr("light fire"));  break;
         case A_STOKE:  snprintf(out, cap, "%s", tr("stoke fire"));  break;
         case A_GATHER: snprintf(out, cap, "%s", tr("gather wood")); break;
         case A_TRAPS:  snprintf(out, cap, "%s", tr("check traps")); break;
-        case A_TECH:   snprintf(out, cap, "升级树");                 break;
+        case A_TECH:   snprintf(out, cap, "科技树");                 break;
         case A_MORE:
             snprintf(out, cap, "更多 (%d/%d)",
                      (page + 1 < numPages ? page + 2 : 1), numPages);

@@ -6,8 +6,10 @@
 # gen_cjk_font.py — sparse 12px bitmap CJK font for A Dark Room firmware.
 #
 # The glyph CLOSURE is extracted from the zh values in src/
-# strings_zh.h (all 786 official translations) plus ASCII 0x20..0x7E and a
-# small common-punctuation set. Every glyph is rasterized from the OFL
+# strings_zh.h (all 786 official translations) plus ASCII 0x20..0x7E, a
+# small common-punctuation set, and FIRMWARE_LITERAL_CHARS below (an explicit
+# registry for firmware-only UI literals that need a glyph outside that
+# table). Every glyph is rasterized from the OFL
 # Fusion Pixel 12px face (fonts/) with the SAME recipe as tools/gen_fw_fonts.py
 # (fontmode="1", '0'-bottom baseline — imported from that module below), so
 # the CJK glyphs share the ASCII baseline. ASCII is baked in too, so the whole
@@ -45,6 +47,15 @@ PX = 12
 # (CJK full-width marks the translations use, plus a couple of ASCII helpers).
 EXTRA = "，。、；：？！“”‘’（）《》〈〉【】—…·・～％　"
 
+# Firmware-only UI literals that need a glyph the strings_zh.h closure doesn't
+# already cover. Every firmware literal to date (水容器/携带/拳头/分工 etc.) has
+# been spelled entirely out of characters the closure already contains, so this
+# set has stayed empty until now. 科技 (the 科技树 page name, room_page.cpp) is
+# its first entry — 科 and 技 appear nowhere in the official translation table.
+# Register new out-of-closure literals here rather than hand-patching the
+# generated table; the closure stays a pure function of strings_zh.h + this set.
+FIRMWARE_LITERAL_CHARS = "科技"
+
 
 def _unescape(lit: str) -> str:
     out, i = [], 0
@@ -81,6 +92,8 @@ def glyph_closure(strings_h: str) -> list[int]:
     for cp in range(0x20, 0x7F):         # bake in printable ASCII
         cps.add(cp)
     for ch in EXTRA:
+        cps.add(ord(ch))
+    for ch in FIRMWARE_LITERAL_CHARS:
         cps.add(ord(ch))
     return sorted(cps)
 

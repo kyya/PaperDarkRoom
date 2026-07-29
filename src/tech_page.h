@@ -2,8 +2,8 @@
 // License, v. 2.0. If a copy of the MPL was not distributed with this
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 //
-// Tech-tree (升级树) page — a read-only sub-page of the Room, reached from its
-// 升级树 action cell. Player feedback: nobody could tell the game HAS a growth
+// Tech-tree (科技树) page — a read-only sub-page of the Room, reached from its
+// 科技树 action cell. Player feedback: nobody could tell the game HAS a growth
 // line ("骨枪 looked like the ceiling", "never knew a 水壶 was craftable"),
 // because the Room only ever offers the craftables you can nearly afford
 // (room.js craftUnlocked). This page deliberately breaks that reveal-as-you-go
@@ -28,11 +28,12 @@
 // 836..916, clear of the 928 status bar. 4 headings + 14 rows fit one screen, so
 // unlike the Room grid this page needs no 更多 pagination.
 //
-// Naming (§8.3 glyph closure): the page is 升级树, not 科技树 — 科 and 技 are
-// absent from the sparse 12px face (its closure is scanned out of strings_zh.h,
-// which is generated from the upstream translation table and so cannot grow a
-// firmware-only word). 升/级 come from 升级引擎, 树 from 树林 — all already in
-// the closure, the same way the Outside page's 分工 literal is.
+// Naming (§8.3 glyph closure): the page is 科技树 — 科 and 技 are absent from
+// strings_zh.h (the upstream translation table the closure is normally scanned
+// out of), but gen_cjk_font.py now carries an explicit FIRMWARE_LITERAL_CHARS
+// registry for firmware-only UI literals that need a glyph outside that table.
+// 科技 is its first entry, so both codepoints are baked into cjk_font12.h same
+// as every closure glyph — no runtime fallback, no tofu risk.
 #pragma once
 #include "page.h"
 
