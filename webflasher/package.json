@@ -2,7 +2,7 @@
   "name": "paperdarkroom-flasher",
   "version": "0.1.0",
   "private": true,
-  "description": "WebSerial firmware flasher for PaperDarkRoom (Cloudflare Worker + R2)",
+  "description": "WebSerial firmware flasher for PaperDarkRoom (Cloudflare Worker + GitHub Releases)",
   "type": "module",
   "scripts": {
     "vendor": "node scripts/vendor-esp-web-tools.mjs && node scripts/vendor-icons.mjs",

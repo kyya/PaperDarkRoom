@@ -10,6 +10,5 @@ compatibility_date = "2026-07-01"
 [assets]
 directory = "./public"
 
-[[r2_buckets]]
-binding = "FW"
-bucket_name = "paperdarkroom-fw"
+# No bindings: firmware comes from the repo's GitHub Releases over plain fetch.
+# `wrangler secret put GITHUB_TOKEN` is the one optional extra — see worker.js.
