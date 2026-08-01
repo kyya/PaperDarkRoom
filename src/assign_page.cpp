@@ -10,6 +10,7 @@
 // tr("go home") value, not a bare literal. Layout obeys §9 (36px verb labels /
 // 24px body, >=80px long-press bands).
 #include "assign_page.h"
+#include "action_band.h"        // shared band frame + title baseline + 返回 band
 #include "cjk_text.h"
 #include "pomo_page.h"          // PAD (shared layout authority)
 #include "page_tabs.h"          // shared tab header (生火间 │ 村落 │ 贸易站)
@@ -99,20 +100,11 @@ void drawInfoRow(m5gfx::M5Canvas& c) {
     cjk::drawText(c, x + GLYPH, INFO_Y, gath, SCALE);
 }
 
-// 1px dashed rect, 4px-on/4px-off on all four edges — the disabled-button frame
-// (matches the Outside/Room drawDashedRect exactly).
-void drawDashedRect(m5gfx::M5Canvas& c, int x0, int y0, int w, int h) {
-    int x1 = x0 + w - 1, y1 = y0 + h - 1;
-    for (int x = x0; x <= x1; x += 8) {
-        int len = (x1 - x + 1 < 4) ? (x1 - x + 1) : 4;
-        c.drawFastHLine(x, y0, len, TFT_BLACK);
-        c.drawFastHLine(x, y1, len, TFT_BLACK);
-    }
-    for (int y = y0; y <= y1; y += 8) {
-        int len = (y1 - y + 1 < 4) ? (y1 - y + 1) : 4;
-        c.drawFastVLine(x0, y, len, TFT_BLACK);
-        c.drawFastVLine(x1, y, len, TFT_BLACK);
-    }
+// The rect of the band at `top` — one description of where a band is, shared by
+// every draw call here and by pressRect, so the drawn frame and the
+// invert-flash rect cannot drift apart.
+pages::Rect bandRect(int top) {
+    return pages::Rect{ BAND_X, top, BAND_W, BAND_H };
 }
 
 // A job band is disabled when NEITHER stepper half can act: no worker in the job
@@ -122,23 +114,22 @@ bool jobBandDisabled(uint8_t job) {
     return g_game.workers[job] == 0 && g_game.numGatherers() == 0;
 }
 
-// One full-width job band at `top`: enabled = 2px frame (two concentric rects);
-// disabled = a single 1px dashed outer frame. Left: the 36px job `name` at
-// LABEL_X, and the 24px "xN" count right-aligned just left of the stepper divider
-// (LABEL_GAP px clear), sharing the name's bottom baseline. Right: the ▲/▼
-// stepper — a vertical rule, a horizontal split rule, an upper ▲ (increment) over
-// a lower ▼ (decrement), each a fillTriangle. The ▲/▼ are hit by the press
-// y-half, not the exact triangle pixels (see onLocalAction).
+// One full-width job band at `top`. The FRAME (solid double ring / 1px dashed)
+// comes from the shared action_band, and so does the 36px name's baseline — but
+// the CONTENT is this page's own: a stepper row lays its name and count SIDE BY
+// SIDE on one baseline rather than stacking a subtitle under a title, so it is a
+// different layout, not a drifted copy of the standard band, and stays here.
+// Left: the 36px job `name` at LABEL_X, and the 24px "xN" count right-aligned
+// just left of the stepper divider (LABEL_GAP px clear), sharing the name's
+// bottom baseline. Right: the ▲/▼ stepper — a vertical rule, a horizontal split
+// rule, an upper ▲ (increment) over a lower ▼ (decrement), each a fillTriangle.
+// The ▲/▼ are hit by the press y-half, not the exact triangle pixels (see
+// onLocalAction).
 void drawJobBand(m5gfx::M5Canvas& c, int top, const char* name, const char* sub,
                  bool disabled) {
-    if (disabled) {
-        drawDashedRect(c, BAND_X, top, BAND_W, BAND_H);
-    } else {
-        c.drawRect(BAND_X, top, BAND_W, BAND_H, TFT_BLACK);
-        c.drawRect(BAND_X + 1, top + 1, BAND_W - 2, BAND_H - 2, TFT_BLACK);
-    }
+    action_band::drawFrame(c, bandRect(top), !disabled);
 
-    int ny = top + (BAND_H - BTN_GLYPH) / 2 - 4;        // 36px name box top
+    int ny = action_band::titleBoxY(top, BAND_H);       // 36px name box top
     cjk::drawText(c, BAND_X + LABEL_X, ny, name, BTN_SCALE);
     int sw = cjk::textWidth(sub, SCALE);
     cjk::drawText(c, BAND_X + STEP_DIV_X - LABEL_GAP - sw, ny + BTN_GLYPH - GLYPH,
@@ -160,15 +151,12 @@ void drawJobBand(m5gfx::M5Canvas& c, int top, const char* name, const char* sub,
                    cx + TRI_HALF_W, cyDn - TRI_HALF_H, TFT_BLACK);
 }
 
-// The trailing 返回 band: full-width frame, lone 36px label centered. tr("go
-// home") == "返回" (real translation, not a bare literal).
+// The trailing 返回 band: the plain shared band, lone 36px label centered.
+// tr("go home") == "返回" (real translation, not a bare literal). It carries no
+// subtitle, so action_band centres the title — landing it on exactly the y
+// action_band::titleBoxY gives the job bands' names above it.
 void drawReturnBand(m5gfx::M5Canvas& c, int top) {
-    c.drawRect(BAND_X, top, BAND_W, BAND_H, TFT_BLACK);
-    c.drawRect(BAND_X + 1, top + 1, BAND_W - 2, BAND_H - 2, TFT_BLACK);
-    const char* label = tr("go home");                  // "返回"
-    int lw = cjk::textWidth(label, BTN_SCALE);
-    cjk::drawText(c, BAND_X + (BAND_W - lw) / 2, top + (BAND_H - BTN_GLYPH) / 2 - 4,
-                  label, BTN_SCALE);
+    action_band::draw(c, bandRect(top), tr("go home"), nullptr, true, 0, 0);
 }
 
 // Content signature — a hash of every live value that alters a painted number
@@ -214,7 +202,7 @@ const pages::Region* AssignPage::regions(int* n) const {
 pages::Rect AssignPage::pressRect(const pages::Region& rg, int x, int y) const {
     (void)x;
     if ((int)rg.param == m_jobCount) {                     // 返回 band
-        return pages::Rect{ BAND_X, rg.y0, BAND_W, BAND_H };  // drawReturnBand's own frame
+        return bandRect(rg.y0);                            // drawReturnBand's own frame
     }
 
     // Job band: the stepper half the y-half selects (upper ▲ / lower ▼),

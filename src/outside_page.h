@@ -5,9 +5,10 @@
 // Outside (village) page — the real Phase-1 Outside UI over the game_state
 // engine. No clock header on this page (fw 0.11 retired it from all game
 // pages); layout (540x960, all text via tr(), see outside_page.cpp) runs top to
-// bottom as DYNAMICALLY-HEIGHTED fieldset boxes (v0.4.5 — a 1px border with the
+// bottom as DYNAMICALLY-HEIGHTED fieldset boxes (v0.4.5 — a 2px border with the
 // legend embedded in the top border, drawFieldset; each box's height follows its
-// live content row count and the boxes flow down from a fixed top anchor with a
+// live content row count plus 6px of bottom padding, and the boxes flow down
+// from a fixed top anchor with a
 // 12px gap): 工人 (READ-ONLY worker summary — 人口 X/Y line + every unlocked job
 // "名 xN" incl. x0, 3 cols) · 建筑 (non-zero buildings, 2 cols; HIDDEN when there
 // are none) · 库存 (the merged-in inventory, fw 0.2.2, 3 cols; row count clamped to
@@ -16,7 +17,7 @@
 // row 2's bottom hugs ~916 — ROW 1: 伐木 | 查看陷阱, ROW 2: 分工 | —. 伐木/查看陷阱
 // are upstream outside.js verbs migrated off the Room page (long-press to
 // gatherWood/checkTraps, dashed + a draining bar while cooling, 查看陷阱 drawn only
-// when a trap stands; each also carries a bottom-anchored cost/yield subtitle,
+// when a trap stands; each also carries a cost/yield subtitle under its title,
 // v0.10.1 — "+50 木头" / "-2 诱饵"); 分工 opens the standalone worker-assignment
 // page (AssignPage, v0.4.0) and is drawn/hit-tested only once at least one job
 // is unlocked (else the cell is blank, the same 无供给 rule 查看陷阱 uses). Each

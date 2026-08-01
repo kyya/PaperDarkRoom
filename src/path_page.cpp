@@ -11,6 +11,7 @@
 // home"), the item names, 出发, 护甲, 水, 负重, the armour tiers). Layout obeys §9
 // (36px verb labels / 24px body, ≥80px long-press bands, 12px grid).
 #include "path_page.h"
+#include "action_band.h"        // shared band frame + title baseline + wide bands
 #include "cjk_text.h"
 #include "pomo_page.h"          // PAD (shared layout authority)
 #include "page_tabs.h"          // shared tab header (村落 lit — village sub-page)
@@ -151,20 +152,11 @@ void fmt2(char* out, size_t cap, const char* tmpl, const char* a0, const char* a
     snprintf(out, cap, "%.*s%s%s", (int)(h1 - tmp), tmp, a1, h1 + 3);
 }
 
-// 1px dashed rect, 4px-on/4px-off — the disabled-band frame (Outside/AssignPage
-// drawDashedRect parity).
-void drawDashedRect(m5gfx::M5Canvas& c, int x0, int y0, int w, int h) {
-    int x1 = x0 + w - 1, y1 = y0 + h - 1;
-    for (int x = x0; x <= x1; x += 8) {
-        int len = (x1 - x + 1 < 4) ? (x1 - x + 1) : 4;
-        c.drawFastHLine(x, y0, len, TFT_BLACK);
-        c.drawFastHLine(x, y1, len, TFT_BLACK);
-    }
-    for (int y = y0; y <= y1; y += 8) {
-        int len = (y1 - y + 1 < 4) ? (y1 - y + 1) : 4;
-        c.drawFastVLine(x0, y, len, TFT_BLACK);
-        c.drawFastVLine(x1, y, len, TFT_BLACK);
-    }
+// The rect of the band at `top` — one description of where a band is, shared by
+// every draw call here and by pressRect, so the drawn frame and the
+// invert-flash rect cannot drift apart.
+pages::Rect bandRect(int top) {
+    return pages::Rect{ BAND_X, top, BAND_W, BAND_H };
 }
 
 // The ▲/▼ stepper zone at band `top` (AssignPage drawJobBand parity).
@@ -186,16 +178,15 @@ void drawStepper(m5gfx::M5Canvas& c, int top) {
 // One item band: the 36px name, then (right-aligned before the stepper divider) a
 // 24px 负重 W and a 24px carried "xN", then the ▲/▼ stepper. Disabled (dashed) only
 // when the row can neither add nor remove — the cured-meat-with-no-meat case.
+// The frame and the name's baseline come from the shared action_band; the
+// CONTENT does not, because a stepper row puts its name and its two sub-values
+// SIDE BY SIDE on one baseline instead of stacking a subtitle under a title —
+// a genuinely different layout, not a drifted copy of the standard band.
 void drawItemBand(m5gfx::M5Canvas& c, int top, const char* name, int carried,
                   int weightCentiVal, bool disabled) {
-    if (disabled) {
-        drawDashedRect(c, BAND_X, top, BAND_W, BAND_H);
-    } else {
-        c.drawRect(BAND_X, top, BAND_W, BAND_H, TFT_BLACK);
-        c.drawRect(BAND_X + 1, top + 1, BAND_W - 2, BAND_H - 2, TFT_BLACK);
-    }
+    action_band::drawFrame(c, bandRect(top), !disabled);
 
-    int ny   = top + (BAND_H - BTN_GLYPH) / 2 - 4;      // 36px name box top
+    int ny   = action_band::titleBoxY(top, BAND_H);     // 36px name box top
     int subY = ny + BTN_GLYPH - GLYPH;                  // 24px sub bottom-aligned
     cjk::drawText(c, BAND_X + LABEL_X, ny, name, BTN_SCALE);
 
@@ -214,18 +205,15 @@ void drawItemBand(m5gfx::M5Canvas& c, int top, const char* name, int carried,
     drawStepper(c, top);
 }
 
-// A full-width single-action band (更多 / 出发 / 返回): enabled = 2px double frame,
-// disabled = 1px dashed frame; a lone 36px label centered.
+// A full-width single-action band (更多 / 出发 / 返回) — the plain shared band:
+// enabled = 2px double frame, disabled = 1px dashed frame, a lone 36px label
+// centered — none of the three ever carries a subtitle, so the title simply
+// centres in the band. 出发's countdown ("出发 118s") is baked into the label by
+// the caller rather than passed as a subtitle: it is the same action being
+// counted down, not a price, and routing it through the subtitle slot would make
+// the title jump 15px every time the lockout expired.
 void drawWideBand(m5gfx::M5Canvas& c, int top, const char* label, bool enabled) {
-    if (enabled) {
-        c.drawRect(BAND_X, top, BAND_W, BAND_H, TFT_BLACK);
-        c.drawRect(BAND_X + 1, top + 1, BAND_W - 2, BAND_H - 2, TFT_BLACK);
-    } else {
-        drawDashedRect(c, BAND_X, top, BAND_W, BAND_H);
-    }
-    int lw = cjk::textWidth(label, BTN_SCALE);
-    cjk::drawText(c, BAND_X + (BAND_W - lw) / 2, top + (BAND_H - BTN_GLYPH) / 2 - 4,
-                  label, BTN_SCALE);
+    action_band::draw(c, bandRect(top), label, nullptr, enabled, 0, 0);
 }
 
 // The armour tier word (world.js getMaxHealth ladder), highest owned wins. kinetic
@@ -427,7 +415,7 @@ pages::Rect PathPage::pressRect(const pages::Region& rg, int x, int y) const {
     (void)x;
     if (rg.param == PARAM_PAGER || rg.param == PARAM_EMBARK ||
         rg.param == PARAM_RETURN)
-        return pages::Rect{ BAND_X, rg.y0, BAND_W, BAND_H };
+        return bandRect(rg.y0);                 // the exact rect drawWideBand framed
 
     int stepX0 = BAND_X + STEP_DIV_X + 1;
     int stepW  = BAND_W - STEP_DIV_X - 1;

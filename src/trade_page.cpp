@@ -9,6 +9,7 @@
 // body, >=80px long-press bands, paginate rather than compress). See
 // trade_page.h for the region model.
 #include "trade_page.h"
+#include "action_band.h"        // the app-wide button band (this page's own style)
 #include "cjk_text.h"
 #include "pomo_page.h"          // PAD (shared layout authority)
 #include "page_tabs.h"          // shared three-tab header (生火间 │ 村落 │ 贸易站)
@@ -28,11 +29,11 @@ extern M5Canvas canvas;
 using namespace adr;
 
 namespace {
-constexpr int SCALE     = 2;                 // 12px grid x2 = 24px (balance / cost)
-constexpr int BTN_SCALE = 3;                 // 12px grid x3 = 36px (buy label, v0.3.3)
-constexpr int GLYPH     = 12 * SCALE;        // 24px line box
-constexpr int BTN_GLYPH = 12 * BTN_SCALE;    // 36px line box
+constexpr int SCALE     = 2;                 // 12px grid x2 = 24px (balance row)
 constexpr int CONTENT_W = 540 - 2 * PAD;     // 492px usable (§9.2)
+// The band's own type scale (36px label over a 24px cost sub-row) is no longer
+// declared here: it IS action_band's contract now (v0.12), and re-declaring it
+// locally is exactly how the eight sites drifted apart in the first place.
 
 // ---- vertical budget (§9.4). The three-tab header (page_tabs::TAB_H = 72px)
 // owns the top band; the balance row and BUY bands reflow below it. Buy bands
@@ -52,10 +53,11 @@ constexpr int BUY_H     = 80;                // long-press band (§9.3: >=80px, 
 constexpr int BUY_GAP   = 12;                // vertical gap between bands
 constexpr int BUY_X     = PAD;               // full-width single column
 constexpr int BUY_W     = CONTENT_W;         // 492
-constexpr int SUBGAP    = 6;                 // 36px label -> 24px cost sub-row gap.
-                                             // 36 + 6 + 24 = 66 <= 80 (7px top/
-                                             // bottom margin) — the two-line block
-                                             // fits the band with room to spare.
+                                             // (36 + 6 + 24 = 66 <= 80 — the
+                                             // label+cost block clears an 80px
+                                             // band with 7px top/bottom margin;
+                                             // action_band.cpp owns the full
+                                             // derivation now.)
 
 // "更多" pagination sentinel; real slot codes are Trade ids (0..TRADE_COUNT-1).
 constexpr uint8_t A_MORE = 0xFF;
@@ -223,44 +225,23 @@ void drawBalance(m5gfx::M5Canvas& c) {
     }
 }
 
-// 1px dashed rectangle, 4px on / 4px off — the global unavailable-button frame
-// (matches room_page/outside_page/event_modal drawDashedRect exactly).
-void drawDashedRect(m5gfx::M5Canvas& c, int x, int y, int w, int h) {
-    const int on = 4, per = 8;
-    int xr = x + w - 1, yb = y + h - 1;
-    for (int i = 0; i < w; i++)
-        if (i % per < on) { c.drawPixel(x + i, y, TFT_BLACK);
-                            c.drawPixel(x + i, yb, TFT_BLACK); }
-    for (int i = 0; i < h; i++)
-        if (i % per < on) { c.drawPixel(x, y + i, TFT_BLACK);
-                            c.drawPixel(xr, y + i, TFT_BLACK); }
+// The rect of the BUY band at `top` — the ONE description of where a buy button
+// is, shared by the draw call and pressRect so the drawn frame and the
+// invert-flash rect cannot drift apart.
+pages::Rect bandRect(int top) {
+    return pages::Rect{ BUY_X, top, BUY_W, BUY_H };
 }
 
-// One full-width BUY band. Available -> two solid rings (2px); unavailable (cost
-// not met) -> a 1px dashed frame. The 36px label sits over the 24px cost
-// sub-row, the two-line block vertically centered (event_modal parity, scaled up
-// to a 36px label). A "更多" band has no cost row: its 36px label centers alone.
+// One full-width BUY band, through the shared renderer. This page's 36px-label-
+// over-24px-cost, block-centered band IS the app-wide button style (v0.12 pulled
+// it into action_band and migrated every other site onto it — see action_band.h),
+// so there is nothing Trade-specific left to draw here. A priced band centres
+// its label+cost block; the costless "更多" pager centres its lone label, which
+// on this page reads cleanly because it only ever sits alone at the very bottom
+// of a single full-width column.
 void drawBuyBand(m5gfx::M5Canvas& c, int top, const BandView& v) {
-    if (v.enabled) {
-        c.drawRect(BUY_X, top, BUY_W, BUY_H, TFT_BLACK);
-        c.drawRect(BUY_X + 1, top + 1, BUY_W - 2, BUY_H - 2, TFT_BLACK);
-    } else {
-        drawDashedRect(c, BUY_X, top, BUY_W, BUY_H);
-    }
-
-    if (v.hasCost) {
-        int block = BTN_GLYPH + SUBGAP + GLYPH;          // 36 + 6 + 24 = 66
-        int ly = top + (BUY_H - block) / 2;              // top + 7
-        int lw = cjk::textWidth(v.label, BTN_SCALE);
-        cjk::drawText(c, BUY_X + (BUY_W - lw) / 2, ly, v.label, BTN_SCALE);
-        int cw = cjk::textWidth(v.cost, SCALE);
-        cjk::drawText(c, BUY_X + (BUY_W - cw) / 2, ly + BTN_GLYPH + SUBGAP,
-                      v.cost, SCALE);
-    } else {
-        int lw = cjk::textWidth(v.label, BTN_SCALE);
-        cjk::drawText(c, BUY_X + (BUY_W - lw) / 2,
-                      top + (BUY_H - BTN_GLYPH) / 2 - 4, v.label, BTN_SCALE);
-    }
+    action_band::draw(c, bandRect(top), v.label, v.hasCost ? v.cost : nullptr,
+                      v.enabled, 0, 0);
 }
 
 // Content signature — a hash of every live value that alters a painted number or
@@ -290,14 +271,14 @@ const pages::Region* TradePage::regions(int* n) const {
 }
 
 // Press feedback: narrow the Page default's full 540px-wide flash (page.h) to
-// the band's own drawn frame. Every band here — real good or "更多" — shares
-// the same BUY_X/BUY_W/BUY_H rect drawBuyBand's two concentric drawRect calls
-// paint; BUY_X is PAD-inset (24px each side, not full-bleed), so the untouched
-// default would also flash that white margin outside the drawn frame. x/y are
-// unused: onLocalAction (and every band's drawn frame) doesn't split on them.
+// the band's own drawn frame — the SAME bandRect() drawBuyBand framed. Every
+// band here, real good or "更多", shares that rect; BUY_X is PAD-inset (24px
+// each side, not full-bleed), so the untouched default would also flash the
+// white margin outside the drawn frame. x/y are unused: onLocalAction (and
+// every band's drawn frame) doesn't split on them.
 pages::Rect TradePage::pressRect(const pages::Region& rg, int x, int y) const {
     (void)x; (void)y;
-    return pages::Rect{ BUY_X, rg.y0, BUY_W, BUY_H };
+    return bandRect(rg.y0);
 }
 
 // Hidden until the trading post stands: returning false makes showPageOrNext

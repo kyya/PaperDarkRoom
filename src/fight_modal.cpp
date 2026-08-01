@@ -13,12 +13,14 @@
 // (48px combat glyph · 24px enemy name · enemy HP bar · wrapped notification),
 // a player block (生命 N/M + HP bar + 水/熏肉/药剂 counts), and a bottom-anchored
 // two-column button grid (one attack band per packed weapon — verb label + a
-// draining cooldown bar, room_page's drawBand visual language — then 吃肉 / 服药
-// when carried, then 跑 to flee). A victory panel replaces the body on a kill:
+// draining cooldown bar, drawn by the shared action_band like every other button
+// in the firmware — then 吃肉 / 服药 when carried, then 跑 to flee). A victory
+// panel replaces the body on a kill:
 // the enemy's death line + the banked loot + a 离开 band. The per-second tick and
 // each landed action FASTEST-repaint just the dynamic band [enemy HP .. buttons];
 // entry and the victory transition take a deliberate QUALITY flash.
 #include "fight_modal.h"
+#include "action_band.h"        // the app-wide button band (shared with every page)
 #include "world_state.h"        // g_world combat API + cx + ex
 #include "world_page.h"         // world_page::enterDeath (shared death frame)
 #include "setpiece_modal.h"     // setpiece combat hand-back (onFightResult / abort)
@@ -42,9 +44,9 @@ namespace fight_modal {
 namespace {
 constexpr int SCALE_BODY  = 2;                 // 12px grid x2 = 24px body
 constexpr int GLYPH       = 12 * SCALE_BODY;   // 24px body line box
-constexpr int BTN_SCALE   = 3;                 // 12px grid x3 = 36px button label
-constexpr int BTN_GLYPH   = 12 * BTN_SCALE;    // 36px label line box
 constexpr int CONTENT_W   = 540 - 2 * PAD;     // 492
+// The band label's 36px scale lives in action_band's contract now (v0.12), not
+// in a local copy — see action_band.h for why the copies had to go.
 
 // ---- enemy header (static during a fight) ----
 constexpr int CHARA_Y     = 14;                // combat glyph, 48px -> 14..62
@@ -148,18 +150,14 @@ int hitButton(int x, int y) {
     return (i >= 0 && i < s_btnN) ? i : -1;
 }
 
-// 1px dashed rectangle, 4px on / 4px off (the shared unavailable-band frame).
-void drawDashedRect(m5gfx::M5Canvas& c, int x, int y, int w, int h) {
-    const int on = 4, per = 8;
-    int xr = x + w - 1, yb = y + h - 1;
-    for (int i = 0; i < w; i++)
-        if (i % per < on) { c.drawPixel(x + i, y, TFT_BLACK); c.drawPixel(x + i, yb, TFT_BLACK); }
-    for (int i = 0; i < h; i++)
-        if (i % per < on) { c.drawPixel(x, y + i, TFT_BLACK); c.drawPixel(xr, y + i, TFT_BLACK); }
+// The rect of attack-grid band `i` — the ONE description of where a fight
+// button is, shared by the draw call and handleHold's invert-flash.
+pages::Rect btnRect(int i) {
+    return pages::Rect{ btnX(i), btnTopY(i), COL_W, BTN_H };
 }
 
-// A HP bar: 2px border, inner black fill = cur/max (drawBand's bar language, HP
-// scale). Empty when max<=0.
+// A HP bar: 2px border, inner black fill = cur/max (the cooldown bar's language,
+// HP scale). Empty when max<=0.
 void drawHpBar(m5gfx::M5Canvas& c, int x, int y, int w, int h, int cur, int max) {
     c.drawRect(x, y, w, h, TFT_BLACK);
     if (max <= 0) return;
@@ -169,36 +167,22 @@ void drawHpBar(m5gfx::M5Canvas& c, int x, int y, int w, int h, int cur, int max)
     if (fw > 0) c.fillRect(x + 2, y + 2, fw, h - 4, TFT_BLACK);
 }
 
-// One attack/action band (room_page drawBand parity): double frame when enabled,
-// dashed when not; 36px label; a draining cooldown bar hugging the inner bottom.
+// One attack/action band, through the shared renderer (v0.12: this file's
+// hand-copied frame + label + cooldown-bar trio is gone — see action_band.h).
+// No subtitle ever: a swing's cost is ammo the header already reports, not a
+// per-press price, so every cell centres its lone verb in the 80px band and the
+// grid stays level. The cooldown bar is the renderer's, not a local variant.
 void drawFightBand(m5gfx::M5Canvas& c, const FBtn& b, int i) {
-    int x0 = btnX(i), top = btnTopY(i);
-    if (b.enabled) {
-        c.drawRect(x0, top, COL_W, BTN_H, TFT_BLACK);
-        c.drawRect(x0 + 1, top + 1, COL_W - 2, BTN_H - 2, TFT_BLACK);
-    } else {
-        drawDashedRect(c, x0, top, COL_W, BTN_H);
-    }
-    int lw = cjk::textWidth(b.label, BTN_SCALE);
-    cjk::drawText(c, x0 + (COL_W - lw) / 2, top + (BTN_H - BTN_GLYPH) / 2 - 4,
-                  b.label, BTN_SCALE);
-    if (b.coolTotal > 0 && b.coolLeft > 0) {
-        int barX0 = x0 + 12, barX1 = x0 + COL_W - 12;
-        int barY = top + BTN_H - 16, barH = 8;
-        c.drawRect(barX0, barY, barX1 - barX0, barH, TFT_BLACK);
-        int inner = barX1 - barX0 - 4;
-        int fw = (int)((int64_t)inner * b.coolLeft / b.coolTotal);
-        if (fw > 0) c.fillRect(barX0 + 2, barY + 2, fw, barH - 4, TFT_BLACK);
-    }
+    action_band::draw(c, btnRect(i), b.label, nullptr, b.enabled,
+                      b.coolLeft, b.coolTotal);
 }
 
-// A single full-width band (victory 离开): double frame + centered 36px label.
+// A single full-width band (victory 离开). Always enabled today — the renderer
+// carries the dashed-disabled branch anyway, so a future gated wide band needs
+// no new drawing code here.
 void drawWideBand(m5gfx::M5Canvas& c, int top, const char* label) {
-    c.drawRect(PAD, top, CONTENT_W, BTN_H, TFT_BLACK);
-    c.drawRect(PAD + 1, top + 1, CONTENT_W - 2, BTN_H - 2, TFT_BLACK);
-    int lw = cjk::textWidth(label, BTN_SCALE);
-    cjk::drawText(c, PAD + (CONTENT_W - lw) / 2, top + (BTN_H - BTN_GLYPH) / 2 - 4,
-                  label, BTN_SCALE);
+    action_band::draw(c, pages::Rect{ PAD, top, CONTENT_W, BTN_H }, label,
+                      nullptr, true, 0, 0);
 }
 
 void renderFight(m5gfx::M5Canvas& c) {
@@ -349,7 +333,7 @@ bool handleHold(int x, int y) {
 
     // Press feedback: invert-flash the pressed band (event_modal parity). A repaint
     // paints over it; a rejected press rebounds the rect so the flash bounces off.
-    pages::Rect pr{ btnX(b), btnTopY(b), COL_W, BTN_H };
+    pages::Rect pr = btnRect(b);
     pager::flashPressRect(pr);
 
     if (s_btns[b].kind == BK_FLEE) {

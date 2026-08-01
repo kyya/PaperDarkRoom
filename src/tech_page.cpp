@@ -13,6 +13,7 @@
 // 补给 / 覆满 / 水桶). Section headings 武器/护甲 and the 返回 label are real
 // tr() values, not literals. Layout obeys §9 (24px body, >=80px long-press band).
 #include "tech_page.h"
+#include "action_band.h"        // the app-wide button band (the 返回 band)
 #include "cjk_text.h"
 #include "pomo_page.h"          // PAD (shared layout authority)
 #include "page_tabs.h"          // shared tab header (生火间 │ 村落 │ 贸易站)
@@ -40,9 +41,10 @@ bool isOpen() { return s_active; }
 namespace {
 constexpr int SCALE     = 2;                 // 12px grid x2 = 24px CJK
 constexpr int GLYPH     = 12 * SCALE;        // 24px line box
-constexpr int BTN_SCALE = 3;                 // 12px grid x3 = 36px (返回 label)
-constexpr int BTN_GLYPH = 12 * BTN_SCALE;    // 36px line box
 constexpr int CONTENT_W = 540 - 2 * PAD;     // 492px usable (§9.2)
+// The 返回 label's 36px scale comes from action_band's contract (v0.12), not a
+// local constant — the entry rows below are read-only text, not buttons, and
+// keep their own 24px SCALE.
 
 // ---- vertical budget (§9.4), clearing the 32px status bar (< 928). Top ->
 // bottom: tab header(0..72) · four sections from SEC_TOP, each a HEAD_H heading
@@ -189,16 +191,19 @@ void drawEntry(m5gfx::M5Canvas& c, int y, uint8_t id) {
         cjk::drawText(c, (540 - PAD) - cjk::textWidth(cost, SCALE), y, cost, SCALE);
 }
 
-// The trailing 返回 band: full-width frame, lone 36px label centered — the exact
-// shape (and the exact tr("go home") == "返回" label) the AssignPage return band
-// uses, so leaving a sub-page always looks and behaves the same.
+// The rect of the 返回 band at `top` — one description shared by the draw call
+// and pressRect, so the drawn frame and the invert-flash rect can't drift.
+pages::Rect bandRect(int top) {
+    return pages::Rect{ BAND_X, top, BAND_W, BAND_H };
+}
+
+// The trailing 返回 band, through the shared action_band renderer (v0.12) — the
+// exact shape (and the exact tr("go home") == "返回" label) the AssignPage and
+// PathPage return bands now also get from it, so leaving a sub-page always looks
+// and behaves the same. It carries no subtitle, so action_band centres the lone
+// label.
 void drawReturnBand(m5gfx::M5Canvas& c, int top) {
-    c.drawRect(BAND_X, top, BAND_W, BAND_H, TFT_BLACK);
-    c.drawRect(BAND_X + 1, top + 1, BAND_W - 2, BAND_H - 2, TFT_BLACK);
-    const char* label = tr("go home");                  // "返回"
-    int lw = cjk::textWidth(label, BTN_SCALE);
-    cjk::drawText(c, BAND_X + (BAND_W - lw) / 2, top + (BAND_H - BTN_GLYPH) / 2 - 4,
-                  label, BTN_SCALE);
+    action_band::draw(c, bandRect(top), tr("go home"), nullptr, true, 0, 0);
 }
 }  // namespace
 
@@ -216,7 +221,7 @@ const pages::Region* TechPage::regions(int* n) const {
 // is no sub-cell split to mirror.
 pages::Rect TechPage::pressRect(const pages::Region& rg, int x, int y) const {
     (void)x; (void)y;
-    return pages::Rect{ BAND_X, rg.y0, BAND_W, BAND_H };
+    return bandRect(rg.y0);
 }
 
 // Drawable only while open: returning false makes showPageOrNext skip this ring

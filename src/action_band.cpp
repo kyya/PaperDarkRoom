@@ -8,24 +8,32 @@
 
 namespace {
 
-// 1px dashed rectangle, 4px on / 4px off — the unavailable-band frame (Room/
-// Outside/Assign/Path/Trade all draw this identically; kept local here since
-// only the two callers of action_band::draw need it).
+// The 1px dashed unavailable frame: runs of 4 lit pixels every 8, clipped at
+// the far edge, on all four sides. Private on purpose — drawFrame() is the only
+// way in, so a caller picks "solid or dashed" and never gets to hand-assemble a
+// frame out of halves (which is how the seven copies this replaced got started).
+// This is the drawFastLine formulation the assign/path pages used; it emits ~w/4
+// line calls instead of w drawPixel calls and produces byte-identical output to
+// the drawPixel formulation the other five copies used (verified: both light
+// exactly the offsets with i % 8 < 4).
 void drawDashedRect(m5gfx::M5Canvas& c, int x, int y, int w, int h) {
-    const int on = 4, per = 8;
-    int xr = x + w - 1, yb = y + h - 1;
-    for (int i = 0; i < w; i++)
-        if (i % per < on) { c.drawPixel(x + i, y, TFT_BLACK);
-                            c.drawPixel(x + i, yb, TFT_BLACK); }
-    for (int i = 0; i < h; i++)
-        if (i % per < on) { c.drawPixel(x, y + i, TFT_BLACK);
-                            c.drawPixel(xr, y + i, TFT_BLACK); }
+    int x1 = x + w - 1, y1 = y + h - 1;
+    for (int px = x; px <= x1; px += 8) {
+        int len = (x1 - px + 1 < 4) ? (x1 - px + 1) : 4;
+        c.drawFastHLine(px, y,  len, TFT_BLACK);
+        c.drawFastHLine(px, y1, len, TFT_BLACK);
+    }
+    for (int py = y; py <= y1; py += 8) {
+        int len = (y1 - py + 1 < 4) ? (y1 - py + 1) : 4;
+        c.drawFastVLine(x,  py, len, TFT_BLACK);
+        c.drawFastVLine(x1, py, len, TFT_BLACK);
+    }
 }
 
 // Count the lines cjk::drawWrapped would emit for `utf8` at width w — same
 // greedy CJK/space wrap, no drawing (room_page.cpp's log stream keeps its own
-// copy of this for an unrelated purpose — the log band's line budget — so
-// this one stays local to the cost/yield subtitle it serves here).
+// copy of this for an unrelated purpose — the log band's line budget — so this
+// one stays local to the cost/yield subtitle it serves here).
 int wrapLineCount(const char* utf8, int w, int scale) {
     constexpr int MAX = 96;
     static uint32_t cps[MAX];
@@ -72,57 +80,97 @@ int wrapLineCount(const char* utf8, int w, int scale) {
 
 }  // namespace
 
-int action_band::labelY(int h) {
-    // Derived from the SAME bottom-anchor equation draw() uses for a 1-line
-    // subtitle (costBottom - block1), so a free-label band and a priced
-    // 1-line-subtitle band always agree on where the label sits — see the
-    // header note.
-    constexpr int block1 = BTN_GLYPH + SUBGAP + GLYPH;
-    return h - SUB_GUTTER - block1;
+void action_band::drawFrame(m5gfx::M5Canvas& c, const pages::Rect& r, bool enabled) {
+    if (enabled) {
+        c.drawRect(r.x, r.y, r.w, r.h, TFT_BLACK);
+        c.drawRect(r.x + 1, r.y + 1, r.w - 2, r.h - 2, TFT_BLACK);
+    } else {
+        drawDashedRect(c, r.x, r.y, r.w, r.h);
+    }
 }
 
-void action_band::draw(m5gfx::M5Canvas& c, int x0, int top, int w, int h,
-                       const char* label, const char* cost, bool hasCost,
-                       bool enabled, int coolLeft, int coolTotal) {
-    if (enabled) {
-        c.drawRect(x0, top, w, h, TFT_BLACK);
-        c.drawRect(x0 + 1, top + 1, w - 2, h - 2, TFT_BLACK);
-    } else {
-        drawDashedRect(c, x0, top, w, h);
-    }
+int action_band::titleBoxY(int top, int h) {
+    return top + (h - TITLE_GLYPH) / 2 - INK_NUDGE;
+}
 
-    int costBottom = top + h - SUB_GUTTER;   // fixed for EVERY priced band,
-                                             // whether or not it's coolable
-    if (hasCost) {
-        int lines = wrapLineCount(cost, w, SCALE);   // 1, or 2 for Room's
-                                                      // priciest multi-
-                                                      // resource crafts
-        int block = BTN_GLYPH + SUBGAP + lines * GLYPH;
-        int ly = costBottom - block;    // == top + labelY(h) when lines<=1
-        int lw = cjk::textWidth(label, BTN_SCALE);
-        cjk::drawText(c, x0 + (w - lw) / 2, ly, label, BTN_SCALE);
-        int costY = ly + BTN_GLYPH + SUBGAP;
-        if (lines <= 1) {
-            int cw = cjk::textWidth(cost, SCALE);
-            cjk::drawText(c, x0 + (w - cw) / 2, costY, cost, SCALE);
+void action_band::draw(m5gfx::M5Canvas& c, const pages::Rect& r,
+                       const char* title, const char* subtitle, bool enabled,
+                       int coolLeft, int coolTotal) {
+    drawFrame(c, r, enabled);
+    if (!title) title = "";
+
+    bool hasSub = subtitle && subtitle[0];
+
+    // Subtitle wrap width. Deliberately the FULL band width, not the SIDE_PAD-
+    // inset one the title is measured against: three Room craft costs (贸易站
+    // "-400 木头  -100 毛皮", 工坊, 钢剑) come out at exactly 240px — the width
+    // of a Room/Outside cell to the pixel — so wrapping at the inset 228px would
+    // break all three onto a second line for a 12px overhang, and a 2-line block
+    // is the one layout this band height has no slack for (see the budget below).
+    // Measured over every cost line the game can produce, nothing wraps at 240.
+    int subLines = hasSub ? wrapLineCount(subtitle, r.w, SUB_SCALE) : 0;
+
+    // ---- vertical budget -------------------------------------------------
+    // Centre exactly what the band carries — the whole rule, see action_band.h
+    // "ONE BAND, ONE CENTERING". The title always occupies a TITLE_GLYPH(36) box
+    // even when it had to shrink to 24px (see the downgrade note in the header),
+    // so the block height, and therefore the subtitle's y, never depends on the
+    // title's actual scale.
+    //
+    //   block      = 36 + (hasSub ? 6 + lines*24 : 0)
+    //   titleBox y = top + (h - block)/2 - INK_NUDGE
+    //                (the no-subtitle case IS titleBoxY(), called below, so a
+    //                 plain band and an assign/path stepper row agree exactly)
+    //
+    // Room/Outside (h=96), the tightest case:
+    //   no subtitle : block 36 -> title box [29,65), cooldown bar [84,92),
+    //                 inner frame ring at [94,96). 19px clear above the bar.
+    //   1 line      : block 66 -> title box [14,50), subtitle [56,80),
+    //                 cooldown bar [84,92). 4px clear above the bar, 2px below.
+    //                 (The 15px step between this and the case above is the
+    //                 accepted cost of per-button centring — do not "fix" it.)
+    //   2 lines     : block 90 -> title box [2,38), subtitles [44,92). The box
+    //                 abuts the top frame rows [0,2) but the title's INK starts a
+    //                 grid pixel in, at 5, so 3px of white still reads above it
+    //                 and 2px below the last subtitle. That it fits at all is
+    //                 exactly why ROOM_BTN_H/ACT_H are 96 and not the §9.3 floor
+    //                 of 80. No cooldown bar can collide — see action_band.h.
+    // Trade (h=80) / the modals (h=84) only ever carry a 1-line subtitle and
+    // never a cooldown, so they sit well inside the same arithmetic.
+    int block  = TITLE_GLYPH + (hasSub ? SUBGAP + subLines * SUB_GLYPH : 0);
+    int titleY = hasSub ? r.y + (r.h - block) / 2 - INK_NUDGE
+                        : titleBoxY(r.y, r.h);
+
+    // Narrow-cell guard: shrink THIS title to the subtitle scale rather than let
+    // it run under the frame. Centred inside the reserved 36px slot so the band
+    // geometry above is untouched.
+    int tScale = TITLE_SCALE;
+    int tw     = cjk::textWidth(title, TITLE_SCALE);
+    int usable = r.w - 2 * FRAME - 2 * SIDE_PAD;
+    if (tw > usable) { tScale = SUB_SCALE; tw = cjk::textWidth(title, SUB_SCALE); }
+    int inkY = titleY + (TITLE_GLYPH - 12 * tScale) / 2;
+    cjk::drawText(c, r.x + (r.w - tw) / 2, inkY, title, tScale);
+
+    if (hasSub) {
+        int subY = titleY + TITLE_GLYPH + SUBGAP;
+        if (subLines <= 1) {
+            int sw = cjk::textWidth(subtitle, SUB_SCALE);
+            cjk::drawText(c, r.x + (r.w - sw) / 2, subY, subtitle, SUB_SCALE);
         } else {
-            cjk::drawWrapped(c, x0, costY, w, cost, SCALE, GLYPH);
+            cjk::drawWrapped(c, r.x, subY, r.w, subtitle, SUB_SCALE, SUB_GLYPH);
         }
-    } else {
-        int ly = top + labelY(h);
-        int lw = cjk::textWidth(label, BTN_SCALE);
-        cjk::drawText(c, x0 + (w - lw) / 2, ly, label, BTN_SCALE);
     }
 
-    if (coolTotal > 0 && coolLeft > 0) {                      // draining cooldown
-        int barX0 = x0 + 12, barX1 = x0 + w - 12;
-        // A priced band hangs its bar just below the fixed subtitle bottom
-        // (costBottom); a free coolable band hugs the band's own bottom edge.
-        int barY = hasCost ? costBottom + 4 : top + h - 16;
-        int barH = 8;
-        c.drawRect(barX0, barY, barX1 - barX0, barH, TFT_BLACK);
+    if (coolTotal > 0 && coolLeft > 0) {              // draining cooldown
+        int barX0 = r.x + 12, barX1 = r.x + r.w - 12;
+        // Anchored to the band's own bottom, not to the subtitle: with the
+        // subtitle slot reserved across a grid, "just below the cost line" and
+        // "hugging the band's bottom" are the SAME place, so the priced-vs-free
+        // split the pre-v0.12 renderer needed collapses into one rule.
+        int barY = r.y + r.h - BAR_GUTTER;
+        c.drawRect(barX0, barY, barX1 - barX0, BAR_H, TFT_BLACK);
         int inner = barX1 - barX0 - 4;
         int fw = (int)((int64_t)inner * coolLeft / coolTotal);   // drains L-anchored
-        if (fw > 0) c.fillRect(barX0 + 2, barY + 2, fw, barH - 4, TFT_BLACK);
+        if (fw > 0) c.fillRect(barX0 + 2, barY + 2, fw, BAR_H - 4, TFT_BLACK);
     }
 }

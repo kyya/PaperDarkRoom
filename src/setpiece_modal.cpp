@@ -6,10 +6,12 @@
 // narrative choices. See setpiece_modal.h. The setpiece_engine owns scene/button/
 // loot state; this file renders it, routes a press into setpiece::choose(), and
 // orchestrates the fight_modal handoff for combat scenes. Layout follows
-// event_modal (title 36px, body/button 24px, >=80px long-press bands, content
-// clears the status bar) plus a banked-loot list between the narrative and the
-// buttons. Every string routes through tr() (strings_zh.h, §8.3 glyph closure).
+// event_modal (title 36px, narrative 24px, choice bands via the shared
+// action_band, >=80px long-press bands, content clears the status bar) plus a
+// banked-loot list between the narrative and the buttons. Every string routes
+// through tr() (strings_zh.h, §8.3 glyph closure).
 #include "setpiece_modal.h"
+#include "action_band.h"         // the app-wide button band (shared with every page)
 #include "setpiece_engine.h"     // setpiece:: queries/commands
 #include "fight_modal.h"         // beginSetpiece (combat scene handoff)
 #include "world_state.h"
@@ -34,8 +36,7 @@ namespace {
 constexpr int PAD         = 24;
 constexpr int CONTENT_W   = 540 - 2 * PAD;      // 492
 constexpr int SCALE_TITLE = 3;                  // 36px title
-constexpr int SCALE_BODY  = 2;                  // 24px body/button
-constexpr int GLYPH       = 12 * SCALE_BODY;    // 24px line box
+constexpr int SCALE_BODY  = 2;                  // 24px narrative / loot list
 
 constexpr int TITLE_Y    = 20;
 constexpr int RULE_Y     = 72;
@@ -48,7 +49,6 @@ constexpr int BTN_W      = CONTENT_W;
 constexpr int BTN_H      = 84;
 constexpr int BTN_GAP    = 12;
 constexpr int BTN_BOTTOM = 912;
-constexpr int SUBGAP     = 6;
 
 constexpr uint32_t TIMEOUT_MS = 120u * 1000u;   // idle auto-dismiss (2 min)
 
@@ -81,38 +81,23 @@ bool costLine(int localBtn, char* out, size_t cap) {
     return true;
 }
 
-void drawDashedRect(m5gfx::M5Canvas& c, int x, int y, int w, int h) {
-    const int on = 4, per = 8;
-    int xr = x + w - 1, yb = y + h - 1;
-    for (int i = 0; i < w; i++)
-        if (i % per < on) { c.drawPixel(x + i, y, TFT_BLACK); c.drawPixel(x + i, yb, TFT_BLACK); }
-    for (int i = 0; i < h; i++)
-        if (i % per < on) { c.drawPixel(x, y + i, TFT_BLACK); c.drawPixel(xr, y + i, TFT_BLACK); }
+// The rect of choice band `i` of `n` — one description of where the button is,
+// shared by drawButton's frame and handleHold's invert-flash (event_modal
+// parity; both used to restate BTN_X/BTN_W/BTN_H independently).
+pages::Rect btnRect(int i, int n) {
+    return pages::Rect{ BTN_X, btnTop(i, n), BTN_W, BTN_H };
 }
 
-void drawButton(m5gfx::M5Canvas& c, int top, int localBtn) {
-    bool avail = setpiece::btnAvailable(localBtn);
-    if (avail) {
-        c.drawRect(BTN_X, top, BTN_W, BTN_H, TFT_BLACK);
-        c.drawRect(BTN_X + 1, top + 1, BTN_W - 2, BTN_H - 2, TFT_BLACK);
-    } else {
-        drawDashedRect(c, BTN_X, top, BTN_W, BTN_H);
-    }
-    const char* label = tr(setpiece::btnTextKey(localBtn));
+// One choice band, through the shared renderer. v0.12 deleted this file's
+// near-verbatim copy of event_modal's copy of the Trade band; the label now
+// rides the app-wide 36px title scale over its 24px cost line, and a FREE
+// choice centres that title alone (action_band centres exactly what a band
+// carries). costLine stays local: it reads the setpiece engine, not the renderer.
+void drawButton(m5gfx::M5Canvas& c, int i, int n) {
     char cost[64];
-    bool hasCost = costLine(localBtn, cost, sizeof cost);
-    if (hasCost) {
-        int block = GLYPH * 2 + SUBGAP;
-        int ly = top + (BTN_H - block) / 2;
-        int lw = cjk::textWidth(label, SCALE_BODY);
-        cjk::drawText(c, BTN_X + (BTN_W - lw) / 2, ly, label, SCALE_BODY);
-        int cw = cjk::textWidth(cost, SCALE_BODY);
-        cjk::drawText(c, BTN_X + (BTN_W - cw) / 2, ly + GLYPH + SUBGAP, cost, SCALE_BODY);
-    } else {
-        int lw = cjk::textWidth(label, SCALE_BODY);
-        cjk::drawText(c, BTN_X + (BTN_W - lw) / 2, top + (BTN_H - GLYPH) / 2 - 4,
-                      label, SCALE_BODY);
-    }
+    bool hasCost = costLine(i, cost, sizeof cost);
+    action_band::draw(c, btnRect(i, n), tr(setpiece::btnTextKey(i)),
+                      hasCost ? cost : nullptr, setpiece::btnAvailable(i), 0, 0);
 }
 
 void render() {
@@ -141,7 +126,7 @@ void render() {
     }
 
     int n = setpiece::btnCount();
-    for (int i = 0; i < n; i++) drawButton(canvas, btnTop(i, n), i);
+    for (int i = 0; i < n; i++) drawButton(canvas, i, n);
 
     status_bar::drawOnto(canvas);
 }
@@ -191,7 +176,7 @@ bool handleHold(int x, int y) {
     int b = hitButton(x, y);
     if (b < 0) { M5.Speaker.tone(600, 120); return true; }
 
-    pages::Rect pr{ BTN_X, btnTop(b, setpiece::btnCount()), BTN_W, BTN_H };
+    pages::Rect pr = btnRect(b, setpiece::btnCount());
     pager::flashPressRect(pr);
 
     Result r = setpiece::choose(b);
