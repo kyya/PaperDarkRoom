@@ -46,7 +46,7 @@ python tools/make_dist.py            # 已构建过可加 --skip-build 跳过构
 
 ### 网页刷机（推荐）
 
-浏览器打开 <https://paperdarkroom-flasher.molty.workers.dev>，用 USB 数据线接上设备，选一个版本点“刷入”，在弹出的串口选择框里选中设备即可。刷的就是 `dist/adarkroom-<版本>-merged.bin`，整包写入 **0x0**，与本地 USB 全量刷等效。
+浏览器打开 <https://paperdarkroom-flasher.molty.workers.dev>，用 USB 数据线接上设备，选一个版本点“刷入”，在弹出的串口选择框里选中设备即可。版本列表直接来自本仓库 GitHub Releases 里的 `adarkroom-<版本>-merged.bin`（即 `dist/` 打出来的那份），整包写入 **0x0**，与本地 USB 全量刷等效——发版只要 `gh release create` 传上附件，刷机页就会自己列出来。
 
 首刷或跨大版本升级时，在弹窗里勾选“擦除设备”——nvs 需要清空重新配对；SD 卡存档不受影响，怎么刷都还在。
 
