@@ -12,6 +12,7 @@
 // (36px verb labels / 24px body, ≥80px long-press bands, 12px grid).
 #include "path_page.h"
 #include "action_band.h"        // shared band frame + title baseline + wide bands
+#include "stepper.h"            // shared ±1 / ±10 stepper zone (AssignPage parity)
 #include "cjk_text.h"
 #include "pomo_page.h"          // PAD (shared layout authority)
 #include "page_tabs.h"          // shared tab header (村落 lit — village sub-page)
@@ -63,20 +64,16 @@ constexpr int AWROW_Y    = 712;              // 护甲/水 read-only row
 constexpr int EMBARK_TOP = 746;              // 出发 band
 constexpr int RETURN_TOP = 836;              // 返回 band (bottom 916)
 
-// Stepper geometry (AssignPage parity — the 492px band keeps the roomy v0.3.3
-// stepper zone). A vertical rule sets off a 66px zone split by a horizontal rule
-// into an upper ▲ (increment) over a lower ▼ (decrement); both are fillTriangle
-// (▲/▼ are not in the sparse face, so never text). The press y-half, not the
-// exact triangle pixels, picks the direction (see onLocalAction).
-constexpr int STEP_INSET = 12;
-constexpr int STEP_W     = 66;
-constexpr int STEP_X0    = BAND_W - STEP_INSET - STEP_W;  // 414
-constexpr int STEP_DIV_X = STEP_X0 - 4;                   // 410 — vertical rule x
+// Stepper: the shared two-column ±1 / ±10 zone (see stepper.h — AssignPage's job
+// rows draw the identical control). v0.14 grew it from one column to two, moving
+// the zone's left rule from 410 to 344, so BOTH right-aligned sub-values below
+// re-anchor to stepper::dividerX(). Re-measured after the shift: the tightest
+// row is 能量元件 (144px name @36px) with "负重 0.2" (92px) + "x999" (48px),
+// which still leaves 28px of clear space between the name and the weight.
 constexpr int LABEL_X    = 8;                            // name left pad
 constexpr int LABEL_GAP  = 8;                            // count -> divider gap
 constexpr int SUB_GAP    = 16;                           // weight -> count gap
-constexpr int TRI_HALF_W = 11;
-constexpr int TRI_HALF_H = 9;
+constexpr int STEP_DIV_X = stepper::dividerX(BAND_W);    // 344 — zone's left rule
 
 // The carryable rows: path.js carryable ∪ the Room.Craftables tools/weapons, in
 // §1.3 order. `key` is the tr() key AND the world_data WEIGHTS lookup AND the
@@ -159,29 +156,14 @@ pages::Rect bandRect(int top) {
     return pages::Rect{ BAND_X, top, BAND_W, BAND_H };
 }
 
-// The ▲/▼ stepper zone at band `top` (AssignPage drawJobBand parity).
-void drawStepper(m5gfx::M5Canvas& c, int top) {
-    int midY = top + BAND_H / 2;
-    c.drawFastVLine(BAND_X + STEP_DIV_X, top + 10, BAND_H - 20, TFT_BLACK);
-    c.drawFastHLine(BAND_X + STEP_X0, midY, STEP_W, TFT_BLACK);
-    int cx   = BAND_X + STEP_X0 + STEP_W / 2;
-    int cyUp = top + BAND_H / 4;
-    int cyDn = top + 3 * BAND_H / 4;
-    c.fillTriangle(cx, cyUp - TRI_HALF_H,               // ▲ increment (apex up)
-                   cx - TRI_HALF_W, cyUp + TRI_HALF_H,
-                   cx + TRI_HALF_W, cyUp + TRI_HALF_H, TFT_BLACK);
-    c.fillTriangle(cx, cyDn + TRI_HALF_H,               // ▼ decrement (apex down)
-                   cx - TRI_HALF_W, cyDn - TRI_HALF_H,
-                   cx + TRI_HALF_W, cyDn - TRI_HALF_H, TFT_BLACK);
-}
-
 // One item band: the 36px name, then (right-aligned before the stepper divider) a
-// 24px 负重 W and a 24px carried "xN", then the ▲/▼ stepper. Disabled (dashed) only
-// when the row can neither add nor remove — the cured-meat-with-no-meat case.
-// The frame and the name's baseline come from the shared action_band; the
-// CONTENT does not, because a stepper row puts its name and its two sub-values
-// SIDE BY SIDE on one baseline instead of stacking a subtitle under a title —
-// a genuinely different layout, not a drifted copy of the standard band.
+// 24px 负重 W and a 24px carried "xN", then the shared ±1 / ±10 stepper. Disabled
+// (dashed) only when the row can neither add nor remove — the cured-meat-with-
+// no-meat case. The frame and the name's baseline come from the shared
+// action_band and the stepper from stepper.h; what stays here is only this
+// page's own LEFT side, which puts a name and its two sub-values SIDE BY SIDE on
+// one baseline instead of stacking a subtitle under a title — a genuinely
+// different layout, not a drifted copy of the standard band.
 void drawItemBand(m5gfx::M5Canvas& c, int top, const char* name, int carried,
                   int weightCentiVal, bool disabled) {
     action_band::drawFrame(c, bandRect(top), !disabled);
@@ -202,7 +184,7 @@ void drawItemBand(m5gfx::M5Canvas& c, int top, const char* name, int carried,
     int ww = cjk::textWidth(ws, SCALE);
     cjk::drawText(c, cntX - SUB_GAP - ww, subY, ws, SCALE);
 
-    drawStepper(c, top);
+    stepper::draw(c, bandRect(top));
 }
 
 // A full-width single-action band (更多 / 出发 / 返回) — the plain shared band:
@@ -210,8 +192,9 @@ void drawItemBand(m5gfx::M5Canvas& c, int top, const char* name, int carried,
 // centered — none of the three ever carries a subtitle, so the title simply
 // centres in the band. 出发's countdown ("出发 118s") is baked into the label by
 // the caller rather than passed as a subtitle: it is the same action being
-// counted down, not a price, and routing it through the subtitle slot would make
-// the title jump 15px every time the lockout expired.
+// counted down, not a price, and routing it through the cost column would push it
+// to the band's right edge in a small 24px face instead of reading as part of the
+// verb.
 void drawWideBand(m5gfx::M5Canvas& c, int top, const char* label, bool enabled) {
     action_band::draw(c, bandRect(top), label, nullptr, enabled, 0, 0);
 }
@@ -243,12 +226,12 @@ int PathPage::freeCenti() const {
     return WorldState::bagCapacityCenti(g_game) - used;
 }
 
-// path.js increaseSupply / decreaseSupply, ±1: add clamps to the village stock
-// AND the free bag space; remove clamps at 0. Returns whether anything changed.
-bool PathPage::adjustOutfit(int i, int delta) {
+// path.js increaseSupply / decreaseSupply, ONE unit: add clamps to the village
+// stock AND the free bag space; remove clamps at 0. Returns whether it moved.
+bool PathPage::adjustOutfitOne(int i, int step) {
     const Carry& c = CARRY[i];
     int cur = carriedOf(i);
-    if (delta > 0) {
+    if (step > 0) {
         if (cur >= ownedOf(i)) return false;              // can't carry more than owned
         if (freeCenti() < weightCenti(c.key)) return false;   // no room
         cur++;
@@ -259,6 +242,32 @@ bool PathPage::adjustOutfit(int i, int delta) {
     if (c.isItem) m_outfitItem[c.idx] = (int16_t)cur;
     else          m_outfitRes[c.idx]  = (int16_t)cur;
     return true;
+}
+
+// The stepper's request: `delta` is the SIGNED unit count the pressed zone asks
+// for (±1 from the fine column, ±stepper::MANY from the coarse one). The move is
+// TRUNCATED to whatever is actually available, matching upstream's
+// Math.min(available, btn.data) (path.js:260-263 arms the ±10 buttons,
+// outside.js:376 does the truncating) — a coarse ▲ tap with 3 in stock packs 3, it
+// does not refuse.
+//
+// Implemented by repeating the single-unit step rather than computing a count up
+// front, because a row has TWO independent limits (village stock and remaining
+// bag weight) and only the per-unit path re-checks both as the bag fills: asking
+// for 10 rifles with 8 owned but room for 4 must stop at 4, and freeCenti()
+// changes with every unit added. That reuses the existing clamps verbatim
+// instead of duplicating them into a second min() that could drift. 10 iterations
+// of an O(CARRY_N) weight sum is nothing on a button press.
+// Returns whether ANY unit moved, so the caller's beep/repaint logic is unchanged.
+bool PathPage::adjustOutfit(int i, int delta) {
+    int want = delta < 0 ? -delta : delta;
+    int step = delta < 0 ? -1 : +1;
+    int moved = 0;
+    for (int k = 0; k < want; k++) {
+        if (!adjustOutfitOne(i, step)) break;   // hit stock / weight / zero floor
+        moved++;
+    }
+    return moved > 0;
 }
 
 // Seed the selection from the persistent remembered outfit (g_game.savedOutfit,
@@ -412,24 +421,20 @@ bool PathPage::draw(m5gfx::M5Canvas& c) {
 // ▲/▼ stepper half the y picks, so the flash reads as "this stepper half fired"
 // rather than blacking out the row.
 pages::Rect PathPage::pressRect(const pages::Region& rg, int x, int y) const {
-    (void)x;
     if (rg.param == PARAM_PAGER || rg.param == PARAM_EMBARK ||
         rg.param == PARAM_RETURN)
         return bandRect(rg.y0);                 // the exact rect drawWideBand framed
 
-    int stepX0 = BAND_X + STEP_DIV_X + 1;
-    int stepW  = BAND_W - STEP_DIV_X - 1;
-    int half   = BAND_H / 2;
-    if (y < rg.y0 + half) return pages::Rect{ stepX0, rg.y0, stepW, half };
-    return pages::Rect{ stepX0, rg.y0 + half, stepW, BAND_H - half };
+    return stepper::zoneRect(bandRect(rg.y0), x, y);
 }
 
 // Long-press on a band. 返回 closes the latch + jumps to Outside; 更多 advances the
-// page; 出发 embarks (gate-checked); an item band packs/unpacks one unit, the press
-// y-half picking direction (upper ▲ = +1, lower ▼ = −1). A real change high-beeps +
-// repaints; a no-op low-beeps.
+// page; 出发 embarks (gate-checked); an item band packs/unpacks units, the press
+// picking BOTH size and direction via stepper::deltaFor — ±1 from the fine column
+// (or the name area) and ±10 from the coarse one, truncated to stock/bag space by
+// adjustOutfit. A real change high-beeps + repaints; a total no-op low-beeps
+// (both magnitudes are equally dead in a direction that cannot move at all).
 void PathPage::onLocalAction(uint8_t param, int x, int y) {
-    (void)x;
     if (param == PARAM_RETURN) {
         path_page::close();
         M5.Speaker.tone(1800, 80);
@@ -452,7 +457,7 @@ void PathPage::onLocalAction(uint8_t param, int x, int y) {
     if ((int)param >= m_slotCount) { M5.Speaker.tone(600, 120); return; }   // stale
     int carryIdx = m_slotCarry[param];
     int bandTop  = BAND_TOP + (int)param * BAND_PITCH;
-    int delta    = (y < bandTop + BAND_H / 2) ? +1 : -1;   // upper ▲ / lower ▼
+    int delta    = stepper::deltaFor(bandRect(bandTop), x, y);
     if (adjustOutfit(carryIdx, delta)) {
         M5.Speaker.tone(1800, 80);
         pager::showPage(pager::currentRingIndex(), false);

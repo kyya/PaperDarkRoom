@@ -43,8 +43,9 @@ static PathPage s_path;
 // last so PathPage's doEmbark, which jumps to ringIndexByName("world"), resolves
 // this stable ring slot by name.
 static WorldPage s_world;
-// TechPage (v0.11.0) is the Room's read-only sub-page — reached from the Room
-// 科技树 cell, latched on tech_page::isOpen() and hidden (draw() returns false)
+// TechPage (v0.11.0) is a read-only sub-page — reached from the Outside grid's
+// 科技树 cell (the Room's until v0.14), latched on tech_page::isOpen() and hidden
+// (draw() returns false)
 // until opened, exactly like AssignPage. Appended last so the earlier slots keep
 // the ring indices they already had; the Room's open jump resolves it by name
 // (pager::ringIndexByName), not by position.

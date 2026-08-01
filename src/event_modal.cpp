@@ -106,9 +106,10 @@ pages::Rect btnRect(int i, int n) {
 // One full-width choice band, through the shared renderer (v0.12: the modal's
 // hand-rolled near-copy of the Trade band is gone — see action_band.h). The
 // choice label rides the app-wide 36px title scale now, over its 24px cost line
-// when the choice is priced; a free choice centres that label alone, since
-// action_band centres exactly what a band carries. Composing the cost text stays
-// here — it reads the event engine, which the renderer knows nothing about.
+// when the choice is priced: the label takes the band's LEFT column and each cost
+// entry a right-aligned line opposite it. A free choice centres its label instead
+// (变体 B, see action_band.h). Composing the cost text stays here — it reads the
+// event engine, which the renderer knows nothing about.
 void drawButton(m5gfx::M5Canvas& c, int i, int n) {
     char cost[64];
     bool hasCost = costLine(i, cost, sizeof(cost));

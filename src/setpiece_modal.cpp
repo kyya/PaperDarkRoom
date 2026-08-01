@@ -90,9 +90,9 @@ pages::Rect btnRect(int i, int n) {
 
 // One choice band, through the shared renderer. v0.12 deleted this file's
 // near-verbatim copy of event_modal's copy of the Trade band; the label now
-// rides the app-wide 36px title scale over its 24px cost line, and a FREE
-// choice centres that title alone (action_band centres exactly what a band
-// carries). costLine stays local: it reads the setpiece engine, not the renderer.
+// rides the app-wide 36px title scale, left-aligned beside its right-aligned cost
+// line; a FREE choice centres that title instead (变体 B, see action_band.h).
+// costLine stays local: it reads the setpiece engine, not the renderer.
 void drawButton(m5gfx::M5Canvas& c, int i, int n) {
     char cost[64];
     bool hasCost = costLine(i, cost, sizeof cost);

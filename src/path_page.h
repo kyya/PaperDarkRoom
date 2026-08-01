@@ -17,7 +17,8 @@
 // Layout (540x960, all text via tr()):
 //   tab header(0..72) · capacity row 背包剩余空间 free/cap (84) · a paginated
 //   window of ≤6 carryable item bands (120 + i*90; each an 80px name + carried
-//   "xN" + per-unit 负重 with a ▲/▼ stepper — increaseSupply/decreaseSupply ±1)
+//   "xN" + per-unit 负重 with the shared two-column ▲/▼ stepper —
+//   increaseSupply/decreaseSupply ±1 and ±10, truncated to stock/bag space)
 //   · a 更多 band when the owned carryables overflow one page · a read-only
 //   护甲/水 row (712) · the 出发 band (746, dashed-disabled until cured meat ≥ 1,
 //   the sole embark gate) · a 「返回」band (836). On open the selection is pre-filled
@@ -81,7 +82,10 @@ private:
     int  ownedOf(int carryIdx) const;         // village stock of carryable row
     int  carriedOf(int carryIdx) const;       // units already in the outfit
     int  freeCenti() const;                    // capacity − carried weight (centi)
-    bool adjustOutfit(int carryIdx, int delta);   // ±1 with the space/stock clamps
+    bool adjustOutfitOne(int carryIdx, int step);  // ONE unit, space/stock clamped
+    bool adjustOutfit(int carryIdx, int delta);    // ±1 / ±10, TRUNCATED to what
+                                                   // fits (upstream Math.min —
+                                                   // see path_page.cpp)
     void prefillOutfit();                          // seed selection from savedOutfit
     int  buildOutfitList(uint8_t* out) const;  // rows to show (owned/carried > 0)
     uint32_t contentSig() const;               // tick() repaint trigger

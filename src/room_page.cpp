@@ -10,7 +10,6 @@
 // rather than compress). See room_page.h for the region model.
 #include "room_page.h"
 #include "action_band.h"        // shared band renderer (v0.10.1, room+outside)
-#include "tech_page.h"          // 科技树 cell opens the tech-tree sub-page
 #include "cjk_text.h"
 #include "pomo_page.h"          // PAD (shared layout authority)
 #include "page_tabs.h"          // shared two-tab header (生火间 │ 小型村落)
@@ -45,18 +44,18 @@ constexpr int MAX_SLOTS = MAX_ROWS * MAX_COLS;   // 10 action cells / page
 // v0.10.1 ("align bottom" + "第一页按钮没对齐") answered that by making a FREE
 // band lay out as if it carried a cost line, so a whole grid's titles landed on
 // one y. v0.12 RETIRES that rule at the user's on-device call: a band now
-// centres exactly what it carries, so a free cell's title sits 15px below a
-// priced neighbour's and that is intended — the full decision, and the two
-// costs accepted with it, are recorded in action_band.h "ONE BAND, ONE
-// CENTERING". v0.10.1 ALSO shrank the label 36px -> 24px; v0.12 ("带 subtitle 的
+// splits the axes instead: the title owns a LEFT column at one fixed y and the
+// costs own a RIGHT column, so a cell's title no longer moves depending on
+// whether it is priced — see action_band.h "LEFT TITLE / RIGHT COSTS".
+// v0.10.1 ALSO shrank the label 36px -> 24px; v0.12 ("带 subtitle 的
 // button 的按钮样式都统一成贸易站的按钮组件") REVERSES that half too:
 // the Trade page's 36px-title-over-24px-cost band is now the app-wide button,
 // and a Room cell renders through the same action_band::draw as every other
 // button in the firmware rather than a Room-sized variant of it. The 96px band
-// still holds the taller stack — 36 + 6 + 24 = 66 centred leaves 15px top and
-// bottom, enough for the cooldown-bar gutter, and even a (currently unreachable)
-// 2-line cost fits at 90 of 96 (the full derivation lives in action_band.cpp
-// draw(); it is what pins this height at 96 rather than the §9.3 floor of 80).
+// still needs its height for the RIGHT column: a 3-entry cost stack is 72px and
+// clears the cooldown bar only because the band is 96 (the full derivation lives
+// in action_band.cpp draw(); it is what pins this height at 96 rather than the
+// §9.3 floor of 80).
 // MAX_ROWS stays 5 and LOG_LINES stays 9 — unchanged from v0.10.0. 5 rows x 96 +
 // 4x10 gaps = 520, landing BTN_AREA_BOTTOM at 886 (< 928 status bar, 42px
 // margin — matches the original v0.10.0 number). Resource/inventory summary
@@ -75,14 +74,16 @@ constexpr int BTN_TOP   = 366;               // first action row top
 constexpr int ROOM_BTN_H = 96;               // long-press band (§9.3 floor is 80;
                                              // grown for the cost sub-row, see above)
 constexpr int BTN_GAP   = 10;                // vertical gap between rows
-// Two columns of 240px with a 12px gutter fill the 492px content width; each
-// band's label centers in its column. Re-measured for v0.12's 36px titles: the
-// widest is the "更多 (n/n)" pager at 180px (the batch count never reaches two
-// digits — 26 actions over 9 per page = 3 pages) and the widest craft name is
-// 狩猎小屋 at 144px, both inside the 228px a 240px cell leaves after the frame
-// and action_band::SIDE_PAD. So the grid still needs no full-width exception and
-// action_band's narrow-cell downgrade never fires here. x < COL_MID picks the
-// left column (onLocalAction).
+// Two columns of 240px with a 12px gutter fill the 492px content width. Re-
+// measured for 变体 B (v0.14), where a priced cell's 36px title now has to share
+// its row with a right-aligned cost column instead of owning the full width:
+// 224px is usable (240 - 2*action_band::EDGE_PAD), and title + MID_GAP + the
+// widest cost entry must fit in it. Three craft titles and one Outside verb do
+// not and are auto-shrunk to 24px by the renderer's narrow-cell guard —
+// 狩猎小屋, 炼钢坊, 军械坊 here plus 查看陷阱 next door; every other cell keeps
+// its 36px title. Free cells (更多) have no cost column at all and simply centre.
+// The grid still needs no full-width exception. x < COL_MID picks the left
+// column (onLocalAction).
 constexpr int COL_GAP   = 12;
 constexpr int COL_W     = (CONTENT_W - COL_GAP) / 2;         // 240
 constexpr int COL_X0[MAX_COLS] = { PAD, PAD + COL_W + COL_GAP };   // {24, 276}
@@ -95,9 +96,14 @@ constexpr int BTN_AREA_BOTTOM = BTN_TOP + (MAX_ROWS - 1) * (ROOM_BTN_H + BTN_GAP
 // [10, 10+24) = 34. (Trading-post buying moved to its own page in v0.3.3 — see
 // trade_page.cpp — so the Room stays build/craft-focused; the A_TRADE_BASE code
 // range this page carried in v0.3.2 is gone with it.)
+// (A_TECH = 5 used to sit here: the 科技树 entry cell. v0.14 moved that entry to
+// the Outside page's action grid, right after 伐木 — the tech tree is village
+// planning, and it never made sense beside the fire verb. The page itself is
+// unchanged; only its doorway moved. The code is left unused rather than
+// recycled so a stale persisted region table can never resolve 5 to something
+// else.)
 enum : uint8_t {
     A_LIGHT  = 0, A_STOKE = 1, A_GATHER = 2, A_TRAPS = 3, A_MORE = 4,
-    A_TECH   = 5,
     A_CRAFT_BASE = 10
 };
 
@@ -248,7 +254,6 @@ bool craftOfferable(uint8_t id) {
 bool isActionEnabled(uint8_t code, uint32_t now) {
     switch (code) {
         case A_MORE:  return true;                       // page flip is always live
-        case A_TECH:  return true;                       // read-only sub-page, always live
         case A_LIGHT:
             if (g_game.cooldownLeft(0, now) > 0) return false;
             // free first light while wood is still "undefined" (room.js quirk)
@@ -309,8 +314,8 @@ bool craftCostLine(uint8_t id, char* out, size_t cap) {
 
 // The cost sub-line for any action code, or false (empty) for a free action —
 // gather wood / check traps cost nothing (their yield is a random drop, not a
-// fixed price) and "more" / 科技树 are UI chrome and pure navigation, so none of
-// the four get a subtitle. The two fire verbs have a fixed one-resource wood
+// fixed price) and "more" is UI chrome and pure navigation, so none of the
+// three get a subtitle. The two fire verbs have a fixed one-resource wood
 // cost (room.js constants); every craftable delegates to craftCostLine above.
 bool costLineFor(uint8_t code, char* out, size_t cap) {
     switch (code) {
@@ -320,7 +325,7 @@ bool costLineFor(uint8_t code, char* out, size_t cap) {
         case A_STOKE:
             snprintf(out, cap, "-%d %s", STOKE_FIRE_WOOD, tr(RES_KEY[R_WOOD]));
             return true;
-        case A_GATHER: case A_TRAPS: case A_MORE: case A_TECH:
+        case A_GATHER: case A_TRAPS: case A_MORE:
             out[0] = 0;
             return false;
         default:
@@ -328,18 +333,16 @@ bool costLineFor(uint8_t code, char* out, size_t cap) {
     }
 }
 
-// Ordered action list for the current game state: fire verb, the 科技树 entry,
-// then every offerable craftable. Returns the count. (gather wood / check traps
-// are野外 actions — upstream outside.js, not room.js — so they live on the
-// Outside page; trading-post buying moved to the Trade page in v0.3.3.)
-// 科技树 sits second, right beside the fire verb, so it lands in the FIRST batch
-// no matter how long the craftable list grows — a growth-line explainer the
-// player has to page to would miss the very players who don't know the growth
-// line exists.
+// Ordered action list for the current game state: the fire verb, then every
+// offerable craftable. Returns the count. (gather wood / check traps are 野外
+// actions — upstream outside.js, not room.js — so they live on the Outside page;
+// trading-post buying moved to the Trade page in v0.3.3, and the 科技树 entry
+// moved to the Outside grid in v0.14.) Dropping 科技树 shortens this list by one,
+// which the pagination below absorbs on its own — it is purely a function of the
+// count, so the batches simply re-pack.
 int buildActions(uint8_t* out, int cap) {
     int n = 0;
     if (n < cap) out[n++] = (g_game.fire == FIRE_DEAD) ? A_LIGHT : A_STOKE;
-    if (n < cap) out[n++] = A_TECH;
     if (g_game.craftablesUnlocked)
         for (uint8_t id = 0; id < CRAFT_COUNT && n < cap; id++)
             if (craftOfferable(id)) out[n++] = (uint8_t)(A_CRAFT_BASE + id);
@@ -359,16 +362,13 @@ void cooldownFor(uint8_t code, int& channel, int& total) {
 
 // Button label, all via tr(). "more" is UI chrome with no upstream key, so it
 // uses the two closure-present glyphs 更/多 plus an ASCII page indicator
-// pointing at the batch a press will reveal; 科技树 is a firmware-only page name
-// with no upstream key either — see tech_page.h for the FIRMWARE_LITERAL_CHARS
-// registration that put 科/技 in the closure.
+// pointing at the batch a press will reveal.
 void labelFor(uint8_t code, int page, int numPages, char* out, size_t cap) {
     switch (code) {
         case A_LIGHT:  snprintf(out, cap, "%s", tr("light fire"));  break;
         case A_STOKE:  snprintf(out, cap, "%s", tr("stoke fire"));  break;
         case A_GATHER: snprintf(out, cap, "%s", tr("gather wood")); break;
         case A_TRAPS:  snprintf(out, cap, "%s", tr("check traps")); break;
-        case A_TECH:   snprintf(out, cap, "科技树");                 break;
         case A_MORE:
             snprintf(out, cap, "更多 (%d/%d)",
                      (page + 1 < numPages ? page + 2 : 1), numPages);
@@ -470,12 +470,10 @@ void repaintLog(m5gfx::M5Canvas& c) {
 
 // Paint the whole button area (clears it first) from the given slot views,
 // placing slot s at row s/2, column s%2 (row-major reading order). Every cell
-// goes through the shared action_band renderer, which centres exactly what each
-// cell carries: a priced cell centres its title+cost block, a free one (科技树 /
-// 更多) centres its lone title 15px lower. That step across a mixed row is the
-// user's 2026-08-01 on-device decision — 「如果没有 subtitle 的内容 你就居中那个
-// title!」 — and NOT the v0.10.1 alignment bug returning; see action_band.h
-// "ONE BAND, ONE CENTERING" before touching it.
+// goes through the shared action_band renderer: a priced cell puts its title in
+// a LEFT column and its costs, one entry per line, in a RIGHT column; a free one
+// (更多) centres its lone title. Both land the title on the SAME y, so a mixed
+// row is level — see action_band.h "LEFT TITLE / RIGHT COSTS".
 void paintButtons(m5gfx::M5Canvas& c, const BandView* views, int slotCount) {
     pages::Rect r = buttonAreaRect();
     c.fillRect(r.x, r.y, r.w, r.h, TFT_WHITE);
@@ -587,16 +585,6 @@ void RoomPage::onLocalAction(uint8_t param, int x, int y) {
         m_page++;
         M5.Speaker.tone(1800, 80);
         pager::showPage(pager::currentRingIndex(), false);
-        return;
-    }
-
-    if (code == A_TECH) {
-        // Pure navigation (the Outside 分工 cell's exact shape): latch the
-        // sub-page visible, then jump to its ring slot by name. It navigates
-        // away, so there is no tick here to re-baseline.
-        tech_page::open();
-        M5.Speaker.tone(1800, 80);
-        pager::showPage(pager::ringIndexByName("tech"), false);
         return;
     }
 

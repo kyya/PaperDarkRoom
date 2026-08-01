@@ -19,8 +19,10 @@
 // back to the village. outsideUnlocked also gates it (no assigning before the
 // forest exists). Layout (540x960, all text via tr() / closure-safe literals):
 //   tab header(0..72) · 人口 X/Y + 伐木者 xN info(80) · one 80px full-width band
-//   per UNLOCKED job (120 + n*90, a 36px name + a 24px "xN" count with a
-//   right-hand ▲/▼ stepper — assignWorker(job, ±1)) · a 「返回」band. P1 unlocks
+//   per UNLOCKED job (120 + n*90, a 36px name + a 24px "xN" count with the shared
+//   right-hand two-column stepper — assignWorker(job, ±1) from the fine column
+//   and ±10 from the coarse one, truncated to the idle/assigned count) · a
+//   「返回」band. P1 unlocks
 //   <=6 assignable jobs (miners are P2), so 6*90 + 80 = 620px from y=120 ends at
 //   740 < 928 status bar — one page, no pagination (a P2 job add would need it).
 // tick() settles the offline economy and repaints on change while open.
@@ -50,8 +52,10 @@ public:
 private:
     // <=6 unlocked P1 jobs + a trailing 返回 band = 7 regions. param is the band
     // index: 0..m_jobCount-1 are job bands (m_jobs maps them to Job ids), and the
-    // index == m_jobCount is the 返回 band. The press y picks the ▲/▼ half within
-    // a job band; x is unused (full-width bands).
+    // index == m_jobCount is the 返回 band. Within a job band the press x picks
+    // the stepper column (±1 / ±10) and the y picks the half (▲ / ▼) — see
+    // stepper.h; param itself needed no new encoding, since the Region already
+    // identifies the band and both hooks already receive x and y.
     static constexpr int MAX_JOBS = 6;
     mutable pages::Region m_regions[MAX_JOBS + 1];
     mutable int           m_regionCount = 0;
