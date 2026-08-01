@@ -2,8 +2,11 @@
 // License, v. 2.0. If a copy of the MPL was not distributed with this
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 //
-// Tech-tree (科技树) page — a read-only sub-page of the Room, reached from its
-// 科技树 action cell. Player feedback: nobody could tell the game HAS a growth
+// Tech-tree (科技树) page — a read-only sub-page of the VILLAGE (Outside),
+// reached from its 科技树 action cell, the one directly after 伐木. It was the
+// Room's sub-page until v0.14, when the user asked for the entry to move
+// ("科技树的按钮请你挪到小镇里面伐木的后面一个按钮"); the page body is unchanged,
+// but its tab highlight and its 返回 target followed the entry to the village. Player feedback: nobody could tell the game HAS a growth
 // line ("骨枪 looked like the ceiling", "never knew a 水壶 was craftable"),
 // because the Room only ever offers the craftables you can nearly afford
 // (room.js craftUnlocked). This page deliberately breaks that reveal-as-you-go
@@ -17,7 +20,7 @@
 // Built on the AssignPage sub-page model: an s_active latch gates draw()/
 // available() (an un-opened tech tree is a skipped ring slot, exactly like the
 // closed AssignPage), it reuses the SHARED tab header (page_tabs, 生火间 lit —
-// it is the Room's sub-page, not a 4th tab), and returns via a 「返回」band that
+// it is the village's sub-page, not a 4th tab), and returns via a 「返回」band that
 // jumps back to "room". It carries no tick(): nothing on it can change while it
 // is on screen (it has no action but 返回), so there is nothing to repaint.
 //
@@ -40,7 +43,7 @@
 namespace tech_page {
 // Open/close the tech-tree page (flip the visibility latch). The caller pairs
 // each with a pager::showPage to actually navigate (open -> this page's ring
-// index; close -> back to the Room).
+// index; close -> back to the Outside page).
 void open();
 void close();
 bool isOpen();

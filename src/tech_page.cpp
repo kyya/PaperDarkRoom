@@ -235,7 +235,10 @@ bool TechPage::available() const { return tech_page::isOpen(); }
 bool TechPage::draw(m5gfx::M5Canvas& c) {
     if (!available()) return false;
     c.fillSprite(TFT_WHITE);
-    page_tabs::draw(c, 0);           // shared tab header, 生火间 lit (Room's sub-page)
+    page_tabs::draw(c, 1);           // shared tab header, 村落 lit — v0.14 moved this
+                                     // page's entry cell to the Outside grid, so it
+                                     // is the village's sub-page now (AssignPage /
+                                     // PathPage parity), not the Room's.
 
     int y = SEC_TOP;
     for (int i = 0; i < LINE_COUNT; i++) {
@@ -259,13 +262,15 @@ bool TechPage::draw(m5gfx::M5Canvas& c) {
 }
 
 // Long-press on the 返回 band: close the latch (re-hiding this ring slot) and
-// jump back to the Room, mirroring the AssignPage return. The page has no other
-// action — a param that is not the band's can only be a stale region table, so
-// it low-beeps.
+// jump back to the page that opened it — the Outside grid since v0.14 moved the
+// 科技树 entry cell there, exactly mirroring the AssignPage/PathPage return.
+// Returning to the Room instead would drop the player somewhere they never came
+// from. The page has no other action — a param that is not the band's can only be
+// a stale region table, so it low-beeps.
 void TechPage::onLocalAction(uint8_t param, int x, int y) {
     (void)x; (void)y;
     if (param != 0) { M5.Speaker.tone(600, 120); return; }
     tech_page::close();
     M5.Speaker.tone(1800, 80);
-    pager::showPage(pager::ringIndexByName("room"), false);
+    pager::showPage(pager::ringIndexByName("outside"), false);
 }

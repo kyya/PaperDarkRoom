@@ -15,6 +15,7 @@
 #include "action_band.h"        // shared band renderer (v0.10.1, room+outside)
 #include "assign_page.h"        // 分工 cell opens the worker-assignment page
 #include "path_page.h"          // 尘土之路 cell opens the Path (背包整备) page
+#include "tech_page.h"          // 科技树 cell opens the tech-tree sub-page (v0.14)
 #include "cjk_text.h"
 #include "pomo_page.h"          // PAD (shared layout authority)
 #include "page_tabs.h"          // shared tab header (生火间 │ 村落 │ 贸易站)
@@ -42,7 +43,8 @@ constexpr int CONTENT_W = 540 - 2 * PAD;     // 492px usable (§9.2)
 // from a fixed top anchor (WRK_LEGEND_Y=84, under the tab header) with a uniform
 // 12px gap. Only the y axis + row counts are dynamic — the x geometry (box edges,
 // column widths/positions) stays constant. The 野外 action AREA is bottom-anchored
-// (independent of the flow) as two 96px rows: row 1 伐木 | 查看陷阱, row 2 分工 | —.
+// (independent of the flow) as THREE 96px rows: 伐木 | 科技树 · 查看陷阱 | 分工 ·
+// 尘土之路 | — (v0.14).
 //
 // Per-box height (box y0=top border, y1=bottom border): a box that shows N
 // content rows spans boxY0..(rowTop + N*ROWH + FS_PAD_BOTTOM), where boxY0 =
@@ -63,28 +65,36 @@ constexpr int CONTENT_W = 540 - 2 * PAD;     // 492px usable (§9.2)
 //   库存: ceil(nzEntries/3) rows, min 1 (for the "空" empty state), CLAMPED to the
 //         space left above the action area (see overflow protection).
 //
-// WORST-CASE BUDGET (everything maximal, to prove no collision) — recomputed
-// 2026-08-01 for FS_PAD_BOTTOM=6, which shifts every box below the first, and
-// with the stale P1 row bounds above corrected:
-//   工人 1 pop line + 4 grid rows -> box 96..(148 + 4*28 + 6) = 96..266
-//   建筑 13 buildings -> 7 rows -> legend@278, box 290..(314 + 7*28 + 6) = 290..516
-//   库存 legend@528, box top 540, rowTop=564. Space to the action area:
-//        INV_MAX_BOTTOM = ACT_ROW1_TOP - 12 = 702 (v0.10.1 grew ACT_H 80 -> 96
-//        for the cost/yield subtitle, see the 野外 action AREA note below), and
-//        the padding must fit INSIDE that ceiling too, so
-//        floor((702 - 564 - 6)/28) = 4 rows = 12 cells.
-//   Max 库存 entries = RES_COUNT(19) + ITEM_COUNT(14) = 33 > 12 -> the grid CLAMPS
-//   to 4 rows and the last cell collapses to "…" (the pre-existing tail-collapse,
-//   now driven by remaining-space rows instead of a fixed INV_ROWS constant).
-//   库存 box then ends 564 + 4*28 + 6 = 682 < 702, clearing the action row-1 top
-//   (714) by 32px.
-//   The clearance is structural, not a coincidence of these numbers: invBoxY1 =
-//   invRowTop + floor((702 - invRowTop - FS_PAD_BOTTOM)/28)*28 + FS_PAD_BOTTOM
-//   is <= 702 for ANY invRowTop, so however tall the two boxes above grow, the
-//   库存 box can never reach the action area — it just sheds rows. (At this
-//   worst case the padding costs nothing: without it the divide gives
-//   floor(138/28) = 4 rows too.) All region y's + the tick cooldown-refresh rect
-//   track the (static) action area, so they need no dynamic recompute.
+// WORST-CASE BUDGET — the action grid's height is DYNAMIC since v0.14, so the
+// fieldset ceiling moves with it. The grid is bottom-anchored at 916 and packs
+// 2..5 visible cells into 1..3 rows, giving three possible ceilings:
+//     rows  areaTop  INV_MAX_BOTTOM (= areaTop - FS_BOX_GAP)
+//       1     820          808          伐木 · 科技树
+//       2     714          702          + 查看陷阱 and/or 分工
+//       3     608          596          + 漫漫尘途 (everything unlocked)
+// Taking the tallest possible fieldset stack (工人 1 pop line + 4 grid rows ->
+// 96..266; 建筑 13 buildings -> 7 rows -> 290..516; 库存 rowTop 564) against each:
+//       1 row  -> floor((808-564-6)/28) = 8 库存 rows (24 cells)
+//       2 rows -> floor((702-564-6)/28) = 4 库存 rows (12 cells)
+//       3 rows -> floor((596-564-6)/28) = 0 -> the `availRows < 1 -> 1` floor
+//                 gives 1 row (3 cells); the box then ends at 598, overshooting
+//                 INV_MAX_BOTTOM by 2px but still clearing the grid by 10px.
+// So the third action row costs the inventory 7 rows at the very worst — and it
+// only costs that once the compass is bought, by which point the player is deep
+// enough that 库存 has long been in tail-collapse anyway. Early on the grid is a
+// single row and 库存 gets the space back.
+// Max 库存 entries = RES_COUNT(19) + ITEM_COUNT(14) = 33, so any clamp below 11
+// rows tail-collapses the last cell to "…" (the pre-existing mechanism, now
+// driven by remaining-space rows instead of a fixed INV_ROWS constant).
+// FS_MIN_ROWS=2 is deliberately NOT honoured in the 3-row worst case: the space
+// clamp outranks the min-height floor, which is the pre-existing precedence and
+// the only way to guarantee no overlap.
+// Verified exhaustively over every reachable combination of the three gates
+// (trap / job / compass) crossed with nJobs 0..9 and nzBuildings 0..13, skipping
+// states the gates make impossible: NO collision in any of them, and the minimum
+// clearance between the 库存 box and the grid is 278px at 1 row, 88px at 2 rows
+// and 10px at 3 rows. All region y's and the cooldown-refresh rects are derived
+// from the same packing, so nothing needs a separate recompute.
 // ----------------------------------------------------------------------------
 
 // ---- shared fieldset geometry (all three boxes span the same x, PAD..540-PAD).
@@ -134,47 +144,95 @@ constexpr int INV_COLX[INV_COLS] = {
     FS_CONTENT_X0 + 2 * (INV_COL_W + INV_COL_GAP),        // 356
 };
 
-// ---- 野外 action AREA (v0.4.5): two 240px columns, two rows, bottom-anchored.
-// Row 2 (分工) bottom hugs 916 (< 928 status bar); row 1 (伐木 | 查看陷阱) sits a
-// 10px gap above it. Two columns: (492 - 12)/2 = 240px each, x = {24, 276} (276 +
-// 240 = 516 = right edge ✓).
-// v0.10.1 ("第二页的按钮加消耗/收获"): ROW 1's two verbs carry a cost/yield
-// sub-row (the shared action_band renderer's convention, "+50 木头" / "-2 诱饵")
-// — ACT_H grew 80 -> 96 to fit title+subtitle+bar-gutter (both 伐木's yield and
-// 查看陷阱's bait cost are always exactly one resource, so unlike Room's craft
-// costs this page never needs a 2-line wrap). ROW 2 (分工 / 尘土之路) is pure
-// navigation with no cost ever, so its titles centre alone and land 15px BELOW
-// ROW 1's — intended, per the user's 2026-08-01 on-device call (see
-// action_band.h "ONE BAND, ONE CENTERING"); the same step appears within ROW 1
-// itself when 查看陷阱 has no bait to spend and drops its cost line. v0.12 also
-// restored the app-wide 36px title scale here along with every other button; the
-// widest label, 查看陷阱 / 漫漫尘途 at 4x36 = 144px, still clears the 228px a
-// 240px column leaves after the frame and side padding, so the narrow-cell
-// downgrade never fires.
+// ---- 野外 action AREA (v0.4.5): two 240px columns, THREE rows (v0.14),
+// bottom-anchored. The bottom row hugs 916 (< 928 status bar) and each row above
+// sits a 10px gap higher. Two columns: (492 - 12)/2 = 240px each, x = {24, 276}
+// (276 + 240 = 516 = right edge ✓). Reading order is row-major:
+//   ROW 1: 伐木          | 科技树
+//   ROW 2: 查看陷阱      | 分工
+//   ROW 3: 尘土之路      | —
+// v0.14 inserted 科技树 directly after 伐木 (user: "科技树的按钮请你挪到小镇里面
+// 伐木的后面一个按钮"), pushing everything下 one slot and adding the third row.
+// The cells keep FIXED positions with conditional blanks — the same model the
+// page has always used — rather than packing the visible ones tight. Packing was
+// considered (it would let an early village with no trap/job/compass use fewer
+// rows and hand the space back to 库存) but rejected: it cannot help the WORST
+// case, which is what the vertical budget below has to survive — once everything
+// is unlocked all five cells exist and three rows are needed regardless — and it
+// would turn a static y-table into a dynamic one that pressRect, onLocalAction
+// and the cooldown rects would all have to re-derive.
+// v0.10.1 ("第二页的按钮加消耗/收获"): the two verbs carry a cost/yield line
+// ("+50 木头" / "-2 诱饵") — ACT_H grew 80 -> 96 for it. Under 变体 B (v0.14) that
+// line sits in the band's RIGHT column beside the title rather than under it, so
+// the height is no longer driven by a stacked block; 96 stays because it is what
+// lets a 3-entry cost column clear the cooldown bar (see action_band.cpp). The
+// widest label here, 查看陷阱 / 漫漫尘途 at 4x36 = 144px, does NOT fit beside a
+// cost line in a 240px cell — 查看陷阱 is one of the four titles the narrow-cell
+// guard shrinks to 24px; 漫漫尘途 carries no cost, so it stays 36px and centred.
 constexpr int ACT_H        = 96;             // long-press band (§9.3: >=80px floor)
 constexpr int ACT_ROW_GAP  = 10;
-constexpr int ACT_ROW2_TOP = 916 - ACT_H;                       // 820 — 分工 row (bottom)
-constexpr int ACT_ROW1_TOP = ACT_ROW2_TOP - ACT_ROW_GAP - ACT_H; // 714 — gather/traps row
+constexpr int ACT_PITCH    = ACT_H + ACT_ROW_GAP;                // 106
+constexpr int ACT_BOTTOM   = 916;            // area's fixed bottom (status bar 928)
+constexpr int ACT_COLS     = 2;
 constexpr int ACT_COL_GAP  = 12;
 constexpr int ACT_COL_W    = (CONTENT_W - ACT_COL_GAP) / 2;      // 240
-constexpr int ACT_COLX[2]  = { PAD, PAD + ACT_COL_W + ACT_COL_GAP };  // {24, 276}
+constexpr int ACT_COLX[ACT_COLS] = { PAD, PAD + ACT_COL_W + ACT_COL_GAP };  // {24, 276}
 constexpr int ACT_DIV      = ACT_COLX[1];    // 276 — press x < DIV -> left column
 
-// Overflow ceiling for the 库存 box: it must stop this far above the action area.
-constexpr int INV_MAX_BOTTOM = ACT_ROW1_TOP - FS_BOX_GAP;        // 702
+// The five action cells, in fixed reading order. A cell that is gated off does
+// NOT hold its slot — the ones after it pack up (v0.14, user: the static table
+// left a visible HOLE where 查看陷阱 would be before the first trap is built).
+enum : uint8_t { AC_GATHER = 0, AC_TECH, AC_TRAPS, AC_ASSIGN, AC_PATH, AC_MAX };
 
-// One param per action ROW (the pager resolves the row from the press y = which
-// Region band it hit; onLocalAction then resolves the column from x).
-constexpr uint8_t PARAM_ROW1 = 0xFE;         // 伐木 | 查看陷阱
-constexpr uint8_t PARAM_ROW2 = 0xFD;         // 分工 | —
+struct CellView {
+    uint8_t code;
+    const char* label;
+    char        cost[24];
+    bool        hasCost;
+    bool        enabled;
+    int         coolLeft, coolTotal;
+};
+
+// Which cells exist right now, packed. 伐木 and 科技树 are never gated, so the
+// count runs 2..5 and the grid is 1..3 rows.
+int buildCells(uint8_t* out) {
+    int n = 0;
+    out[n++] = AC_GATHER;                                    // always offered
+    out[n++] = AC_TECH;                                      // never gated
+    if (g_game.buildings[B_TRAP] > 0)  out[n++] = AC_TRAPS;  // needs a trap
+    if (g_game.hasUnlockedJob())       out[n++] = AC_ASSIGN; // needs a job
+    if (g_game.whole(R_COMPASS) > 0)   out[n++] = AC_PATH;   // needs a compass
+    return n;
+}
 
 int ceilDiv(int a, int b) { return (a + b - 1) / b; }
 
-// The rect of the action cell in `col` of the row starting at `top` — the ONE
-// description of where a 野外 button is, shared by drawActionArea's frame and
-// pressRect's invert-flash so the two cannot drift apart.
-pages::Rect actCellRect(int col, int top) {
-    return pages::Rect{ ACT_COLX[col], top, ACT_COL_W, ACT_H };
+// Rows the packed grid needs (1..3), and where its top edge lands. The area is
+// BOTTOM-anchored at ACT_BOTTOM, so shedding a row moves the whole block DOWN
+// and hands the space back to the fieldsets above (same family as the modals'
+// bottom-anchored button columns).
+int actionRows() {
+    uint8_t tmp[AC_MAX];
+    return ceilDiv(buildCells(tmp), ACT_COLS);
+}
+int actionAreaTop(int rows) {
+    return ACT_BOTTOM - rows * ACT_H - (rows - 1) * ACT_ROW_GAP;
+}
+int actionAreaTop() { return actionAreaTop(actionRows()); }
+
+// Overflow ceiling for the 库存 box: it must stop this far above the action area.
+// DYNAMIC since v0.14 — it rises as the grid sheds rows (see the budget above):
+//   3 rows -> areaTop 608 -> 596     2 rows -> 714 -> 702     1 row -> 820 -> 808
+int invMaxBottom() { return actionAreaTop() - FS_BOX_GAP; }
+
+// The rect of packed slot `s` (row-major: row s/2, column s%2) for a grid whose
+// top edge is `areaTop` — the ONE description of where a 野外 button is, shared
+// by the draw call, pressRect's invert-flash and the cooldown rect, so all three
+// track the same dynamic layout.
+pages::Rect actCellRect(int slot, int areaTop) {
+    return pages::Rect{ ACT_COLX[slot % ACT_COLS],
+                        areaTop + (slot / ACT_COLS) * ACT_PITCH,
+                        ACT_COL_W, ACT_H };
 }
 
 // 伐木's current wood yield — "+50 木头" with a cart, else "+10 木头" (room.js
@@ -261,7 +319,7 @@ Layout computeLayout() {
     // The bottom padding lives INSIDE the ceiling, so subtract it before
     // dividing — otherwise a full 库存 would push its padded bottom border past
     // INV_MAX_BOTTOM and into the action area's clearance.
-    int availRows = (INV_MAX_BOTTOM - L.invRowTop - FS_PAD_BOTTOM) / ROWH;  // floor
+    int availRows = (invMaxBottom() - L.invRowTop - FS_PAD_BOTTOM) / ROWH;  // floor
     if (availRows < 1) availRows = 1;
     L.invRows  = wantRows < availRows ? wantRows : availRows;
     L.invBoxY1 = L.invRowTop + L.invRows * ROWH + FS_PAD_BOTTOM;
@@ -410,72 +468,121 @@ void drawInventory(m5gfx::M5Canvas& c, const Layout& L) {
     }
 }
 
-// One action cell (伐木 / 查看陷阱 / 分工 / 尘土之路) in `col` of the row at
-// `top` — a thin wrapper around the shared action_band::draw (the same renderer
-// every other button in the firmware goes through; see action_band.h for the
-// frame / centring / cooldown-bar rules). Each cell centres exactly what it
-// carries, so the pure-navigation ROW 2 (分工 / 尘土之路, never priced) centres
-// its lone title 15px below where the priced ROW 1 verbs put theirs — the
-// user's 2026-08-01 on-device decision, not a regression.
-void drawActionBand(m5gfx::M5Canvas& c, int col, int top, const char* label,
-                    const char* cost, bool enabled,
-                    int coolLeft, int coolTotal) {
-    action_band::draw(c, actCellRect(col, top), label, cost, enabled,
-                      coolLeft, coolTotal);
-}
+// Fill the packed cell list + one CellView per cell, and the region table (one
+// y-band per ROW — the pager hit-tests y only, so onLocalAction resolves the
+// COLUMN from the press x, exactly the model RoomPage's two-column grid uses).
+// Returns the ROW count; *slotCountOut gets the cell count and *areaTopOut the
+// grid's top edge for this state.
+int layoutCells(pages::Region* regionsOut, uint8_t* slotCodes, CellView* views,
+                uint32_t now, int* slotCountOut, int* areaTopOut) {
+    int n = buildCells(slotCodes);
+    int rows = ceilDiv(n, ACT_COLS);
+    int areaTop = actionAreaTop(rows);
 
-// Paint the two-row action area (v0.4.5). ROW 1 left = 伐木 (gather wood): always
-// offered here — the Room page gated it on outsideUnlocked, a precondition for
-// this page drawing at all. ROW 1 right = 查看陷阱 (check traps): drawn only when
-// a trap stands (buildings[B_TRAP] > 0); with none the cell is left blank (无供给
-// 整格不画, not a disabled frame), matching the Room 供给 condition. ROW 2 left =
-// 分工: opens AssignPage, but only once at least one job is unlocked — with none
-// there is nothing to assign, so the cell is left blank by the SAME 无供给 rule
-// (g_game.hasUnlockedJob(), the shared job filter). ROW 2 right = 尘土之路: opens
-// PathPage, but only once a compass is held (room.js pathDiscovery — buying a
-// compass unlocks the Path); blank before that by the same 无供给 rule.
-// A live gather/traps cooldown (channels 1/2) renders its cell dashed + draining.
-void drawActionArea(m5gfx::M5Canvas& c, uint32_t now) {
-    int gcool = g_game.cooldownLeft(1, now);                 // gather channel
-    char gyield[24]; gatherYieldLine(gyield, sizeof(gyield));
-    drawActionBand(c, 0, ACT_ROW1_TOP, tr("gather wood"), gyield,
-                   gcool == 0, gcool, GATHER_DELAY_S);
-    if (g_game.buildings[B_TRAP] > 0) {
-        int tcool = g_game.cooldownLeft(2, now);             // traps channel
-        char tcost[24]; bool hasT = trapsCostLine(tcost, sizeof(tcost));
-        drawActionBand(c, 1, ACT_ROW1_TOP, tr("check traps"), hasT ? tcost : nullptr,
-                       tcool == 0, tcool, TRAPS_DELAY_S);
+    for (int i = 0; i < n; i++) {
+        CellView& v = views[i];
+        v.code = slotCodes[i];
+        v.cost[0] = 0; v.hasCost = false;
+        v.enabled = true; v.coolLeft = 0; v.coolTotal = 0;
+        switch (v.code) {
+            case AC_GATHER:
+                // 伐木 — always offered here; the Room page gated it on
+                // outsideUnlocked, a precondition for this page drawing at all.
+                v.label = tr("gather wood");
+                gatherYieldLine(v.cost, sizeof v.cost);
+                v.hasCost   = true;
+                v.coolTotal = GATHER_DELAY_S;
+                v.coolLeft  = g_game.cooldownLeft(1, now);   // gather channel
+                v.enabled   = v.coolLeft == 0;
+                break;
+            case AC_TECH:
+                // 科技树 — v0.14 moved this entry here from the Room grid. 科/技
+                // ride the gen_cjk_font.py FIRMWARE_LITERAL_CHARS registry and 树
+                // is in the §8.3 closure, so the literal is glyph-safe wherever it
+                // lives (the registry is explicit, not scanned out of sources).
+                // Pure navigation and NEVER gated — the ladders it explains read
+                // the same from the first fire onward. It does now sit behind
+                // outsideUnlocked, since the whole page is: see outside_page.h.
+                v.label = "科技树";
+                break;
+            case AC_TRAPS: {
+                // 查看陷阱 — only listed once a trap stands; before that the cell
+                // does not exist at all and the cells after it pack up.
+                v.label = tr("check traps");
+                v.hasCost   = trapsCostLine(v.cost, sizeof v.cost);
+                v.coolTotal = TRAPS_DELAY_S;
+                v.coolLeft  = g_game.cooldownLeft(2, now);   // traps channel
+                v.enabled   = v.coolLeft == 0;
+                break;
+            }
+            case AC_ASSIGN:
+                // 分工 — hardcoded literal like the old "更多": 分/工 are in the
+                // §8.3 closure (分享 / 工人). Pure navigation, no cost ever.
+                v.label = "分工";
+                break;
+            default:
+                // 尘土之路 — tr("A Dusty Path") == 漫漫尘途 (official name, glyphs
+                // in the closure). Pure navigation, no cost ever.
+                v.label = tr("A Dusty Path");
+                break;
+        }
     }
-    // 分工 — hardcoded literal like the old "更多": 分/工 are in the §8.3 closure
-    // (分享 / 工人). Blank until a job exists (parity with 查看陷阱's 无供给 blank).
-    // Pure navigation — no cost ever.
-    if (g_game.hasUnlockedJob())
-        drawActionBand(c, 0, ACT_ROW2_TOP, "分工", nullptr, true, 0, 0);
-    // 尘土之路 (right cell) — tr("A Dusty Path") == 漫漫尘途 (official name; glyphs in
-    // the §8.3 closure). Blank until a compass is held (parity with 分工's 无供给).
-    // Pure navigation — no cost ever.
-    if (g_game.whole(R_COMPASS) > 0)
-        drawActionBand(c, 1, ACT_ROW2_TOP, tr("A Dusty Path"), nullptr, true, 0, 0);
+
+    for (int r = 0; r < rows; r++) {
+        regionsOut[r].y0    = (uint16_t)(areaTop + r * ACT_PITCH);
+        regionsOut[r].y1    = (uint16_t)(areaTop + r * ACT_PITCH + ACT_H);
+        regionsOut[r].type  = 1;                 // firmware-local
+        regionsOut[r].param = (uint8_t)r;        // ROW; onLocalAction adds col from x
+    }
+    *slotCountOut = n;
+    *areaTopOut   = areaTop;
+    return rows;
 }
 
-// The cooldown partial-refresh target: only ROW 1 carries a draining bar (gather
-// /traps), so the tick repaints just that row's band (+ a 2px bleed) instead of a
-// full-page redraw — ROW 2 (分工) has no cooldown and never changes on a tick.
-pages::Rect actionCoolRect() {
-    return pages::Rect{ 0, ACT_ROW1_TOP - 2, 540, ACT_H + 4 };
+// Paint the packed action grid: cell i at row i/2, column i%2. A live
+// gather/traps cooldown renders its cell dashed + draining.
+void drawActionArea(m5gfx::M5Canvas& c, const CellView* views, int n, int areaTop) {
+    for (int i = 0; i < n; i++)
+        action_band::draw(c, actCellRect(i, areaTop), views[i].label,
+                          views[i].hasCost ? views[i].cost : nullptr,
+                          views[i].enabled, views[i].coolLeft, views[i].coolTotal);
 }
 
-// Repaint BOTH action rows into `c` for the partial-refresh path (the surrounding
-// full-page pixels already sit in the canvas). Only ROW 1 is pushed (actionCoolRect)
-// — redrawing ROW 2 identically is harmless and keeps one draw path.
-void repaintActionArea(m5gfx::M5Canvas& c, uint32_t now) {
-    pages::Rect r = actionCoolRect();
-    c.fillRect(r.x, r.y, r.w, r.h, TFT_WHITE);
-    drawActionArea(c, now);
+// The whole action area (+2px bleed) — what the partial-refresh path CLEARS
+// before redrawing. It must span every row: a cooldown can now live in any cell
+// (伐木 is always slot 0, but 查看陷阱's slot moves with the packing), and the
+// area's own top edge moves as rows are gained or lost.
+pages::Rect actionAreaRect(int areaTop) {
+    return pages::Rect{ 0, areaTop - 2, 540, (ACT_BOTTOM - areaTop) + 4 };
+}
+
+// Bounding rect (2px bleed) of the packed cells currently draining a bar (bit i
+// = slot i). Slot-indexed rather than hardcoded to a row, so it follows the
+// packing wherever 查看陷阱 lands. Empty mask -> zero rect (the caller gates).
+pages::Rect coolingRect(uint16_t mask, int areaTop) {
+    int x0 = 540, y0 = 960, x1 = 0, y1 = 0;
+    for (int i = 0; i < AC_MAX; i++) {
+        if (!(mask & (1u << i))) continue;
+        pages::Rect r = actCellRect(i, areaTop);
+        if (r.x < x0)         x0 = r.x;
+        if (r.x + r.w > x1)   x1 = r.x + r.w;
+        if (r.y < y0)         y0 = r.y;
+        if (r.y + r.h > y1)   y1 = r.y + r.h;
+    }
+    if (x1 <= x0) return pages::Rect{ 0, 0, 0, 0 };
+    return pages::Rect{ x0 - 2, y0 - 2, (x1 - x0) + 4, (y1 - y0) + 4 };
 }
 
 // Content signature — a hash of every live value that alters a painted number or
 // label (population, worker mix, buildings, inventory, the shared Room tab title).
+// It ALSO has to cover everything that changes which action cells exist, because
+// the grid packs and its row count feeds the fieldset budget: a gate flip must
+// force the full redraw or a freshly-built trap would not grow its button until
+// something else happened to change. All three gates are already in here —
+// 查看陷阱 reads buildings[B_TRAP] and 分工 reads hasUnlockedJob(), both covered
+// by the buildings[] loop; 尘土之路 reads whole(R_COMPASS), covered by the
+// resource loop. 伐木/科技树 are never gated. Nothing more to add, but do not
+// remove those loops.
 // tick() compares it each second to decide a full redraw; onLocalAction re-baselines
 // it right after its own showPage so the same action's state change doesn't force a
 // SECOND full redraw next tick (see onLocalAction). Reads only g_game, never mutates.
@@ -492,20 +599,6 @@ uint32_t contentSig() {
     return sig;
 }
 
-// Bounding rect (2px bleed) of the ROW-1 verb cells currently draining a bar:
-// bit 0 = 伐木 (gather ch1, left), bit 1 = 查看陷阱 (traps ch2, right). The cooldown
-// tick pushes just this — not the whole 540-wide row — so only the cell with a
-// moving bar flips. Empty mask -> zero rect (the caller gates on mask).
-pages::Rect coolingRect(uint8_t mask) {
-    int x0 = 540, x1 = 0;
-    for (int col = 0; col < 2; col++) {
-        if (!(mask & (1u << col))) continue;
-        if (ACT_COLX[col] < x0)             x0 = ACT_COLX[col];
-        if (ACT_COLX[col] + ACT_COL_W > x1) x1 = ACT_COLX[col] + ACT_COL_W;
-    }
-    if (x1 <= x0) return pages::Rect{ 0, 0, 0, 0 };
-    return pages::Rect{ x0 - 2, ACT_ROW1_TOP - 2, (x1 - x0) + 4, ACT_H + 4 };
-}
 }  // namespace
 
 // ================================ Page API =================================
@@ -515,24 +608,17 @@ const pages::Region* OutsidePage::regions(int* n) const {
     return m_regionCount ? m_regions : nullptr;
 }
 
-// Press-flash target: each action ROW is two 240px columns, so flash only the
-// column cell that carries a real button — mirroring drawActionArea's 无供给
-// blanks (查看陷阱 only with a trap, 分工 only with a job, ROW 2 right always
-// blank). A blank cell returns w=0 so an empty half never flashes black.
+// Press-flash target: param is the ROW, the press x picks the COLUMN, and the
+// two together give the packed slot index — the SAME slot onLocalAction resolves
+// and the same actCellRect the grid was drawn from. A slot past the packed cells
+// (the odd trailing half when the cell count is odd) returns w=0, so the empty
+// half never flashes black. There is no per-cell gating left to mirror here:
+// gated-off cells are absent from the packing entirely rather than drawn blank.
 pages::Rect OutsidePage::pressRect(const pages::Region& rg, int x, int y) const {
     (void)y;
-    bool left = x < ACT_DIV;
-    if (rg.param == PARAM_ROW1) {
-        if (left) return actCellRect(0, rg.y0);                       // 伐木
-        if (g_game.buildings[B_TRAP] > 0)
-            return actCellRect(1, rg.y0);                             // 查看陷阱
-    } else if (rg.param == PARAM_ROW2) {
-        if (left && g_game.hasUnlockedJob())
-            return actCellRect(0, rg.y0);                             // 分工
-        if (!left && g_game.whole(R_COMPASS) > 0)
-            return actCellRect(1, rg.y0);                             // 尘土之路
-    }
-    return pages::Rect{ 0, rg.y0, 0, 0 };                                     // blank cell
+    int slot = (int)rg.param * ACT_COLS + (x < ACT_DIV ? 0 : 1);
+    if (slot < 0 || slot >= m_slotCount) return pages::Rect{ 0, rg.y0, 0, 0 };
+    return actCellRect(slot, m_areaTop);
 }
 
 // Hidden until the forest opens: returning false makes showPageOrNext skip this
@@ -546,69 +632,51 @@ bool OutsidePage::draw(m5gfx::M5Canvas& c) {
     c.fillSprite(TFT_WHITE);
     page_tabs::draw(c, 1);           // shared tab header, Outside active
 
+    // The action grid is laid out FIRST: its row count decides where the area's
+    // top edge lands, and computeLayout()'s 库存 ceiling (invMaxBottom) reads
+    // that same packing, so the fieldsets above take back whatever the grid does
+    // not use.
+    CellView views[AC_MAX];
+    m_regionCount = layoutCells(m_regions, m_slotCodes, views, epochNow(),
+                                &m_slotCount, &m_areaTop);
+
     Layout L = computeLayout();      // flowed fieldset y-geometry for this state
     drawWorkerSummary(c, L);         // 工人 fieldset (人口 line + read-only grid)
     if (L.bldShown) drawBuildings(c, L);   // 建筑 fieldset (hidden when empty)
     drawInventory(c, L);             // 库存 fieldset
 
-    // 野外 action area — two bottom-anchored rows, each a type=1 Region: row 1
-    // (伐木 | 查看陷阱, PARAM_ROW1) and row 2 (分工 | —, PARAM_ROW2). onLocalAction
-    // resolves the column from x within the row the pager already picked by y.
-    drawActionArea(c, epochNow());
-    m_regions[0].y0 = (uint16_t)ACT_ROW1_TOP;
-    m_regions[0].y1 = (uint16_t)(ACT_ROW1_TOP + ACT_H);
-    m_regions[0].type  = 1;
-    m_regions[0].param = PARAM_ROW1;
-    m_regions[1].y0 = (uint16_t)ACT_ROW2_TOP;
-    m_regions[1].y1 = (uint16_t)(ACT_ROW2_TOP + ACT_H);
-    m_regions[1].type  = 1;
-    m_regions[1].param = PARAM_ROW2;
-    m_regionCount = 2;
+    drawActionArea(c, views, m_slotCount, m_areaTop);
     return true;
 }
 
-// Long-press on an action row -> param picks the row, the press x picks the column
-// (x < ACT_DIV = left). ROW 1: 伐木 gatherWood | 查看陷阱 checkTraps (only when a
-// trap stands — else blank, low beep). ROW 2: 分工 opens AssignPage (only when a
-// job is unlocked — else blank, low beep) | blank right. A success high-beeps +
-// persists + repaints; a rejected/blank press low-beeps.
+// Long-press on an action row -> param picks the row, the press x picks the
+// column; together they index the packed cell list, so a press always resolves
+// to whatever cell is actually drawn there. 伐木/查看陷阱 run their engine verb;
+// 科技树/分工/尘土之路 latch their sub-page and jump to it by name. A success
+// high-beeps + persists + repaints; a rejected press or an empty trailing half
+// low-beeps.
 void OutsidePage::onLocalAction(uint8_t param, int x, int y) {
     (void)y;
+    int slot = (int)param * ACT_COLS + (x < ACT_DIV ? 0 : 1);
+    if (slot < 0 || slot >= m_slotCount) { M5.Speaker.tone(600, 120); return; }
+    uint8_t code = m_slotCodes[slot];
 
-    if (param == PARAM_ROW2) {
-        // ROW 2: 分工 (left, needs a job) | 尘土之路 (right, needs a compass). Each
-        // jumps to its sub-page by name; an ungated (blank) cell low-beeps.
-        if (x < ACT_DIV) {
-            if (g_game.hasUnlockedJob()) {
-                assign_page::open();
-                M5.Speaker.tone(1800, 80);
-                pager::showPage(pager::ringIndexByName("assign"), false);
-            } else {
-                M5.Speaker.tone(600, 120);            // blank cell (no job unlocked)
-            }
-        } else {
-            if (g_game.whole(R_COMPASS) > 0) {
-                path_page::open();
-                M5.Speaker.tone(1800, 80);
-                pager::showPage(pager::ringIndexByName("path"), false);
-            } else {
-                M5.Speaker.tone(600, 120);            // blank cell (no compass held)
-            }
-        }
+    // ---- the three navigation cells. Each latches its sub-page visible and then
+    // jumps to that ring slot by name. They navigate away, so none of them
+    // re-baselines the tick signature. Their gates already decided whether the
+    // cell exists at all, so reaching one here means it is live.
+    if (code == AC_TECH || code == AC_ASSIGN || code == AC_PATH) {
+        const char* ring;
+        if (code == AC_TECH)        { tech_page::open();   ring = "tech";   }
+        else if (code == AC_ASSIGN) { assign_page::open(); ring = "assign"; }
+        else                        { path_page::open();   ring = "path";   }
+        M5.Speaker.tone(1800, 80);
+        pager::showPage(pager::ringIndexByName(ring), false);
         return;
     }
-    if (param != PARAM_ROW1) { M5.Speaker.tone(600, 120); return; }
 
     uint32_t now = epochNow();
-    Result r;
-    if (x < ACT_DIV) {
-        r = g_game.gatherWood(now);                   // 伐木 (left cell)
-    } else if (g_game.buildings[B_TRAP] > 0) {
-        r = g_game.checkTraps(now);                   // 查看陷阱 (right cell)
-    } else {
-        M5.Speaker.tone(600, 120);                    // blank cell (no trap stands)
-        return;
-    }
+    Result r = (code == AC_GATHER) ? g_game.gatherWood(now) : g_game.checkTraps(now);
     if (r == RC_OK) {
         M5.Speaker.tone(1800, 80);
         g_game.save();
@@ -616,8 +684,9 @@ void OutsidePage::onLocalAction(uint8_t param, int x, int y) {
         // Re-baseline tick()'s content signature to the state we JUST drew (no extra
         // settle: draw() paints un-settled g_game, contentSig() must mirror it). So
         // this same 伐木/查看陷阱 no longer forces a SECOND full redraw next tick —
-        // only genuine economy advancing in the following second still does. (The 分工
-        // branch navigates away to AssignPage, so it has no such tick to double up.)
+        // only genuine economy advancing in the following second still does. (The
+        // navigation branches above leave for another page, so they have no such
+        // tick to double up.)
         m_lastSig = contentSig();
     } else {
         M5.Speaker.tone(600, 120);                    // cooldown / engine reject
@@ -635,7 +704,7 @@ void OutsidePage::onLocalAction(uint8_t param, int x, int y) {
 // cleaned at sleep by pager::payGhostDebtIfDue instead. Mirrors the Room page.
 void OutsidePage::tick(uint32_t nowMs) {
     static uint32_t s_lastTick     = 0;
-    static uint8_t  s_lastCoolMask = 0;   // cooling cells the previous tick pushed
+    static uint16_t s_lastCoolMask = 0;   // cooling slots the previous tick pushed
 
     if (s_lastTick != 0 && nowMs - s_lastTick < 1000) return;
     s_lastTick = nowMs;
@@ -645,14 +714,18 @@ void OutsidePage::tick(uint32_t nowMs) {
 
     uint32_t sig = contentSig();
 
-    // 野外 action-row cooldowns (gather ch1 left / traps ch2 right) drain a bar,
-    // but — unlike the content above — they are NOT in the signature: the wood/meat
-    // they yield is banked at press time, so nothing else changes while they cool.
-    // bit 0 = 伐木 (left), bit 1 = 查看陷阱 (right, only when a trap stands).
-    uint8_t coolMask = 0;
-    if (g_game.cooldownLeft(1, now) > 0) coolMask |= 1u;
-    if (g_game.buildings[B_TRAP] > 0 && g_game.cooldownLeft(2, now) > 0)
-        coolMask |= 2u;
+    // 野外 cooldowns drain a bar, but — unlike the content above — they are NOT in
+    // the signature: the wood/meat they yield is banked at press time, so nothing
+    // else changes while they cool. The mask is over PACKED SLOT indices now, not
+    // fixed rows, so it is built from the same layoutCells() result the painter
+    // uses — 查看陷阱's slot moves depending on which cells exist.
+    CellView views[AC_MAX];
+    m_regionCount = layoutCells(m_regions, m_slotCodes, views, now,
+                                &m_slotCount, &m_areaTop);
+    uint16_t coolMask = 0;
+    for (int i = 0; i < m_slotCount; i++)
+        if (views[i].coolTotal > 0 && views[i].coolLeft > 0)
+            coolMask |= (uint16_t)(1u << i);
 
     if (sig != m_lastSig) {
         m_lastSig = sig;
@@ -662,11 +735,16 @@ void OutsidePage::tick(uint32_t nowMs) {
     }
 
     if (coolMask || s_lastCoolMask) {
-        repaintActionArea(canvas, now);
-        // Union of the cells cooling now and the ones that just cleared this tick
-        // (were cooling last tick) — never the whole 540-wide row. FASTEST; the
-        // ghost cleanup is deferred to sleep (see the function note).
-        pager::partialRefresh(coolingRect((uint8_t)(coolMask | s_lastCoolMask)),
+        // Clear the whole (dynamic) area and repaint every cell into the canvas...
+        pages::Rect area = actionAreaRect(m_areaTop);
+        canvas.fillRect(area.x, area.y, area.w, area.h, TFT_WHITE);
+        drawActionArea(canvas, views, m_slotCount, m_areaTop);
+        // ...but PUSH only the union of the cells cooling now and the ones that
+        // just cleared this tick. FASTEST; the ghost cleanup is deferred to sleep
+        // (see the function note). A row-count change cannot sneak through here:
+        // it can only come from a gate flip, which moves contentSig and takes the
+        // full-redraw branch above.
+        pager::partialRefresh(coolingRect((uint16_t)(coolMask | s_lastCoolMask), m_areaTop),
                               pages::RefreshMode::FASTEST);
     }
     s_lastCoolMask = coolMask;

@@ -176,6 +176,49 @@ int main() {
     CHECK(gs.stores[R_FUR] > furB, "hunter produced fur offline");
     CHECK(gs.stores[R_MEAT] > meatB, "hunter produced meat offline");
 
+    printf("== [v0.14] stepper ±10 truncates to what is available ==\n");
+    // The AssignPage stepper's coarse column passes ±stepper::MANY (10) straight
+    // to assignWorker, relying on it to spend min(delta, available) exactly as
+    // upstream does (outside.js:376 `Math.min(available, btn.data)`). These cases
+    // pin that contract down at the engine, which is where the truncation lives —
+    // the page itself only decides the number.
+    {
+        GameState g3;
+        g3.init();
+        uint32_t t3 = 500;
+        g3.settle(t3);
+        g3.buildings[B_LODGE] = 1;              // unlock hunter/trapper
+        g3.population = 25;
+        g3.workers[J_HUNTER] = 0;
+
+        // (a) plenty idle -> a ±10 tap moves the full 10
+        CHECK(g3.assignWorker(J_HUNTER, 10) == RC_OK, "+10 hunters accepted");
+        CHECK(g3.workers[J_HUNTER] == 10, "+10 with 25 idle assigns all 10");
+
+        // (b) fewer idle than asked -> TRUNCATE, do not refuse. 25 pop, 10 already
+        // hunting, 12 parked in another job leaves 3 idle; +10 must move exactly 3.
+        g3.workers[J_TRAPPER] = 12;
+        CHECK(g3.numGatherers() == 3, "3 villagers idle");
+        CHECK(g3.assignWorker(J_HUNTER, 10) == RC_OK, "+10 with only 3 idle accepted");
+        CHECK(g3.workers[J_HUNTER] == 13, "+10 with 3 idle assigns exactly 3");
+        CHECK(g3.numGatherers() == 0, "no idle villagers left");
+
+        // (c) nothing idle at all -> no move, and the page's before/after compare
+        // (which is what low-beeps) sees no change.
+        int beforeNone = (int)g3.workers[J_HUNTER];
+        g3.assignWorker(J_HUNTER, 10);
+        CHECK((int)g3.workers[J_HUNTER] == beforeNone, "+10 with 0 idle moves nobody");
+
+        // (d) removing truncates at the job's own count, never below zero.
+        CHECK(g3.assignWorker(J_TRAPPER, -10) == RC_OK, "-10 trappers accepted");
+        CHECK(g3.workers[J_TRAPPER] == 2, "-10 from 12 leaves 2");
+        CHECK(g3.assignWorker(J_TRAPPER, -10) == RC_OK, "-10 again accepted");
+        CHECK(g3.workers[J_TRAPPER] == 0, "-10 from 2 truncates to 0, not negative");
+        int beforeZero = (int)g3.workers[J_TRAPPER];
+        g3.assignWorker(J_TRAPPER, -10);
+        CHECK((int)g3.workers[J_TRAPPER] == beforeZero, "-10 at 0 moves nobody");
+    }
+
     printf("== break-on-shortage (断料停产) ==\n");
     // A trapper consumes meat(-1) to make bait(+1). With no meat, it must make
     // NOTHING (all-or-nothing per source), not go negative.

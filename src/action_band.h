@@ -19,42 +19,46 @@
 // private copy is how the drift started.
 //
 // ---- THE VISUAL CONTRACT ---------------------------------------------------
-// A band is a rectangle carrying a 36px title, optionally a 24px subtitle under
-// it (a cost/yield line — "-500 木头  -50 毛皮"), and optionally a draining
-// cooldown bar along the bottom:
+// A band is a rectangle carrying a 36px title, optionally one or more 24px
+// cost/yield lines, and optionally a draining cooldown bar along the bottom:
 //
 //   enabled  -> two concentric 2px strokes (drawRect at the edge + 1px inward)
 //   disabled -> a single 1px dashed frame, 4px on / 4px off
 //
-//   title  : 36px = the 12px CJK grid x TITLE_SCALE(3) — the app-wide verb scale
-//   subtitle: 24px = the same grid x SUB_SCALE(2), SUBGAP(6) below the title
-//   the title+subtitle block is VERTICALLY CENTERED in the band
+// ---- LEFT TITLE / RIGHT COSTS — "变体 B" (2026-08-01, chosen at the device) --
+// A band WITH cost lines splits into two columns:
 //
-// ---- ONE BAND, ONE CENTERING (2026-08-01, decided at the device) -----------
-// A band centres exactly what it carries, and nothing else:
-//   subtitle present -> centre the 66px title+subtitle block
-//   no subtitle      -> centre the lone 36px title
-// There is no third mode. Every band in the firmware — grid cell or standalone
-// — obeys those two lines, and draw() takes no flag to opt out of them.
+//   +--------------------------------------------------------+
+//   |  狩猎小屋                                   -200 木头   |
+//   |                                              -10 毛皮   |
+//   +--------------------------------------------------------+
 //
-// This DELIBERATELY overturns the v0.10.1 "reserve the subtitle's slot anyway"
-// rule, which had every cell in a grid lay out as though it were priced so that
-// a whole grid's titles shared one y. The user compared both on the physical
-// panel and chose per-button optical centring — 「如果没有 subtitle 的内容 你就
-// 居中那个 title!」 A lone title parked 15px above its band's optical centre,
-// holding a line open for text that does not exist, reads as a broken button;
-// that is worse than the mismatch the reservation was buying away.
+//   * the 36px title is LEFT-aligned, EDGE_PAD in from the band's left edge
+//   * EVERY cost/yield entry gets its OWN 24px line, RIGHT-aligned EDGE_PAD in
+//     from the right edge — no more "-200 木头  -10 毛皮" run together on one
+//   * that right column as a whole is VERTICALLY CENTRED in the band
+//   * the title's y is ALWAYS titleBoxY(top, h)
 //
-// KNOWN COSTS — accepted on purpose. Do NOT "fix" these:
-//   1. A MIXED grid steps. In Room's 96px cells a priced title's box lands at
-//      +14 and a free one's at +29, so 添柴 (priced) sits 15px above 科技树
-//      (free) in the same row. This is literally the v0.10.1 complaint
-//      ("添柴/火把按钮文字高度不一致") coming back, by choice.
-//   2. A title MOVES when its subtitle comes and goes. Outside's 查看陷阱 drops
-//      its "-N 诱饵" line when no bait is held, so its title steps 15px down and
-//      back as bait runs out and is restocked.
-// Both were weighed against the alternative in front of the user. Reintroducing
-// a reservation mode is a fresh product decision, not a bug fix.
+// A band with NO cost lines centres its title HORIZONTALLY (the user's explicit
+// instruction) at that same y — so every subtitle-less button in the firmware
+// (返回 / 更多 / 出发 / 分工 / 科技树 / the whole fight grid) looks exactly as it
+// did before this change. Only priced bands moved.
+//
+// WHY THIS LAYOUT WON — one title y, everywhere. Every earlier layout centred a
+// title+subtitle BLOCK, which made a title's y depend on what sat under it, and
+// that produced three separate reported bugs in three months:
+//   * v0.10.0: a coolable band shrank its block, so 添柴 sat higher than every
+//     other priced button ("添柴和火把按钮文字高度不一致").
+//   * v0.12: reserving a subtitle slot fixed that but parked lone titles 15px
+//     high, which read as broken ("如果没有 subtitle 的内容 你就居中那个 title").
+//   * v0.13: dropping the reservation fixed THAT but reintroduced a 15px step
+//     across mixed rows, and made Outside's 查看陷阱 jump 15px every time bait
+//     ran out and its cost line vanished.
+// Splitting the axes ends the whole family: the title owns the left column and a
+// fixed y, the costs own the right column and grow DOWNWARD from a centred
+// block. A cost line appearing or disappearing can no longer move a title, and
+// titleBoxY() is now the single y for standard bands, subtitle-less bands and
+// assign/path's stepper-row names alike. Do not reintroduce a stacked block.
 //
 // ---- THE OPTICAL NUDGE (this replaced a magic "-4") ------------------------
 // Eight call sites used to centre a lone title with `top + (h - GLYPH)/2 - 4`.
@@ -64,23 +68,19 @@
 // yoff=-10, h=11 against cjk_text.cpp's ASCENT=11), i.e. the ink is one grid
 // pixel SHORTER than its line box and hugs the box's BOTTOM. Centering the BOX
 // therefore leaves the ink half a grid pixel low; lifting the box by half a
-// grid pixel — INK_NUDGE, TITLE_SCALE/2 = 1px at 36px — re-centres the ink.
-// Every band now uses that one derived value, so the old -4 sites all shift
-// ~3px DOWN together and the old no-nudge sites (Trade's priced bands) shift
-// 1px up. Consistency across the app is the point; neither shift is a bug fix.
+// grid pixel — inkNudge(scale) = scale/2 — re-centres the ink. The title column
+// and the cost column each apply it at their own scale (both land on 1px today).
 //
 // ---- NARROW-CELL AUTO-DOWNGRADE -------------------------------------------
-// A 240px grid cell can only show so much 36px text. draw() measures the title
-// (cjk::textWidth) against the cell's usable width — w minus the 2px frame and
-// SIDE_PAD(4) on each side, so 228px in a 240px cell — and falls back to the
-// 24px scale for that ONE title if it would overflow. It is a guard, not a
-// layout mode: measured over every label the game can currently produce, the
-// widest 36px title in a 240px cell is Room's "更多 (n/n)" pager at 180px (216px
-// if the batch count ever reached double digits) and the widest real name is
-// 狩猎小屋 / 查看陷阱 / 漫漫尘途 at 144px, so NOTHING downgrades today. The
-// title's box stays 36px tall either way (see draw()) — a shrunk title centres
-// INSIDE that box — so a downgrade never moves the subtitle or the block; it
-// only shrinks the ink.
+// Two columns in a 240px grid cell is a tight budget, so draw() measures the
+// real thing: the 36px title, plus MID_GAP, plus the WIDEST cost line, against
+// the usable width (w - 2*EDGE_PAD = 224px in a 240px cell). If that overflows,
+// THAT ONE title falls back to the 24px scale. Unlike the pre-变体-B guard —
+// which measured the title alone and therefore never fired — this one genuinely
+// triggers on the narrow Room/Outside grid; see the measured list in
+// action_band.cpp. The title's BOX stays 36px tall either way, and a shrunk
+// title centres its ink inside that box, so a downgrade never moves the title's
+// y or the cost column.
 #pragma once
 #include "page.h"          // pages::Rect — the app's one button-rect type
 
@@ -93,27 +93,48 @@ constexpr int TITLE_SCALE = 3;                    // 12px grid x3
 constexpr int TITLE_GLYPH = 12 * TITLE_SCALE;     // 36px title line box
 constexpr int SUB_SCALE   = 2;                    // 12px grid x2
 constexpr int SUB_GLYPH   = 12 * SUB_SCALE;       // 24px subtitle line box
-constexpr int SUBGAP      = 6;                    // title box -> subtitle box
 constexpr int FRAME       = 2;                    // enabled double-ring thickness
-constexpr int SIDE_PAD    = 4;                    // min clear space each side
-constexpr int INK_NUDGE   = TITLE_SCALE / 2;      // 1 — see the header note
+// Left/right inner padding: how far the left-aligned title and the right-aligned
+// cost lines sit in from the band's own edges. 8 is not arbitrary — it is
+// assign_page/path_page's LABEL_X, the inset their stepper rows have always used
+// for a left-aligned 36px name. Matching it means a Room cell's title, a Trade
+// band's title and an AssignPage job name all start on the SAME x offset within
+// their band, so the whole app reads as one grid rather than three.
+constexpr int EDGE_PAD    = 8;
+// Minimum clear space between the title column and the cost column. Deliberately
+// the SAME 8, so a band's three horizontal gaps — left edge, middle, right edge
+// — are one repeated unit rather than three tuned numbers. It is also exactly
+// the value that makes the downgrade guard fire on the four titles that really
+// need it and no others: at 12 the marginal 3-glyph names (贸易站/制革屋/熏肉房/
+// 双肩包, each 108px against a 108px cost) overflow 224 by 4px and shrink for no
+// visible benefit, while at 8 they fit at 224 exactly. See the measured list in
+// action_band.cpp.
+constexpr int MID_GAP     = EDGE_PAD;
+// Ink-vs-box optical correction at a given scale (see THE OPTICAL NUDGE).
+constexpr int inkNudge(int scale) { return scale / 2; }
+constexpr int INK_NUDGE   = inkNudge(TITLE_SCALE);   // 1 — the title column's
+
+constexpr int MAX_SUB_LINES = 4;                  // cost tables are cost[3]; the
+                                                  // 4th slot absorbs any tail
 constexpr int BAR_GUTTER  = 12;                   // band bottom -> cooldown bar top
 constexpr int BAR_H       = 8;                    // cooldown bar height
 
 // Draw one band into `r`.
-//   title          — 36px, centered; auto-shrunk to 24px only if it overflows
-//   subtitle       — 24px cost/yield line under it; nullptr or "" = none, and
-//                    then the title centres ALONE (see ONE BAND, ONE CENTERING).
-//                    Wraps to a 2nd line if it must (Room's priciest
-//                    multi-resource crafts are the only candidates); see the
-//                    derivation in action_band.cpp draw() for why 2 lines still
-//                    fit a 96px band
+//   title          — 36px. LEFT-aligned when `subtitle` is present, otherwise
+//                    horizontally CENTRED. Its y is titleBoxY(r.y, r.h) either
+//                    way. Auto-shrunk to 24px only when the title + MID_GAP +
+//                    the widest cost line will not fit (see the header).
+//   subtitle       — the page's cost/yield string, entries joined by TWO spaces
+//                    ("-200 木头  -10 毛皮") exactly as every costLine already
+//                    emits it. draw() SPLITS it on that separator and stacks the
+//                    entries as separate right-aligned 24px lines, so no caller
+//                    had to change its signature to get the new layout.
+//                    nullptr or "" = no cost column at all.
 //   enabled        — solid double frame vs the 1px dashed unavailable frame
 //   coolLeft/Total — both > 0 draws a left-anchored draining bar in the band's
-//                    bottom gutter. Mutually exclusive with a 2-LINE subtitle by
-//                    construction: the only coolable actions (生火/添柴/伐木/
-//                    查看陷阱) all price in exactly one resource, and no
-//                    craftable — the only 2-line candidate — has a cooldown.
+//                    bottom gutter. The cost column is centred, so with the most
+//                    entries any table can produce (3) it ends exactly at the
+//                    bar's top edge in a 96px band — see the budget in draw().
 void draw(m5gfx::M5Canvas& c, const pages::Rect& r, const char* title,
           const char* subtitle, bool enabled, int coolLeft, int coolTotal);
 
