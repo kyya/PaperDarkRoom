@@ -42,26 +42,25 @@ constexpr int MAX_SLOTS = MAX_ROWS * MAX_COLS;   // 10 action cells / page
 // a height that only shrank for a coolable band (light/stoke), so light/stoke's
 // title sat measurably higher than every other priced button, reading as a size
 // mismatch ("添柴和火把按钮文字高度不一致").
-// v0.10.1 ("align bottom" + "主标题偏大" + "第一页按钮没对齐") fixes both
-// reported issues together: (1) the label+cost block now BOTTOM-ANCHORS at a
-// fixed offset from the band's own bottom edge, the SAME offset regardless of
-// whether the action is ALSO coolable, and a FREE band (no cost) uses that same
-// fixed label baseline too instead of centering itself independently — see
-// action_band.h for the shared rule (every band's label sits at the exact SAME
-// y, priced or free, coolable or not — action_band::labelY); (2) the button
-// LABEL itself shrinks 36px -> 24px (action_band::BTN_SCALE) — the app-wide
-// 36px verb-label convention (assign/path/trade) draws its name and count/cost
-// SIDE BY SIDE on one full-width row, so it never competes with a subtitle for
-// vertical room; Room's narrow 240px column instead STACKS the cost line under
-// the label, and that stack needs its own smaller scale to (a) read less
-// "oversized" now that every priced band carries a second line, and (b) fit the
-// label + a rare 2-line cost + the cooldown-bar gutter back inside the original
-// 96px band (an interim bottom-anchor-only draft, kept only in this file's own
-// history, had pushed it to 120px before the label also shrank). MAX_ROWS stays
-// 5 and LOG_LINES stays 9 — unchanged from v0.10.0. 5 rows x 96 + 4x10 gaps =
-// 520, landing BTN_AREA_BOTTOM at 886 (< 928 status bar, 42px margin — matches
-// the original v0.10.0 number). Resource/inventory summary lives on the
-// Outside page's lower band.
+// v0.10.1 ("align bottom" + "第一页按钮没对齐") answered that by making a FREE
+// band lay out as if it carried a cost line, so a whole grid's titles landed on
+// one y. v0.12 RETIRES that rule at the user's on-device call: a band now
+// centres exactly what it carries, so a free cell's title sits 15px below a
+// priced neighbour's and that is intended — the full decision, and the two
+// costs accepted with it, are recorded in action_band.h "ONE BAND, ONE
+// CENTERING". v0.10.1 ALSO shrank the label 36px -> 24px; v0.12 ("带 subtitle 的
+// button 的按钮样式都统一成贸易站的按钮组件") REVERSES that half too:
+// the Trade page's 36px-title-over-24px-cost band is now the app-wide button,
+// and a Room cell renders through the same action_band::draw as every other
+// button in the firmware rather than a Room-sized variant of it. The 96px band
+// still holds the taller stack — 36 + 6 + 24 = 66 centred leaves 15px top and
+// bottom, enough for the cooldown-bar gutter, and even a (currently unreachable)
+// 2-line cost fits at 90 of 96 (the full derivation lives in action_band.cpp
+// draw(); it is what pins this height at 96 rather than the §9.3 floor of 80).
+// MAX_ROWS stays 5 and LOG_LINES stays 9 — unchanged from v0.10.0. 5 rows x 96 +
+// 4x10 gaps = 520, landing BTN_AREA_BOTTOM at 886 (< 928 status bar, 42px
+// margin — matches the original v0.10.0 number). Resource/inventory summary
+// lives on the Outside page's lower band.
 // v0.3.1 feedback 1 ("火堆熊熊燃烧 房间很热不应该常驻 原作也没有常驻"): the
 // persistent fire/temp state line that used to open this band (STATE_Y, 76..
 // 116) is gone — upstream never shows it as a fixed header either, only as a
@@ -77,12 +76,13 @@ constexpr int ROOM_BTN_H = 96;               // long-press band (§9.3 floor is 
                                              // grown for the cost sub-row, see above)
 constexpr int BTN_GAP   = 10;                // vertical gap between rows
 // Two columns of 240px with a 12px gutter fill the 492px content width; each
-// band's label centers in its column. Widest measured label even at the old
-// 36px scale was "更多 (n/n)" = 180px and any 4-glyph craft name (狩猎小屋 =
-// 144px), both << the ~232px column text budget (scratchpad/measure_labels) —
-// at v0.10.1's smaller 24px scale (action_band::BTN_SCALE) every label clears
-// with even more room, so the two-column grid still needs no full-width
-// exceptions. x < COL_MID picks the left column (onLocalAction).
+// band's label centers in its column. Re-measured for v0.12's 36px titles: the
+// widest is the "更多 (n/n)" pager at 180px (the batch count never reaches two
+// digits — 26 actions over 9 per page = 3 pages) and the widest craft name is
+// 狩猎小屋 at 144px, both inside the 228px a 240px cell leaves after the frame
+// and action_band::SIDE_PAD. So the grid still needs no full-width exception and
+// action_band's narrow-cell downgrade never fires here. x < COL_MID picks the
+// left column (onLocalAction).
 constexpr int COL_GAP   = 12;
 constexpr int COL_W     = (CONTENT_W - COL_GAP) / 2;         // 240
 constexpr int COL_X0[MAX_COLS] = { PAD, PAD + COL_W + COL_GAP };   // {24, 276}
@@ -132,6 +132,14 @@ uint32_t epochNow() {
 
 pages::Rect buttonAreaRect() {
     return pages::Rect{ 0, BTN_TOP - 2, 540, BTN_AREA_BOTTOM - (BTN_TOP - 2) };
+}
+
+// The rect of grid cell (row, col) — the ONE description of where a button is.
+// paintButtons draws through it and pressRect flashes through it, so the frame
+// the player sees and the rect that inverts under a press cannot drift apart.
+pages::Rect cellRect(int row, int col) {
+    return pages::Rect{ COL_X0[col], BTN_TOP + row * (ROOM_BTN_H + BTN_GAP),
+                        COL_W, ROOM_BTN_H };
 }
 
 // Count the lines cjk::drawWrapped would emit for `utf8` at width w — same
@@ -460,28 +468,23 @@ void repaintLog(m5gfx::M5Canvas& c) {
     drawLog(c);
 }
 
-// One half-width action band at column origin x0 — thin wrapper around the
-// shared action_band::draw (v0.10.1; pulled into its own module since
-// outside_page.cpp needs the identical thing, see action_band.h for the full
-// rationale). All geometry is clipped to this column's [x0, x0+COL_W) so the
-// two columns never bleed into each other.
-void drawBand(m5gfx::M5Canvas& c, int x0, int top, const char* label,
-              const char* cost, bool hasCost, bool enabled,
-              int coolLeft, int coolTotal) {
-    action_band::draw(c, x0, top, COL_W, ROOM_BTN_H, label, cost, hasCost,
-                      enabled, coolLeft, coolTotal);
-}
-
 // Paint the whole button area (clears it first) from the given slot views,
-// placing slot s at row s/2, column s%2 (row-major reading order).
+// placing slot s at row s/2, column s%2 (row-major reading order). Every cell
+// goes through the shared action_band renderer, which centres exactly what each
+// cell carries: a priced cell centres its title+cost block, a free one (科技树 /
+// 更多) centres its lone title 15px lower. That step across a mixed row is the
+// user's 2026-08-01 on-device decision — 「如果没有 subtitle 的内容 你就居中那个
+// title!」 — and NOT the v0.10.1 alignment bug returning; see action_band.h
+// "ONE BAND, ONE CENTERING" before touching it.
 void paintButtons(m5gfx::M5Canvas& c, const BandView* views, int slotCount) {
     pages::Rect r = buttonAreaRect();
     c.fillRect(r.x, r.y, r.w, r.h, TFT_WHITE);
     for (int s = 0; s < slotCount; s++) {
-        int row = s / MAX_COLS, col = s % MAX_COLS;
-        int top = BTN_TOP + row * (ROOM_BTN_H + BTN_GAP);
-        drawBand(c, COL_X0[col], top, views[s].label, views[s].cost, views[s].hasCost,
-                 views[s].enabled, views[s].coolLeft, views[s].coolTotal);
+        action_band::draw(c, cellRect(s / MAX_COLS, s % MAX_COLS),
+                          views[s].label,
+                          views[s].hasCost ? views[s].cost : nullptr,
+                          views[s].enabled,
+                          views[s].coolLeft, views[s].coolTotal);
     }
 }
 
@@ -542,7 +545,7 @@ pages::Rect RoomPage::pressRect(const pages::Region& rg, int x, int y) const {
     int col  = (x < COL_MID) ? 0 : 1;
     int slot = row * MAX_COLS + col;
     if (slot < 0 || slot >= m_slotCount) return pages::Rect{ 0, rg.y0, 0, 0 };
-    return pages::Rect{ COL_X0[col], rg.y0, COL_W, ROOM_BTN_H };
+    return cellRect(row, col);          // the exact rect paintButtons framed
 }
 
 bool RoomPage::draw(m5gfx::M5Canvas& c) {

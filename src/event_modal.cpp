@@ -5,9 +5,11 @@
 // Random-event modal — full-screen overlay for the event engine's forced
 // choice. See event_modal.h. Every string is routed through tr() (strings_zh.h)
 // so only the official Simplified-Chinese translation reaches the sparse 12px
-// CJK face (§8.3 glyph-closure iron law); layout obeys §9 (title 36px, body/
-// button 24px, <=20 汉字/行, >=80px long-press bands, content clears y=928).
+// CJK face (§8.3 glyph-closure iron law); layout obeys §9 (title 36px, narrative
+// 24px, <=20 汉字/行, >=80px long-press bands, content clears y=928). The choice
+// bands are the shared action_band (36px label over a 24px cost line, v0.12).
 #include "event_modal.h"
+#include "action_band.h"         // the app-wide button band (shared with every page)
 #include "event_engine.h"        // events:: queries/commands (+ game_data RES_KEY)
 #include "game_state.h"          // adr::Result, GameState (save)
 #include "cjk_text.h"            // cjk::drawText/drawWrapped/textWidth, tr()
@@ -27,8 +29,7 @@ namespace {
 constexpr int PAD         = 24;                 // shared host pad
 constexpr int CONTENT_W   = 540 - 2 * PAD;      // 492 usable (§9.2)
 constexpr int SCALE_TITLE = 3;                  // 12px grid x3 = 36px title
-constexpr int SCALE_BODY  = 2;                  // 12px grid x2 = 24px body/button
-constexpr int GLYPH       = 12 * SCALE_BODY;    // 24px body line box
+constexpr int SCALE_BODY  = 2;                  // 12px grid x2 = 24px narrative
 
 // Vertical budget: title band up top, a rule, the narrative reflowing below it,
 // and the button column bottom-anchored so the last band clears the status bar.
@@ -43,7 +44,10 @@ constexpr int BTN_H      = 84;                  // long-press band (§9.3: >=80p
 constexpr int BTN_GAP    = 12;
 constexpr int BTN_BOTTOM = 912;                 // bands stack UP from here; the
                                                 // 32px status bar owns [928,960]
-constexpr int SUBGAP     = 6;                   // label -> cost sub-line gap
+                                                // (36 + 6 + 24 = 66 of the 84px
+                                                // band — action_band owns the
+                                                // label/cost type scale and the
+                                                // vertical derivation now)
 
 constexpr uint32_t TIMEOUT_MS = 120u * 1000u;   // §5.4 idle auto-dismiss (2 min)
 
@@ -92,47 +96,24 @@ bool costLine(int localBtn, char* out, size_t cap) {
     return used > 0;
 }
 
-// 1px dashed rectangle, 4px on / 4px off — the global unavailable-button frame
-// (matches room_page/outside_page's drawDashedRect exactly).
-void drawDashedRect(m5gfx::M5Canvas& c, int x, int y, int w, int h) {
-    const int on = 4, per = 8;
-    int xr = x + w - 1, yb = y + h - 1;
-    for (int i = 0; i < w; i++)
-        if (i % per < on) { c.drawPixel(x + i, y, TFT_BLACK);
-                            c.drawPixel(x + i, yb, TFT_BLACK); }
-    for (int i = 0; i < h; i++)
-        if (i % per < on) { c.drawPixel(x, y + i, TFT_BLACK);
-                            c.drawPixel(xr, y + i, TFT_BLACK); }
+// The rect of choice band `i` of `n` — the ONE description of where a choice
+// button is, shared by drawButton's frame and handleHold's invert-flash so the
+// two cannot drift apart (they used to restate BTN_X/BTN_W/BTN_H separately).
+pages::Rect btnRect(int i, int n) {
+    return pages::Rect{ BTN_X, btnTop(i, n), BTN_W, BTN_H };
 }
 
-// One full-width choice band. Available -> the two solid rings (2px); unavailable
-// (cost not met) -> a single 1px dashed frame — the same availability cue the
-// room/outside pages use. Label 24px centered; a button with a cost gets a second
-// 24px line under it, the two-line block vertically centered in the band.
-void drawButton(m5gfx::M5Canvas& c, int top, int localBtn) {
-    bool avail = events::btnAvailable(localBtn);
-    if (avail) {
-        c.drawRect(BTN_X, top, BTN_W, BTN_H, TFT_BLACK);
-        c.drawRect(BTN_X + 1, top + 1, BTN_W - 2, BTN_H - 2, TFT_BLACK);
-    } else {
-        drawDashedRect(c, BTN_X, top, BTN_W, BTN_H);
-    }
-
-    const char* label = tr(events::btnTextKey(localBtn));
+// One full-width choice band, through the shared renderer (v0.12: the modal's
+// hand-rolled near-copy of the Trade band is gone — see action_band.h). The
+// choice label rides the app-wide 36px title scale now, over its 24px cost line
+// when the choice is priced; a free choice centres that label alone, since
+// action_band centres exactly what a band carries. Composing the cost text stays
+// here — it reads the event engine, which the renderer knows nothing about.
+void drawButton(m5gfx::M5Canvas& c, int i, int n) {
     char cost[64];
-    bool hasCost = costLine(localBtn, cost, sizeof(cost));
-    if (hasCost) {
-        int block = GLYPH * 2 + SUBGAP;
-        int ly = top + (BTN_H - block) / 2;
-        int lw = cjk::textWidth(label, SCALE_BODY);
-        cjk::drawText(c, BTN_X + (BTN_W - lw) / 2, ly, label, SCALE_BODY);
-        int cw = cjk::textWidth(cost, SCALE_BODY);
-        cjk::drawText(c, BTN_X + (BTN_W - cw) / 2, ly + GLYPH + SUBGAP, cost, SCALE_BODY);
-    } else {
-        int lw = cjk::textWidth(label, SCALE_BODY);
-        cjk::drawText(c, BTN_X + (BTN_W - lw) / 2, top + (BTN_H - GLYPH) / 2 - 4,
-                      label, SCALE_BODY);
-    }
+    bool hasCost = costLine(i, cost, sizeof(cost));
+    action_band::draw(c, btnRect(i, n), tr(events::btnTextKey(i)),
+                      hasCost ? cost : nullptr, events::btnAvailable(i), 0, 0);
 }
 
 // Compose the whole panel into the shared canvas (no push).
@@ -151,7 +132,7 @@ void render() {
     }
 
     int n = events::btnCount();
-    for (int i = 0; i < n; i++) drawButton(canvas, btnTop(i, n), i);
+    for (int i = 0; i < n; i++) drawButton(canvas, i, n);
 
     status_bar::drawOnto(canvas);   // keep the clock/battery/dots chrome band
 }
@@ -214,7 +195,7 @@ bool handleHold(int x, int y) {
     // (pager::flashPressRect leaves the canvas restored but the screen showing the
     // inverted rect). An RC_OK repaint (repaint / closeAndRestore) paints over it;
     // the non-repainting branches rebound the rect so the black flash bounces off.
-    pages::Rect pr{ BTN_X, btnTop(b, events::btnCount()), BTN_W, BTN_H };
+    pages::Rect pr = btnRect(b, events::btnCount());
     pager::flashPressRect(pr);
 
     adr::Result r = events::choose(b);
