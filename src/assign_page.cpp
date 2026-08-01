@@ -11,6 +11,7 @@
 // 24px body, >=80px long-press bands).
 #include "assign_page.h"
 #include "action_band.h"        // shared band frame + title baseline + 返回 band
+#include "stepper.h"            // shared ±1 / ±10 stepper zone (PathPage parity)
 #include "cjk_text.h"
 #include "pomo_page.h"          // PAD (shared layout authority)
 #include "page_tabs.h"          // shared tab header (生火间 │ 村落 │ 贸易站)
@@ -57,20 +58,15 @@ constexpr int BAND_GAP  = 10;
 constexpr int BAND_X    = PAD;               // full-width single column
 constexpr int BAND_W    = CONTENT_W;         // 492
 
-// Worker-band stepper geometry (local x within the full-width band). The band is
-// wide (492px), so the stepper zone stays the roomy v0.3.3 size (66px zone, 22px
-// triangles) — no need for the Outside page's narrowed variant. A vertical rule
-// sets off the stepper zone; a horizontal rule splits it into an upper ▲
-// (increment) over a lower ▼ (decrement). Triangles are drawn geometrically
-// (fillTriangle) — ▲/▼ are not in the sparse face, so never render them as text.
-constexpr int STEP_INSET = 12;                       // stepper zone right inset
-constexpr int STEP_W     = 66;                       // stepper zone width
-constexpr int STEP_X0    = BAND_W - STEP_INSET - STEP_W;  // 414 — stepper zone left
-constexpr int STEP_DIV_X = STEP_X0 - 4;              // 410 — vertical rule x
+// Worker-band stepper: the shared two-column ±1 / ±10 zone (see stepper.h — the
+// geometry, the four hit zones and the ▲/▼ glyphs all live there,
+// identical to PathPage's outfit rows). v0.14 grew it from one column to two,
+// which moved the zone's left rule from 410 to 344 — the "xN" count re-anchors
+// to stepper::dividerX() below, and the widest job name (军械工人/铁矿工人 at
+// 144px @36px) still leaves 136px of clear space before it.
 constexpr int LABEL_X    = 8;                        // label left pad in the band
 constexpr int LABEL_GAP  = 8;                         // gap: count -> stepper divider
-constexpr int TRI_HALF_W = 11;                       // triangle half base (22px wide)
-constexpr int TRI_HALF_H = 9;                        // triangle half height
+constexpr int STEP_DIV_X = stepper::dividerX(BAND_W); // 344 — zone's left rule
 
 // RTC -> Unix epoch, mirroring outside_page/main.cpp's epochNow.
 uint32_t epochNow() {
@@ -115,19 +111,18 @@ bool jobBandDisabled(uint8_t job) {
 }
 
 // One full-width job band at `top`. The FRAME (solid double ring / 1px dashed)
-// comes from the shared action_band, and so does the 36px name's baseline — but
-// the CONTENT is this page's own: a stepper row lays its name and count SIDE BY
-// SIDE on one baseline rather than stacking a subtitle under a title, so it is a
-// different layout, not a drifted copy of the standard band, and stays here.
-// Left: the 36px job `name` at LABEL_X, and the 24px "xN" count right-aligned
-// just left of the stepper divider (LABEL_GAP px clear), sharing the name's
-// bottom baseline. Right: the ▲/▼ stepper — a vertical rule, a horizontal split
-// rule, an upper ▲ (increment) over a lower ▼ (decrement), each a fillTriangle.
-// The ▲/▼ are hit by the press y-half, not the exact triangle pixels (see
-// onLocalAction).
+// comes from the shared action_band, the 36px name's baseline from
+// action_band::titleBoxY, and the whole right-hand ±1 / ±10 zone from stepper —
+// what is left here is only this page's own arrangement of the LEFT side: a
+// stepper row lays its name and count SIDE BY SIDE on one baseline rather than
+// stacking a subtitle under a title, so it is a different layout, not a drifted
+// copy of the standard band. The 36px job `name` sits at LABEL_X, and the 24px
+// "xN" count is right-aligned just left of the stepper's divider rule (LABEL_GAP
+// px clear), sharing the name's bottom baseline.
 void drawJobBand(m5gfx::M5Canvas& c, int top, const char* name, const char* sub,
                  bool disabled) {
-    action_band::drawFrame(c, bandRect(top), !disabled);
+    pages::Rect band = bandRect(top);
+    action_band::drawFrame(c, band, !disabled);
 
     int ny = action_band::titleBoxY(top, BAND_H);       // 36px name box top
     cjk::drawText(c, BAND_X + LABEL_X, ny, name, BTN_SCALE);
@@ -135,20 +130,7 @@ void drawJobBand(m5gfx::M5Canvas& c, int top, const char* name, const char* sub,
     cjk::drawText(c, BAND_X + STEP_DIV_X - LABEL_GAP - sw, ny + BTN_GLYPH - GLYPH,
                   sub, SCALE);
 
-    // Stepper zone: vertical rule + horizontal split rule.
-    int midY = top + BAND_H / 2;
-    c.drawFastVLine(BAND_X + STEP_DIV_X, top + 10, BAND_H - 20, TFT_BLACK);
-    c.drawFastHLine(BAND_X + STEP_X0, midY, STEP_W, TFT_BLACK);
-
-    int cx   = BAND_X + STEP_X0 + STEP_W / 2;  // stepper column center
-    int cyUp = top + BAND_H / 4;               // ▲ center (upper half)
-    int cyDn = top + 3 * BAND_H / 4;           // ▼ center (lower half)
-    c.fillTriangle(cx, cyUp - TRI_HALF_H,      // ▲ increment (apex up)
-                   cx - TRI_HALF_W, cyUp + TRI_HALF_H,
-                   cx + TRI_HALF_W, cyUp + TRI_HALF_H, TFT_BLACK);
-    c.fillTriangle(cx, cyDn + TRI_HALF_H,      // ▼ decrement (apex down)
-                   cx - TRI_HALF_W, cyDn - TRI_HALF_H,
-                   cx + TRI_HALF_W, cyDn - TRI_HALF_H, TFT_BLACK);
+    stepper::draw(c, band);
 }
 
 // The trailing 返回 band: the plain shared band, lone 36px label centered.
@@ -190,30 +172,19 @@ const pages::Region* AssignPage::regions(int* n) const {
 // frame (BAND_X/BAND_W/BAND_H — the exact rect drawReturnBand's two concentric
 // drawRect calls paint), not a label-hugging sub-rect: the whole button box
 // inverts, matching what the player actually sees as "the button".
-// Job bands: onLocalAction ALSO never reads x (explicitly (void)x'd) — the
-// press y alone picks +1/-1 across the FULL band width, including the name
-// label area, and it runs unconditionally (assignWorker no-ops silently, still
-// low-beeping, when the job band is disabled or already at a limit — it is
-// never skipped). So there is no x-gated or disabled-gated "don't flash" case
-// to mirror here either; every press this returns from truly does dispatch.
-// The rect is narrowed to the stepper zone anyway (matching the visual ▲/▼,
-// not the whole clickable row) purely so the flash reads as "this stepper
-// half fired" instead of blacking out the whole row like the return-band bug.
+// Job bands: v0.14 gave them FOUR zones (±1 / ±10 x up / down), so unlike the
+// 返回 band they now read BOTH x and y — stepper::zoneRect decodes the press
+// exactly as stepper::deltaFor does in onLocalAction, so the rect that inverts
+// is always the button that fires. A press left of the stepper (the name area)
+// still counts as ±1, as it always has, and flashes the ±1 column accordingly.
+// Every press dispatches — assignWorker no-ops silently (still low-beeping) when
+// the band is disabled or already at a limit, it is never skipped — so there is
+// no "don't flash" case to mirror here.
 pages::Rect AssignPage::pressRect(const pages::Region& rg, int x, int y) const {
-    (void)x;
     if ((int)rg.param == m_jobCount) {                     // 返回 band
         return bandRect(rg.y0);                            // drawReturnBand's own frame
     }
-
-    // Job band: the stepper half the y-half selects (upper ▲ / lower ▼),
-    // x-span from just right of the divider rule to the band's right edge —
-    // the same STEP_DIV_X/BAND_W constants drawJobBand paints the divider and
-    // frame from.
-    int stepX0 = BAND_X + STEP_DIV_X + 1;
-    int stepW  = BAND_W - STEP_DIV_X - 1;
-    int half   = BAND_H / 2;
-    if (y < rg.y0 + half) return pages::Rect{ stepX0, rg.y0, stepW, half };
-    return pages::Rect{ stepX0, rg.y0 + half, stepW, BAND_H - half };
+    return stepper::zoneRect(bandRect(rg.y0), x, y);
 }
 
 // Drawable only while open (and the forest is unlocked): returning false makes
@@ -259,12 +230,18 @@ bool AssignPage::draw(m5gfx::M5Canvas& c) {
 }
 
 // Long-press on a band. param is the band index: the last band (== m_jobCount) is
-// 返回 (close + jump back to the village); a job band assigns/unassigns one
-// villager, the press y-half picking the direction (upper ▲ = +1, lower ▼ = −1).
-// A real change high-beeps + persists + repaints; a no-op (no idle villager to
-// add, or already 0) low-beeps.
+// 返回 (close + jump back to the village); a job band assigns/unassigns villagers,
+// the press picking BOTH the size and the direction — stepper::deltaFor turns
+// (x,y) into ±1 (fine column, or the name area) or ±10 (coarse column).
+// GameState::assignWorker already TRUNCATES to what is available in either
+// direction (min(delta, idle gatherers) adding, min(delta, workers) removing —
+// game_state.cpp:554-563), which is exactly upstream's
+// Math.min(available, btn.data) (outside.js:376), so ±10 with 3 idle villagers
+// moves 3 rather than refusing. No engine change was needed for that.
+// A real change high-beeps + persists + repaints; a genuine no-op (nothing idle
+// to add, or already 0 — both magnitudes are equally dead in that direction)
+// low-beeps, the same feedback the ±1-only stepper gave.
 void AssignPage::onLocalAction(uint8_t param, int x, int y) {
-    (void)x;
     if ((int)param > m_jobCount) { M5.Speaker.tone(600, 120); return; }
 
     if ((int)param == m_jobCount) {                  // 返回 band
@@ -277,7 +254,7 @@ void AssignPage::onLocalAction(uint8_t param, int x, int y) {
     uint8_t job = m_jobs[param];
     int before  = (int)g_game.workers[job];
     int bandTop = BAND_TOP + (int)param * (BAND_H + BAND_GAP);
-    int delta   = (y < bandTop + BAND_H / 2) ? +1 : -1;   // upper ▲ / lower ▼
+    int delta   = stepper::deltaFor(bandRect(bandTop), x, y);
     g_game.assignWorker(job, delta);
 
     if ((int)g_game.workers[job] != before) {        // a villager actually moved
