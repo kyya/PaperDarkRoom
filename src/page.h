@@ -16,16 +16,18 @@ namespace pages {
 // param = pomodoro minutes). ClientPages return a firmware-constant table.
 struct Region { uint16_t y0, y1; uint8_t type, param; };
 
-// A partial-refresh target (see pager::partialRefresh). Whole-panel is
-// {0,0,540,960}; a client page passes just the sub-rect it repainted.
+// A rectangle in the 540x960 portrait content frame. It used to be a
+// partial-refresh target as well; since the MSG migration the only thing that
+// takes one is Page::pressRect, which names the button cell to invert-flash.
 struct Rect { int x, y, w, h; };
 
-// FAST = e-ink fast/DU-class update of the rect (ghosting accrues, charged to
-// the existing debt counter). FASTEST = even quicker DU-class update for
-// sub-second cadences (e.g. the pomodoro countdown tick); same debt accounting
-// as FAST. QUALITY = grayscale-clean update (clears local ghosting, resets
-// the debt).
-enum class RefreshMode { FAST, FASTEST, QUALITY };
+// RefreshMode (FAST / FASTEST / QUALITY) lived here and selected the e-ink
+// waveform a pushed sub-rect went out under. Both halves of that idea are gone:
+// the panel driver free-runs and re-drives each pixel until it settles, so there
+// is no waveform to choose, and it is double-buffered, so there is no such thing
+// as pushing a sub-rect (the buffer a partial write lands in holds the frame
+// from two flips ago). Every repaint is a whole 540x960 frame — see
+// msg_bridge.h and pager::repaint.
 
 class Page {
 public:

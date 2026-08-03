@@ -27,6 +27,13 @@ namespace setpiece_modal {
 // touch while combat is live); cleared on the setpiece ending (a leave, a flee, a
 // combat death, or the idle timeout).
 bool active();
+// Compose this overlay's WHOLE frame into the shared canvas — no flip. Called by
+// pager::drawFrame() while active() is true, because the panel is double
+// buffered and free-running: the buffer a repaint lands in holds the frame from
+// two flips ago, so there is never anything on screen to build on and every
+// push is a complete 540x960 render. See msg_bridge.h.
+void renderFrame();
+
 
 // Open the setpiece for SetpieceId `spId` at its 'start' scene and raise the
 // panel. No-op if the id has no table (SP_NONE / executioner / cache) — the

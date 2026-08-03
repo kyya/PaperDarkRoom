@@ -11,16 +11,24 @@
 
 namespace pager {
 
-// Poll touch (call right after M5.update()). True = the user interacted —
+// Poll touch (call right after touch::update()). True = the user interacted —
 // counts even when there's only one page to show or a long-press missed
 // every region.
 bool handleTouch();
 
-// Draw the page at ring index `idx` to the EPD and persist it as current.
-// quality=true → epd_quality (slow, clears ghosting; boot + sync redraws),
-// false → epd_fast (fast page turns). False on missing/corrupt page (the
-// page is invalidated so the host re-pushes it).
+// Draw the page at ring index `idx` and persist it as current. quality=true
+// additionally settles the ghosting debt (deghost() below — a ~400ms white flash
+// and redraw; boot restore and the HIGH_WATER escape valve pass it), false is
+// the ordinary ~8ms frame. False on a missing/corrupt page
+// (which is invalidated so the host re-pushes it).
 bool showPage(int idx, bool quality);
+
+// Recompose and present the whole 540x960 frame — page (or whichever overlay
+// owns the panel) plus the chrome band. THE repaint primitive: the panel is
+// double-buffered and free-running, so nothing on screen can be touched up and
+// every push is a complete frame. Cheap enough to be unconditional (~8ms of a
+// measured ~23ms scan period), which retired the partial-refresh machinery.
+void repaint();
 
 // Show the nearest displayable page one step from ring index startIdx in `dir`
 // (+1/-1, wrapping), skipping missing/undecodable pages (step 1..n-1). False
@@ -58,24 +66,19 @@ void tickCurrent(uint32_t nowMs);
 // showPage(currentPage()) the boot path used before curName persistence.
 void restore(bool quality);
 
-// Pay off any accumulated ghosting debt at sleep entry: if >= QUALITY_EVERY fast
-// refreshes have piled up (background pushes + turns) and there's a page to show,
-// redraw the current page with epd_quality — a full-panel deep-clean done right
-// before timerSleep, when no one is looking (showPage resets the debt counter).
-// No-op otherwise, so it adds ~1s awake time only when debt is actually due.
-void payGhostDebtIfDue();
+// Clean the panel: eight fields of "lighten everything" through the driver's
+// image-mode LUT, then eight of the frame that was up (pager.cpp explains at
+// length why the second half is not optional). ~400ms, and it resets the
+// ghosting debt. showPage(quality=true) runs it for the boot restore and the
+// HIGH_WATER escape valve; main.cpp's sleepNow runs it outright, because the
+// frame it leaves behind is what the panel shows for the whole sleep.
+void deghost();
 
-// Push just `r` of the current canvas under FAST (fast/DU, ghosting accrues to
-// the debt) or QUALITY (grayscale-clean, clears local ghosting + resets debt).
-// The caller must have drawn the new pixels into the canvas first. See
-// pager.cpp; used by client pages for seconds/minute counter repaints.
-void partialRefresh(const pages::Rect& r, pages::RefreshMode mode);
-
-// Invert-flash a button rect as press feedback (see pager.cpp): briefly shows
-// `r` in reverse video on the panel while leaving the canvas itself unchanged.
-// The dispatchRegion press path uses it internally; event_modal reuses it for its
-// own (non-dispatchRegion) choice buttons. The caller repaints over the flash, or
-// rebounds it with a partialRefresh of the same rect once the action is done.
+// Invert-flash a button rect as press feedback (see pager.cpp): shows the
+// current frame with `r` in reverse video for FLASH_MS, then puts the normal
+// frame back. The dispatchRegion press path uses it internally; the modals reuse
+// it for their own (non-dispatchRegion) choice buttons. It restores the panel
+// itself — a caller that repaints afterwards is welcome to, but need not.
 void flashPressRect(const pages::Rect& r);
 
 // Count of page-skip events since boot — each unavailable page showPageOrNext

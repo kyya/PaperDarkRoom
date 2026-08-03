@@ -28,6 +28,13 @@ namespace fight_modal {
 // as event_modal::active()). Set by begin(), cleared on win-dismiss / flee /
 // death / forced-sleep.
 bool active();
+// Compose this overlay's WHOLE frame into the shared canvas — no flip. Called by
+// pager::drawFrame() while active() is true, because the panel is double
+// buffered and free-running: the buffer a repaint lands in holds the frame from
+// two flips ago, so there is never anything on screen to build on and every
+// push is a complete 540x960 render. See msg_bridge.h.
+void renderFrame();
+
 
 // Start combat against EncounterId `enemyId` (from STEP_FIGHT.scene) and bring
 // the panel up: arm g_world's combat state, then one full-panel quality push +

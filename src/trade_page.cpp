@@ -16,6 +16,8 @@
 #include "pager.h"
 #include "game_state.h"
 #include "world_state.h"        // WorldState::ensureGenerated + compassFromVillage (§1.6)
+#include "beeper.h"
+#include "rtc_bm8563.h"
 #include <M5Unified.h>
 #include <stdio.h>
 #include <string.h>
@@ -102,8 +104,8 @@ struct BandView {
 
 // RTC -> Unix epoch, mirroring room_page/main.cpp's epochNow.
 uint32_t epochNow() {
-    m5::rtc_date_t d; m5::rtc_time_t t;
-    M5.Rtc.getDateTime(&d, &t);
+    rtc::Date d; rtc::Time t;
+    rtc::getDateTime(&d, &t);
     struct tm tmv = {};
     tmv.tm_year = d.year - 1900; tmv.tm_mon = d.month - 1; tmv.tm_mday = d.date;
     tmv.tm_hour = t.hours; tmv.tm_min = t.minutes; tmv.tm_sec = t.seconds;
@@ -312,16 +314,16 @@ bool TradePage::draw(m5gfx::M5Canvas& c) {
 void TradePage::onLocalAction(uint8_t param, int x, int y) {
     (void)x; (void)y;
     int slot = param;
-    if (slot < 0 || slot >= m_slotCount) { M5.Speaker.tone(600, 120); return; }
+    if (slot < 0 || slot >= m_slotCount) { beeper::tone(600, 120); return; }
     uint8_t code = m_slotCodes[slot];
 
     if (code == A_MORE) {
         m_page++;
-        M5.Speaker.tone(1800, 80);
+        beeper::tone(1800, 80);
         pager::showPage(pager::currentRingIndex(), false);
         return;
     }
-    if (code >= TRADE_COUNT) { M5.Speaker.tone(600, 120); return; }
+    if (code >= TRADE_COUNT) { beeper::tone(600, 120); return; }
 
     Result r = g_game.buy(code);
     if (r == RC_OK) {
@@ -342,7 +344,7 @@ void TradePage::onLocalAction(uint8_t param, int x, int y) {
             char key[40];
             if (g_world.compassFromVillage(key, sizeof key)) g_game.pushLog(key);
         }
-        M5.Speaker.tone(1800, 80);
+        beeper::tone(1800, 80);
         g_game.save();
         pager::showPage(pager::currentRingIndex(), false);
         // Re-baseline tick()'s content signature to the state we JUST drew, so this
@@ -355,7 +357,7 @@ void TradePage::onLocalAction(uint8_t param, int x, int y) {
     } else {
         // RC_ERR_COST (engine pushed "not enough X") / RC_ERR_MAX / RC_ERR_LOCKED
         // — low beep; nothing on this page changed, so no repaint.
-        M5.Speaker.tone(600, 120);
+        beeper::tone(600, 120);
     }
 }
 

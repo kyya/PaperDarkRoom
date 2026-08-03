@@ -28,6 +28,7 @@
 #include "pomo_page.h"          // PAD (shared layout authority)
 #include "status_bar.h"
 #include "pager.h"
+#include "beeper.h"
 #include <M5Unified.h>
 #include <stdio.h>
 #include <string.h>
@@ -249,24 +250,15 @@ void render() {
     status_bar::drawOnto(canvas);
 }
 
-// Repaint just the dynamic band (HP bars + cooldown bars) under FASTEST — the
-// per-tick / per-landed-action path. The static enemy header + status bar stay
-// from the entry push.
-void repaintDynamic() {
-    render();
-    pager::partialRefresh(pages::Rect{ 0, DYN_TOP, 540, 928 - DYN_TOP },
-                          pages::RefreshMode::FASTEST);
-}
-
-// Full-panel QUALITY push — entry and the fight->victory panel change (a scene
-// swap earns a deliberate grayscale clean, no ghost of the previous body).
-void pushQuality() {
-    render();
-    auto& disp = M5.Display;
-    disp.setEpdMode(epd_mode_t::epd_quality);
-    canvas.pushSprite(0, 0);
-    disp.setEpdMode(epd_mode_t::epd_fast);
-}
+// Put this overlay on the panel. There used to be two of these — a FASTEST push
+// of just the HP/cooldown band for the per-tick path, and a QUALITY full-panel
+// push for entry and the fight->victory scene swap — because the first had to be
+// cheap enough to run every second and the second wanted a deliberate grayscale
+// clean. Neither distinction survives: the frame is composed whole either way,
+// there is no waveform to pick, and one render is ~8ms of the measured ~23ms
+// scan period.
+// pager::repaint routes back into renderFrame() below while s_active is set.
+void push() { pager::repaint(); }
 
 // Release the guard and repaint the World page underneath (the current ring page
 // is always the World page — combat only starts from a World move).
@@ -280,6 +272,8 @@ void closeToWorld() {
 
 bool active() { return s_active; }
 
+void renderFrame() { render(); }
+
 namespace {
 // Shared entry: raise the panel over an already-armed g_world combat (begin/
 // beginSetpiece differ only in HOW cx was armed).
@@ -289,12 +283,12 @@ void raise(uint32_t nowMs) {
     s_lastTickMs  = nowMs;
     s_victoryMs   = 0;
     s_lastPressMs = 0;         // don't inherit a stale press time from a prior fight
-    pushQuality();
+    push();
     // encounter alert: a short falling two-note chime, distinct from the event
     // pop (1047->1568 rising) and the switcher tone (2000).
-    M5.Speaker.tone(880, 80);
+    beeper::tone(880, 80);
     delay(90);
-    M5.Speaker.tone(660, 140);
+    beeper::tone(660, 140);
 }
 }  // namespace
 
@@ -323,23 +317,23 @@ bool handleHold(int x, int y) {
     if (g_world.fightWon()) {                       // victory panel: any press leaves
         if (millis() - s_victoryMs < VICTORY_GUARD_MS) return true;  // swallow spam-through
         g_world.fightEndVictory();
-        M5.Speaker.tone(1800, 80);
+        beeper::tone(1800, 80);
         closeToWorld();
         return true;
     }
 
     int b = hitButton(x, y);
-    if (b < 0) { M5.Speaker.tone(600, 120); return true; }   // missed every band
+    if (b < 0) { beeper::tone(600, 120); return true; }   // missed every band
 
-    // Press feedback: invert-flash the pressed band (event_modal parity). A repaint
-    // paints over it; a rejected press rebounds the rect so the flash bounces off.
+    // Press feedback: invert-flash the pressed band (event_modal parity).
+    // flashPressRect restores the normal frame itself once the beat is up.
     pages::Rect pr = btnRect(b);
     pager::flashPressRect(pr);
 
     if (s_btns[b].kind == BK_FLEE) {
         bool sp = g_world.combat().setpiece;
         g_world.fightFlee();
-        M5.Speaker.tone(1800, 80);
+        beeper::tone(1800, 80);
         if (sp) { s_active = false; setpiece_modal::onFightResult(false); }
         else    closeToWorld();
         return true;
@@ -353,7 +347,7 @@ bool handleHold(int x, int y) {
     }
 
     if (st == FIGHT_WON) {
-        M5.Speaker.tone(1568, 120);                 // victory chime
+        beeper::tone(1568, 120);                 // victory chime
         if (g_world.combat().setpiece) {
             // Setpiece owns the victory: hand the win back (it reads the banked
             // loot, ends the combat state, and shows the scene's continue/run
@@ -361,18 +355,18 @@ bool handleHold(int x, int y) {
             s_active = false;
             setpiece_modal::onFightResult(true);
         } else {
-            pushQuality();                          // draw the loot panel
+            push();                          // draw the loot panel
             s_victoryMs = millis();
         }
         return true;
     }
     if (st == FIGHT_NOOP) {                          // cooling / no ammo / full hp
-        M5.Speaker.tone(600, 120);
-        pager::partialRefresh(pr, pages::RefreshMode::FASTEST);   // rebound the flash
+        beeper::tone(600, 120);
+        push();                          // clean frame back over the flash
         return true;
     }
-    M5.Speaker.tone(1200, 30);                       // a landed swing / heal — light click
-    repaintDynamic();
+    beeper::tone(1200, 30);                       // a landed swing / heal — light click
+    push();
     return true;
 }
 
@@ -410,7 +404,7 @@ void tick(uint32_t nowMs) {
         Serial.println("[fight] player died -> death frame");
         return;
     }
-    repaintDynamic();                                // HP bars + cooldown bars drained
+    push();                                // HP bars + cooldown bars drained
 }
 
 void endForSleep() {

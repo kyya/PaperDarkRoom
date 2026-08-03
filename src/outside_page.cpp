@@ -21,6 +21,8 @@
 #include "page_tabs.h"          // shared tab header (生火间 │ 村落 │ 贸易站)
 #include "pager.h"
 #include "game_state.h"
+#include "beeper.h"
+#include "rtc_bm8563.h"
 #include <M5Unified.h>
 #include <stdio.h>
 #include <string.h>
@@ -259,8 +261,8 @@ bool trapsCostLine(char* out, size_t cap) {
 // RTC -> Unix epoch, mirroring room_page/main.cpp's epochNow (only differences
 // matter to settle(), so the mktime timezone is irrelevant if consistent).
 uint32_t epochNow() {
-    m5::rtc_date_t d; m5::rtc_time_t t;
-    M5.Rtc.getDateTime(&d, &t);
+    rtc::Date d; rtc::Time t;
+    rtc::getDateTime(&d, &t);
     struct tm tmv = {};
     tmv.tm_year = d.year - 1900; tmv.tm_mon = d.month - 1; tmv.tm_mday = d.date;
     tmv.tm_hour = t.hours; tmv.tm_min = t.minutes; tmv.tm_sec = t.seconds;
@@ -548,31 +550,6 @@ void drawActionArea(m5gfx::M5Canvas& c, const CellView* views, int n, int areaTo
                           views[i].enabled, views[i].coolLeft, views[i].coolTotal);
 }
 
-// The whole action area (+2px bleed) — what the partial-refresh path CLEARS
-// before redrawing. It must span every row: a cooldown can now live in any cell
-// (伐木 is always slot 0, but 查看陷阱's slot moves with the packing), and the
-// area's own top edge moves as rows are gained or lost.
-pages::Rect actionAreaRect(int areaTop) {
-    return pages::Rect{ 0, areaTop - 2, 540, (ACT_BOTTOM - areaTop) + 4 };
-}
-
-// Bounding rect (2px bleed) of the packed cells currently draining a bar (bit i
-// = slot i). Slot-indexed rather than hardcoded to a row, so it follows the
-// packing wherever 查看陷阱 lands. Empty mask -> zero rect (the caller gates).
-pages::Rect coolingRect(uint16_t mask, int areaTop) {
-    int x0 = 540, y0 = 960, x1 = 0, y1 = 0;
-    for (int i = 0; i < AC_MAX; i++) {
-        if (!(mask & (1u << i))) continue;
-        pages::Rect r = actCellRect(i, areaTop);
-        if (r.x < x0)         x0 = r.x;
-        if (r.x + r.w > x1)   x1 = r.x + r.w;
-        if (r.y < y0)         y0 = r.y;
-        if (r.y + r.h > y1)   y1 = r.y + r.h;
-    }
-    if (x1 <= x0) return pages::Rect{ 0, 0, 0, 0 };
-    return pages::Rect{ x0 - 2, y0 - 2, (x1 - x0) + 4, (y1 - y0) + 4 };
-}
-
 // Content signature — a hash of every live value that alters a painted number or
 // label (population, worker mix, buildings, inventory, the shared Room tab title).
 // It ALSO has to cover everything that changes which action cells exist, because
@@ -658,7 +635,7 @@ bool OutsidePage::draw(m5gfx::M5Canvas& c) {
 void OutsidePage::onLocalAction(uint8_t param, int x, int y) {
     (void)y;
     int slot = (int)param * ACT_COLS + (x < ACT_DIV ? 0 : 1);
-    if (slot < 0 || slot >= m_slotCount) { M5.Speaker.tone(600, 120); return; }
+    if (slot < 0 || slot >= m_slotCount) { beeper::tone(600, 120); return; }
     uint8_t code = m_slotCodes[slot];
 
     // ---- the three navigation cells. Each latches its sub-page visible and then
@@ -670,7 +647,7 @@ void OutsidePage::onLocalAction(uint8_t param, int x, int y) {
         if (code == AC_TECH)        { tech_page::open();   ring = "tech";   }
         else if (code == AC_ASSIGN) { assign_page::open(); ring = "assign"; }
         else                        { path_page::open();   ring = "path";   }
-        M5.Speaker.tone(1800, 80);
+        beeper::tone(1800, 80);
         pager::showPage(pager::ringIndexByName(ring), false);
         return;
     }
@@ -678,7 +655,7 @@ void OutsidePage::onLocalAction(uint8_t param, int x, int y) {
     uint32_t now = epochNow();
     Result r = (code == AC_GATHER) ? g_game.gatherWood(now) : g_game.checkTraps(now);
     if (r == RC_OK) {
-        M5.Speaker.tone(1800, 80);
+        beeper::tone(1800, 80);
         g_game.save();
         pager::showPage(pager::currentRingIndex(), false);
         // Re-baseline tick()'s content signature to the state we JUST drew (no extra
@@ -689,7 +666,7 @@ void OutsidePage::onLocalAction(uint8_t param, int x, int y) {
         // tick to double up.)
         m_lastSig = contentSig();
     } else {
-        M5.Speaker.tone(600, 120);                    // cooldown / engine reject
+        beeper::tone(600, 120);                    // cooldown / engine reject
     }
 }
 
@@ -698,10 +675,10 @@ void OutsidePage::onLocalAction(uint8_t param, int x, int y) {
 // tick 签名 keeps the worker mix so a change made on AssignPage (then paged back)
 // still repaints the worker summary here. onLocalAction re-baselines m_lastSig after
 // its own showPage, so a 伐木/查看陷阱 press no longer forces a second full redraw
-// here. The bottom action-row cooldowns drain a bar: paint both rows into the canvas
-// but push ONLY the cooling cell(s) (coolingRect), FASTEST — never QUALITY, whose
-// full-row grayscale flash is the "big black block" the user reported; that ghost is
-// cleaned at sleep by pager::payGhostDebtIfDue instead. Mirrors the Room page.
+// here. The bottom action-row cooldowns drain a bar too, so a live or just-cleared
+// one also earns a redraw — whole-page (see the call site below), same as every
+// other repaint path now that there is no sub-rect push to target. Mirrors the
+// Room page.
 void OutsidePage::tick(uint32_t nowMs) {
     static uint32_t s_lastTick     = 0;
     static uint16_t s_lastCoolMask = 0;   // cooling slots the previous tick pushed
@@ -735,17 +712,14 @@ void OutsidePage::tick(uint32_t nowMs) {
     }
 
     if (coolMask || s_lastCoolMask) {
-        // Clear the whole (dynamic) area and repaint every cell into the canvas...
-        pages::Rect area = actionAreaRect(m_areaTop);
-        canvas.fillRect(area.x, area.y, area.w, area.h, TFT_WHITE);
-        drawActionArea(canvas, views, m_slotCount, m_areaTop);
-        // ...but PUSH only the union of the cells cooling now and the ones that
-        // just cleared this tick. FASTEST; the ghost cleanup is deferred to sleep
-        // (see the function note). A row-count change cannot sneak through here:
-        // it can only come from a gate flip, which moves contentSig and takes the
-        // full-redraw branch above.
-        pager::partialRefresh(coolingRect((uint16_t)(coolMask | s_lastCoolMask), m_areaTop),
-                              pages::RefreshMode::FASTEST);
+        // Whole-frame redraw. The panel driver free-runs and re-renders the entire
+        // 540x960 canvas in ~8ms out of the measured ~23ms scan period, so clearing
+        // repainting just the (dynamic) action area to feed a sub-rect push saved
+        // nothing measurable, and the machinery that push needed — actionAreaRect,
+        // coolingRect, pager::partialRefresh — is gone with it. draw() re-derives
+        // m_regionCount/m_slotCount/m_areaTop through the same layoutCells() path
+        // used above.
+        pager::showPage(pager::currentRingIndex(), false);
     }
     s_lastCoolMask = coolMask;
 }

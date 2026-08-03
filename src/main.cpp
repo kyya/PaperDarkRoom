@@ -18,6 +18,28 @@
 //   button / tap / USB wake -> INTERACTIVE: stay awake, sleep after 5 idle
 //     minutes (battery; USB never sleeps; an OTA in flight never sleeps).
 // Design: docs/adarkroom-port/research.md §3, §5.
+//
+// ---------------------------------------------------------------------------
+// THE MSG MIGRATION, and why this file no longer calls M5.begin().
+//
+// The panel is driven by lib/msg (see msg_bridge.h) instead of M5GFX's
+// Panel_EPD: a free-running 1bpp scan that owns core 1 and re-drives the glass
+// continuously, with the UI rendering straight into its framebuffer through a
+// rotated 1bpp sprite. M5.begin() would bring up Bus_EPD/Panel_EPD, which claims
+// the i80 bus and the panel pins msg.c drives itself — and esp_lcd_new_i80_bus()
+// aborts if the bus is taken, so it would not merely conflict, it would kill the
+// boot. <M5Unified.h> is therefore included for the M5Canvas type and the TFT_*
+// constants ONLY, and every runtime singleton it used to provide has a bare
+// replacement compiled in beside it: touch_gt911 for M5.Touch, rtc_bm8563 for
+// M5.Rtc, beeper for M5.Speaker, power_s3 for M5.Power.
+//
+// Two structural consequences show up below:
+//   - the application runs on ITS OWN TASK PINNED TO CORE 0 (appTask), because
+//     the scan owns core 1 outright; Arduino's loop task suspends itself at the
+//     first opportunity and never runs again.
+//   - there is no such thing as a partial panel update any more, so every path
+//     that puts pixels up goes through pager::repaint() and redraws all 540x960.
+// ---------------------------------------------------------------------------
 #include <Arduino.h>
 #include <M5Unified.h>
 #include <SPI.h>
@@ -26,7 +48,12 @@
 #include <esp_gap_ble_api.h>
 #include <esp_ota_ops.h>
 #include <soc/usb_struct.h>
-#include <lgfx/v1/touch/Touch_GT911.hpp>
+#include <esp_heap_caps.h>
+#include "msg_bridge.h"
+#include "touch_gt911.h"
+#include "rtc_bm8563.h"
+#include "beeper.h"
+#include "power_s3.h"
 #include "frame_store.h"
 #include "pager.h"
 #include "ble_link.h"
@@ -58,10 +85,13 @@ static const uint32_t HARD_CAP_MS         = 45000;  // background wake: absolute
 static const uint32_t IDLE_TIMEOUT_MS     = 5 * 60 * 1000;
 static const int      LOW_BATTERY_PCT     = 5;
 
-static const int PANEL_W = 540;
-static const int PANEL_H = 960;
-
-M5Canvas canvas(&M5.Display);
+// The full-screen UI surface. NOT a sprite of its own: msg_bridge::begin() binds
+// it to MSG's framebuffer at colour depth 1 and rotation 3, so it presents a
+// 540x960 portrait canvas over the 960x540 landscape scan buffer and every page
+// draws straight into the memory the scan is about to read. Deliberately
+// constructed with NO parent — passing &M5.Display would be the usual M5Canvas
+// idiom and is exactly what must not happen here (see the header note).
+M5Canvas canvas;
 
 enum class Mode { SYNC, INTERACTIVE };
 static Mode     g_mode            = Mode::SYNC;
@@ -75,9 +105,22 @@ bool            g_lowBattery      = false;   // pomo.cpp reads it (extern) — t
                                              // start gate; kept for link parity.
 bool            g_onUsb           = false;   // status_bar.cpp reads it (extern)
                                              // for the charge glyph.
-static int      g_rot             = 2;
+// Display orientation, as reported in the BLE STATUS line. It is a CONSTANT now:
+// the accelerometer auto-rotate (rotForAccel, a 700ms poll that flipped
+// M5.Display between rotation 0 and 2 when the card was turned over) went with
+// M5.begin — the IMU is behind M5.Imu and this firmware links no M5 runtime any
+// more. The panel orientation is fixed by msg_bridge's UI_ROTATION instead. The
+// value is kept, and kept at 2, purely so the STATUS wire format is unchanged.
+static const int g_rot            = 2;
 bool            g_sdOk            = false;   // ble_link.cpp reads it (extern) for
                                              // STATUS's sd= token.
+// Kept so the heartbeat can report the task's stack high-water mark: 16 KB was
+// reasoned about rather than measured, and the deepest chain (a page tick's
+// showPage -> drawFrame -> Page::draw -> action_band -> cjk::drawWrapped -> LGFX)
+// only ever runs on hardware. The number in [hb] is what turns that estimate
+// into a fact.
+static TaskHandle_t s_appTask = nullptr;
+
 static uint32_t g_bootMs          = 0;
 static uint32_t g_lastInteraction = 0;
 
@@ -98,8 +141,8 @@ adr::WorldState g_world;
 // RTC -> Unix epoch (seconds). Only differences matter to settle(), so the
 // timezone mktime assumes is irrelevant as long as it's consistent.
 static uint32_t epochNow() {
-    m5::rtc_date_t d; m5::rtc_time_t t;
-    M5.Rtc.getDateTime(&d, &t);
+    rtc::Date d; rtc::Time t;
+    rtc::getDateTime(&d, &t);
     struct tm tmv = {};
     tmv.tm_year = d.year - 1900;
     tmv.tm_mon  = d.month - 1;
@@ -111,14 +154,14 @@ static uint32_t epochNow() {
     return e > 0 ? (uint32_t)e : 0;
 }
 
-// BM8563 alarm/timer IRQ flag, read immediately after M5.begin. Set -> this
+// BM8563 alarm/timer IRQ flag, read first thing at boot. Set -> this
 // cold boot came from the RTC alarm (timerSleep); clear -> a human pressed the
 // power button. Fallback on any doubt: timer (conservative).
 static bool wokeByRtcTimer() {
-    bool irq = M5.Rtc.getIRQstatus();
+    bool irq = rtc::getIRQstatus();
     Serial.printf("[boot] rtc_irq=%d -> wake=%s\n", irq ? 1 : 0,
                   irq ? "timer" : "button");
-    M5.Rtc.clearIRQ();
+    rtc::clearIRQ();
     return irq;
 }
 
@@ -165,16 +208,16 @@ static void saveQuietHoursIfChanged(uint16_t startMin, uint16_t endMin) {
 static void applyPendingTimeConfig() {
     if (!ble_link::rx.timeCfgPending) return;
     ble_link::rx.timeCfgPending = false;
-    m5::rtc_date_t d;
+    rtc::Date d;
     d.year    = 2000 + ble_link::rx.rtcYearSince2000;
     d.month   = ble_link::rx.rtcMonth;
     d.date    = ble_link::rx.rtcDay;
     d.weekDay = 0;
-    m5::rtc_time_t t;
+    rtc::Time t;
     t.hours   = ble_link::rx.rtcHour;
     t.minutes = ble_link::rx.rtcMinute;
     t.seconds = ble_link::rx.rtcSecond;
-    M5.Rtc.setDateTime(&d, &t);
+    rtc::setDateTime(&d, &t);
     saveQuietHoursIfChanged(ble_link::rx.quietStartMin, ble_link::rx.quietEndMin);
     Serial.printf("[rtc] set 20%02u-%02u-%02u %02u:%02u:%02u\n",
                   ble_link::rx.rtcYearSince2000, ble_link::rx.rtcMonth,
@@ -224,7 +267,7 @@ static void applyPendingGameCmd() {
         fight_modal::endForSleep();          // drop a live combat overlay's guard
         setpiece_modal::endForSleep();       // and a live setpiece overlay's guard
                                              // (else their active() blocks the room jump)
-        M5.Speaker.tone(1800, 80);
+        beeper::tone(1800, 80);
         int room = pager::ringIndexByName("room");
         if (room >= 0) pager::showPage(room, false);
         Serial.println("[cmd] reset -> save wiped, new game, jumped to room");
@@ -236,14 +279,14 @@ static void applyPendingGameCmd() {
     // space (so they stay one token), un-escaped just below before the strcmp.
     if (sscanf(ble_link::rx.gameCmd, "adr:give %23s %d", res, &amount) != 2) {
         Serial.printf("[cmd] parse fail: '%s'\n", ble_link::rx.gameCmd);
-        M5.Speaker.tone(600, 120);
+        beeper::tone(600, 120);
         return;
     }
     // Injection bound: 1..1e6 whole units. 1e6 × FP(100) = 1e8 per write, well
     // inside int32 stores (max ~2.1e9), so a single inject can't overflow.
     if (amount < 1 || amount > 1000000) {
         Serial.printf("[cmd] amount out of range (1..1000000): %d\n", amount);
-        M5.Speaker.tone(600, 120);
+        beeper::tone(600, 120);
         return;
     }
     for (char* q = res; *q; q++) if (*q == '_') *q = ' ';   // "cured_meat" -> "cured meat"
@@ -252,14 +295,14 @@ static void applyPendingGameCmd() {
         if (strcmp(res, adr::RES_KEY[i]) == 0) { r = i; break; }
     if (r < 0) {
         Serial.printf("[cmd] unknown resource: '%s'\n", res);
-        M5.Speaker.tone(600, 120);
+        beeper::tone(600, 120);
         return;
     }
     g_game.stores[r] += amount * adr::FP;         // stores are fixed-point × FP
     if (g_game.stores[r] < 0) g_game.stores[r] = 0;   // never leave it negative
     g_game.markSeen((uint8_t)r);   // injected == "owned": unlock its craft/buy gates
     g_game.save();
-    M5.Speaker.tone(1800, 80);
+    beeper::tone(1800, 80);
     pager::showPage(pager::currentRingIndex(), false);
     Serial.printf("[cmd] give %s %d -> stores[%d]=%ld\n",
                   res, amount, r, (long)g_game.stores[r]);
@@ -326,20 +369,24 @@ static void sleepNow(const char* reason) {
     // never power off mid-choice (research.md §5.4). The save() below persists the
     // resulting state; the modal is RAM-only and gone after the cold-boot wake.
     events::dismissDefault();
+    // ...and drop the overlay that was showing it. dismissDefault() ends the
+    // ENGINE's event, not the modal, and an overlay left active renders a page
+    // with no title and no buttons — which the deghost below would then freeze
+    // onto the glass as a blank sheet for the whole sleep.
+    event_modal::endForSleep();
     // A live fight can't be safely paused: combat is RAM-only and wasn't re-saved
     // mid-fight, so releasing the overlay here treats a forced sleep as a flee (a
     // cold boot resumes the pre-fight tile). In practice this is only reachable on
     // the background hard-cap — interactive mode stays awake through combat
-    // (anyWantsAwake). Release the guard so payGhostDebtIfDue can repaint.
+    // (anyWantsAwake). Release the guard so the deghost below can repaint.
     fight_modal::endForSleep();
     setpiece_modal::endForSleep();   // same for a live setpiece overlay (abandon)
-    pager::payGhostDebtIfDue();
     uint32_t sleepSecs = WAKE_INTERVAL_SECS;
     uint16_t qStart, qEnd;
     loadQuietHours(qStart, qEnd);
     if (quiet_hours::enabled(qStart, qEnd)) {
-        m5::rtc_date_t d; m5::rtc_time_t t;
-        M5.Rtc.getDateTime(&d, &t);
+        rtc::Date d; rtc::Time t;
+        rtc::getDateTime(&d, &t);
         uint16_t nowMin = (uint16_t)t.hours * 60 + t.minutes;
         if (quiet_hours::inWindow(nowMin, qStart, qEnd)) {
             sleepSecs = quiet_hours::secondsUntilEnd(nowMin, (uint8_t)t.seconds, qEnd);
@@ -349,21 +396,23 @@ static void sleepNow(const char* reason) {
         }
     }
     g_game.save();                     // persist the game before power-off
+    // Leave a CLEAN picture behind — unconditionally, not on the debt threshold
+    // the in-session escape valve uses: the frame
+    // the user is left staring at for the next 15 minutes is the one thing on
+    // this device that is on show while nothing is running, and 400ms of an
+    // already-terminal wake is free. Then silence the buzzer (a note left
+    // sounding through a power-off is the worst possible exit state) and park the
+    // scan, which drops the panel rails — the ink stays, e-ink is bistable, but
+    // nothing is being driven while the power latch is released.
+    pager::deghost();
+    beeper::stop();
+    msg_bridge::waitSettled(2000);
+    msg_bridge::park();
     Serial.printf("[sleep] %s — timerSleep(%lus)\n", reason, (unsigned long)sleepSecs);
     Serial.flush();
     delay(40);
-    M5.Power.timerSleep(sleepSecs);   // full power-off; no return
+    power::timerSleep(sleepSecs);     // full power-off; no return
     esp_restart();
-}
-
-// Absolute display rotation from the accelerometer. X is this board's
-// discriminating axis: ax<0 = upright (rotation 2), ax>0 = flipped 180.
-static int rotForAccel() {
-    float ax = 0, ay = 0, az = 0;
-    if (!M5.Imu.isEnabled() || !M5.Imu.getAccel(&ax, &ay, &az)) return g_rot;
-    if (ax < -0.35f) return 2;
-    if (ax >  0.35f) return 0;
-    return g_rot;
 }
 
 // USB SOF activity on the OTG controller — a live host sends a Start-Of-Frame
@@ -382,33 +431,37 @@ extern "C" bool tud_suspended(void);
 // battery pauses the charger -> reads false on USB); tud_mounted() closes it (a
 // live host keeps TinyUSB enumerated).
 static bool usbPresent() {
-    if ((int)M5.Power.isCharging() == 1) return true;
+    if (power::isCharging()) return true;
     return tud_mounted();
 }
 
+// SD over SPI. The pin numbers came from M5.getPin(m5::pin_name_t::sd_spi_*)
+// and are now literals, copied from M5Unified's own _pin_table_sd row for
+// board_M5PaperS3 — there is no M5 runtime left to ask (see the header note).
+static const int SD_SCK = 39, SD_MOSI = 38, SD_MISO = 40, SD_CS = 47;
+
 static bool sdInit() {
-    int8_t sck  = M5.getPin(m5::pin_name_t::sd_spi_sclk);
-    int8_t mosi = M5.getPin(m5::pin_name_t::sd_spi_mosi);
-    int8_t miso = M5.getPin(m5::pin_name_t::sd_spi_miso);
-    int8_t cs   = M5.getPin(m5::pin_name_t::sd_spi_cs);
-    if (sck < 0 || cs < 0) return false;
-    SPI.begin(sck, miso, mosi, cs);
-    return SD.begin(cs, SPI, 20000000);
+    SPI.begin(SD_SCK, SD_MISO, SD_MOSI, SD_CS);
+    return SD.begin(SD_CS, SPI, 20000000);
 }
 
-void setup() {
-    auto cfg = M5.config();
-    cfg.clear_display = false;     // keep the last frame on the EPD
-    M5.begin(cfg);
-
-    // GT911 factory config reports only 2 touch points — the grip-graze slot scan
-    // and the multi-finger guard need more. Volatile: re-apply every cold boot.
-    if (auto t = M5.Display.touch())
-        static_cast<lgfx::Touch_GT911*>(t)->setTouchNums(5);
-
-    Serial.begin(115200);
-    delay(400);
+// Everything the old setup() did apart from bringing the panel up, run on the
+// app task (core 0) rather than on Arduino's loop task (core 1, which the scan
+// owns). Nothing here is order-sensitive with respect to that move: the panel is
+// already scanning by the time this starts, and the first frame is the boot
+// restore at the bottom.
+static void appSetup() {
     g_bootMs = millis();
+
+    // Bare hardware, in the order the rest of this function needs it: the RTC
+    // (whose IRQ flag is the very next thing read), the digitizer, the buzzer and
+    // the power/battery pins. rtc::init() and touch::init() share I2C_NUM_1 and
+    // each tolerates the other having installed the driver already.
+    rtc::init();
+    touch::init();
+    beeper::init();
+    power::init();
+
     g_wokeByTimer = wokeByRtcTimer();       // reads the RTC IRQ flag FIRST (wake reason)
 
     // Cancel any BM8563 (PCF8563) countdown timer still armed from the previous
@@ -420,9 +473,9 @@ void setup() {
     // later, pulling the device back on — the "关机后约 15 分钟自动开机" bug.
     // disableIRQ() fully disarms timer+alarm+INT-enable. MUST run AFTER the
     // getIRQstatus read above (先判断后撤销). The scheduled-sleep path re-arms it
-    // every sleep (Power::timerSleep -> disableIRQ+clearIRQ+setAlarmIRQ), so
+    // every sleep (power::timerSleep -> disableIRQ+clearIRQ+setTimerIRQ), so
     // periodic wakes are unaffected; only a hand power-off now stays off.
-    M5.Rtc.disableIRQ();
+    rtc::disableIRQ();
 
     Serial.printf("[boot] adarkroom v%s interval=%ds reset=%d\n",
                   CARD_VERSION, WAKE_INTERVAL_SECS, (int)esp_reset_reason());
@@ -430,24 +483,19 @@ void setup() {
     // Before anything heavy: count this boot toward OTA probation / roll back.
     otaRollbackCheck();
 
-    M5.Display.setRotation(0);
-    M5.Display.setEpdMode(epd_mode_t::epd_fast);
-    canvas.setColorDepth(m5gfx::grayscale_8bit);
-    if (!canvas.createSprite(PANEL_W, PANEL_H))
-        Serial.println("[boot] FATAL: canvas alloc failed");
+    // The canvas is already bound to MSG's framebuffer (msg_bridge::begin, run
+    // by appTask before this) — no createSprite, no colour-depth choice, no
+    // rotation to set. What used to be a 540x960 grayscale_8bit sprite (518 KB
+    // of PSRAM) is now a 64800-byte view onto the scan buffer itself.
     canvas.fillSprite(TFT_WHITE);
 
     g_onUsb = usbPresent();
-    int bat = (int)M5.Power.getBatteryLevel();
+    int bat = power::batteryLevel();
     g_lowBattery = (bat >= 0 && bat <= LOW_BATTERY_PCT);
     Serial.printf("[boot] chg=%d mnt=%d onUsb=%d bat=%d%% v=%dmV low=%d\n",
-                  (int)M5.Power.isCharging(), tud_mounted() ? 1 : 0,
+                  power::isCharging() ? 1 : 0, tud_mounted() ? 1 : 0,
                   g_onUsb ? 1 : 0, bat,
-                  (int)M5.Power.getBatteryVoltage(), g_lowBattery ? 1 : 0);
-
-    g_rot = rotForAccel();
-    M5.Display.setRotation(g_rot);
-    Serial.printf("[boot] rotation=%d\n", g_rot);
+                  power::batteryVoltage(), g_lowBattery ? 1 : 0);
 
     g_sdOk = sdInit();
     Serial.printf("[boot] sd %s\n", g_sdOk ? "ok" : "none");
@@ -489,6 +537,11 @@ void setup() {
     // The ring is all client (game) pages — no host pages exist. Restore the
     // last-shown game page by NAME and paint it in quality mode (a cold-boot
     // redraw isn't latency-sensitive and clears ghosting).
+    // Prime the bar's cached clock/battery before anything draws: drawTo() is a
+    // pure reader now, so an unsampled bar would render --:-- and --% into the
+    // boot frame and hold it there until the first 1s tick.
+    status_bar::sample();
+
     if (pager::ringCount() > 0) {
         pager::restore(true);
         Serial.printf("[boot] restored page %d/%d\n",
@@ -497,14 +550,22 @@ void setup() {
     status_bar::draw();
 
     for (int i = 0; i < 2; i++) {   // "I just woke" heartbeat blink
-        M5.Power.setLed(255); delay(90);
-        M5.Power.setLed(0);   delay(90);
+        power::setLed(255); delay(90);
+        power::setLed(0);   delay(90);
     }
 
     ble_link::init("M5PaperS3");
 
     // BLE-ready — clear any OTA rollback markers (the new image works).
     otaConfirmHealthy();
+
+    // The memory line that actually means something. The one printed by
+    // msg_bridge::init() is taken before Bluedroid exists, so it describes a
+    // budget nobody is competing for yet; this one is measured with the radio up
+    // and the stack allocated, which is the state the device lives in.
+    Serial.printf("[boot] internal free after ble=%u B  psram free=%u B\n",
+                  (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+                  (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
 
     {
         int bonds = esp_ble_get_bond_device_num();
@@ -524,28 +585,20 @@ void setup() {
                   g_mode == Mode::INTERACTIVE ? "interactive" : "sync");
 }
 
-void loop() {
-    M5.update();
+// One pass of the application loop. Body-for-body the old loop(), minus the
+// accelerometer auto-rotate block (~700ms poll, redraw on a flip) which went
+// with M5.Imu — see g_rot.
+static void appLoop() {
+    // Poll the digitizer and expire any sounding note. Between them these are
+    // what M5.update() used to do for this firmware.
     uint32_t now = millis();
+    touch::update(now);
+    beeper::tick(now);
 
     // Touch first: any tap = interaction — page + open/extend the wake window.
     if (pager::handleTouch()) {
         g_lastInteraction = now;
         enterInteractive("tap");
-    }
-
-    // Continuous auto-rotate (~700ms cadence): on flip, redraw the current page.
-    static uint32_t s_lastRot = 0;
-    if (M5.Imu.isEnabled() && now - s_lastRot > 700) {
-        s_lastRot = now;
-        int want = rotForAccel();
-        if (want != g_rot) {
-            g_rot = want;
-            M5.Display.setRotation(g_rot);
-            if (pager::ringCount() > 0)
-                pager::showPage(pager::currentRingIndex(), false);
-            Serial.printf("[rot] -> rotation %d\n", g_rot);
-        }
     }
 
     // STATUS every 2s while connected (a one-shot is missed mid-pairing), or
@@ -607,25 +660,34 @@ void loop() {
     ble_link::otaPollFinish(CARD_VERSION, g_onUsb, g_rot,
                             g_mode == Mode::INTERACTIVE);
 
-    // OTA-progress bar while an image streams (throttled).
-    static bool     s_otaBarActive = false;
-    static int      s_otaBarPct    = -1;
-    static uint32_t s_otaBarDraw   = 0;
-    if (ble_link::otaBusy()) {
-        uint32_t recv = ble_link::otaReceived();
-        uint32_t tot  = ble_link::otaTotal();
-        int pct = tot ? (int)((recv * 100ULL) / tot) : 0;
-        if (!s_otaBarActive || pct - s_otaBarPct >= 2 ||
-            now - s_otaBarDraw >= 300) {
-            status_bar::drawOtaProgress(recv, tot);
-            s_otaBarActive = true;
-            s_otaBarPct    = pct;
-            s_otaBarDraw   = now;
-        }
-    } else if (s_otaBarActive) {
+    // OTA frame, in the one shape the park allows: ONE static frame, drawn
+    // before the panel driver stops, and left alone until the transfer ends.
+    //
+    // The BEGIN callback is blocked waiting for this (ble_link.h's handshake) —
+    // it cannot draw the frame itself, and it must not park until the frame is
+    // up, because after the park nothing reaches the glass. There is deliberately
+    // no periodic progress bar: refreshing one would mean handing the park back
+    // and forth between this task and the BLE callback once a second, and
+    // lib/msg's ownership axiom is explicit that a park is single-owner with
+    // handoff, not something to ping-pong. The upgrade path, if a live bar is
+    // ever wanted, is to move the whole transfer onto this task so that park and
+    // resume share one owner — not to interleave two.
+    static bool s_otaBarActive = false;
+    if (ble_link::otaFrameWanted()) {
+        status_bar::drawOtaProgress(0, ble_link::otaTotal());
+        s_otaBarActive = true;
+        ble_link::otaFrameReady();      // releases the BEGIN callback to park
+    } else if (s_otaBarActive && !ble_link::otaBusy()) {
         s_otaBarActive = false;
-        s_otaBarPct    = -1;
-        if (ble_link::rx.connected) status_bar::draw();   // ota=err path restore
+        // Unconditional: status_bar::draw() is what clears the bar's sticky
+        // s_otaPct, so gating it on the link being up (as this used to) left the
+        // progress variant latched forever when an OTA died BY disconnecting —
+        // which is the common way one dies. Every subsequent frame would then
+        // draw a frozen progress bar where the page dots belong. This is also
+        // the far end of the disconnect unwind: otaPollFinish has by now aborted
+        // the write and resumed the scan, so this repaint is what actually
+        // reaches the glass again.
+        status_bar::draw();
     }
 
     // NOTE: no host-page handling here. ble_link still populates rx.total/off/
@@ -663,19 +725,30 @@ void loop() {
     // 1s bar tick: keep the self-drawn clock/battery/USB fresh (the host can't —
     // there is none). Repaint only on a visible change, and only while a page is
     // on screen and no OTA owns the bar.
+    // `ble` joined this change set when the BLE callbacks stopped drawing: a
+    // connect/disconnect used to repaint from the Bluedroid task, which
+    // deadlocked the app task against msg_flip()'s single waiter slot (see
+    // ble_link.cpp's ConnectCb). Watching the flag here is what still gets the
+    // glyph on and off the bar, one whole-frame repaint, on this task, within a
+    // second — and it replaces BOTH of the calls the disconnect path used to
+    // make, since a repaint now redraws page and bar together anyway.
     static uint32_t s_barTick = 0;
-    static int s_barMin = -1, s_barUsb = -1, s_barBat = -1;
+    static int s_barMin = -1, s_barUsb = -1, s_barBat = -1, s_barBle = -1;
     if (now - s_barTick > 1000) {
         s_barTick = now;
-        m5::rtc_time_t t;
-        M5.Rtc.getTime(&t);
-        int min = t.minutes;
+        // The one sampler, once a second (status_bar.h). Everything read below
+        // is the value it just cached — the same value drawTo() will render, so
+        // "repaint only on a visible change" is now actually true.
+        status_bar::sample();
+        int min = status_bar::clockMinute();
         int usb = g_onUsb ? 1 : 0;
         int bat = status_bar::batteryPercent();
-        if ((min != s_barMin || usb != s_barUsb || bat != s_barBat) &&
+        int ble = ble_link::rx.connected ? 1 : 0;
+        if ((min != s_barMin || usb != s_barUsb || bat != s_barBat ||
+             ble != s_barBle) &&
             pager::ringCount() > 0 && !ble_link::otaBusy())
             status_bar::draw();
-        s_barMin = min; s_barUsb = usb; s_barBat = bat;
+        s_barMin = min; s_barUsb = usb; s_barBat = bat; s_barBle = ble;
     }
 
     static uint32_t s_hb = 0;
@@ -684,14 +757,97 @@ void loop() {
         bool sof = usbSofActive();
         int mnt = tud_mounted() ? 1 : 0;
         int sus = tud_suspended() ? 1 : 0;
-        ble_link::setUsbDiag((int)M5.Power.isCharging(),
+        ble_link::setUsbDiag(power::isCharging() ? 1 : 0,
                              sof ? 1 : 0, mnt * 10 + sus);
-        Serial.printf("[hb] mode=%s awake=%lums ble=%d sec=%d page=%d/%d\n",
+        // The scan statistics ride the heartbeat — the only periodic line on the
+        // wire, and the only evidence of whether the panel driver is healthy.
+        //
+        // HOW TO READ IT. Do NOT judge `fps`/`avg` against msg.c's 60 Hz pacer
+        // target: this panel's steady state through the esp_lcd transport is
+        // ~23 ms a frame (~43 Hz), measured here by the spike and independently
+        // by PaperBar on the same hardware, so a "30% overrun" against 16.7 ms
+        // is simply what normal looks like (msg_bridge.h argues this at length).
+        // The baseline is whatever `avg` settles at. What actually indicates
+        // trouble is `max` pulling away from that settled `avg` — one frame
+        // overran, and the gap says by how much — or any `dmato` at all, which
+        // means a line's DMA completion was lost and rows were dropped.
+        //
+        // internal-SRAM free is printed alongside because the real memory
+        // pressure is here, not at boot: msg's precomputed output frame holds
+        // ~138 KB of internal SRAM outright and Bluedroid wants the rest, so the
+        // figure logged before BLE came up says nothing about the margin.
+        char msg[96];
+        msg_bridge::statsLine(now, msg, sizeof(msg));
+        Serial.printf("[hb] mode=%s awake=%lums ble=%d sec=%d page=%d/%d "
+                      "iheap=%u stack=%u | %s\n",
                       g_mode == Mode::INTERACTIVE ? "int" : "sync",
                       (unsigned long)(now - g_bootMs),
                       ble_link::rx.connected ? 1 : 0,
                       ble_link::rx.secure ? 1 : 0,
-                      pager::currentRingIndex(), pager::ringCount());
+                      pager::currentRingIndex(), pager::ringCount(),
+                      (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+                      (unsigned)(s_appTask ? uxTaskGetStackHighWaterMark(s_appTask)
+                                           : 0),
+                      msg);
     }
     delay(5);
+}
+
+// The application task. Core 0, because msg.c pins its scan to core 1 and the
+// whole design of that driver is that the scan owns its core outright — every
+// line of application code has to be somewhere else.
+//
+// Stack: the deepest call chain here is a page draw (cjk::drawWrapped over the
+// 12px CJK face, through LovyanGFX) inside a boot restore that also has SD and
+// NVS frames below it. 16 KB is comfortable; the old code ran the same chain on
+// Arduino's 8 KB loop task and the extra headroom costs nothing we need.
+static void appTask(void* arg) {
+    (void)arg;
+    msg_bridge::begin(canvas);
+    appSetup();
+    while (true) appLoop();
+}
+
+void setup() {
+    Serial.begin(115200);
+
+    // Wait for the USB host, but ONLY if there is one. TinyUSB CDC needs a beat
+    // after enumeration or the boot banner and the driver's selftest line are
+    // lost — and that selftest line is the only evidence the SIMD row kernel was
+    // ever validated on this silicon, so it is worth waiting for. What it is not
+    // worth is a flat delay: every wake on this board is a cold boot (the BM8563
+    // latch cuts power outright), so a fixed 3s would be charged to every one of
+    // the 96 background wakes a day AND to the user's own power-button press,
+    // where it is 3 seconds of blank panel before the game appears. Poll for the
+    // host instead and give up quickly when running on battery.
+    uint32_t t0 = millis();
+    while (millis() - t0 < 700 && !tud_mounted()) delay(20);
+    if (tud_mounted()) delay(900);
+
+    Serial.println();
+    Serial.printf("[boot] ==== PaperDarkRoom %s (MSG 1bpp) ====\n", CARD_VERSION);
+
+    // The panel first and alone: msg_init() claims the i80 bus and the panel
+    // pins, and nothing else in this firmware may touch them.
+    if (!msg_bridge::init()) {
+        // No panel, so nothing can be shown and appTask is never created — which
+        // means no BLE to recover through and no sleepNow to reach. Spinning here
+        // would drain the cell flat with no wireless path back in, so arm the RTC
+        // and power off instead: the next scheduled wake is a fresh boot, and a
+        // one-off allocation failure costs one cycle rather than the battery.
+        // power::timerSleep does the RTC arming itself and does not return.
+        Serial.println("[boot] FATAL: no panel — sleeping to the next wake");
+        Serial.flush();
+        rtc::init();
+        power::init();
+        power::timerSleep(WAKE_INTERVAL_SECS);
+    }
+
+    xTaskCreatePinnedToCore(appTask, "adr", 16384, NULL, 1, &s_appTask, 0);
+}
+
+void loop() {
+    // Core 1 belongs to the scan and core 0 to appTask; Arduino's loop task has
+    // no work and must not sit spinning against either.
+    vTaskSuspend(NULL);
 }

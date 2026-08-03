@@ -19,6 +19,8 @@
 #include "setpiece_modal.h"     // landmark setpiece overlay (STEP_LANDMARK starts it)
 #include "game_state.h"
 #include "world_state.h"
+#include "beeper.h"
+#include "rtc_bm8563.h"
 #include <M5Unified.h>
 #include <stdio.h>
 #include <time.h>
@@ -53,8 +55,8 @@ constexpr int HUD_B_Y = 96;    // 罗盘指向X · message slot
 // (x 42..498, inside the 24px tap-safe margin); 33 rows x 24 = 792px from y 124,
 // ending 916 < 928 (status bar). CENTER_COL/ROW is where a recenter re-parks the
 // wanderer — NOT its fixed cell every step: the camera holds still between
-// recenters (updateCamera) so a plain step only moves the '@', which is the whole
-// point of the per-step e-ink throttle. See m_camX/m_camY in world_page.h.
+// recenters (updateCamera) so a plain step only moves the '@' within an otherwise
+// static frame, keeping the view visually calm. See m_camX/m_camY in world_page.h.
 constexpr int CELL       = 24;
 constexpr int COLS       = 19;
 constexpr int ROWS       = 33;
@@ -66,17 +68,18 @@ constexpr int MAP_Y1     = MAP_Y0 + MAP_H;              // 916
 constexpr int CENTER_COL = COLS / 2;                    // 9
 constexpr int CENTER_ROW = ROWS / 2;                    // 16
 
-// Per-step partial-refresh band: the HUD rows + the whole map (title unchanged).
+// Top of the HUD+map band that drawMapAndHud clears before repainting (title
+// sits above it and is left alone).
 constexpr int REPAINT_TOP = HUD_A_Y - 4;                // 64
 
 // Look-ahead margin (cells) the wanderer must reach before the camera recenters.
 // Between recenters the viewport is frozen, so a step only moves the '@' glyph and
-// the EPD diff drives two cells, not the whole map. Smaller = fewer recenters
-// (fewer full-map refreshes) but less terrain visible ahead; 4 keeps 4 cells of
-// look-ahead in the travel direction and still recenters only every ~5 (a
-// horizontal run, CENTER_COL 9 - margin 4) / ~12 (vertical, CENTER_ROW 16 - 4)
-// straight steps. MUST stay < CENTER_COL and < CENTER_ROW so a fresh recenter
-// (which parks the player at CENTER) doesn't immediately re-trip the margin.
+// the terrain around it holds still. Smaller = fewer recenters (fewer viewport
+// jumps) but less terrain visible ahead; 4 keeps 4 cells of look-ahead in the
+// travel direction and still recenters only every ~5 (a horizontal run,
+// CENTER_COL 9 - margin 4) / ~12 (vertical, CENTER_ROW 16 - 4) straight steps.
+// MUST stay < CENTER_COL and < CENTER_ROW so a fresh recenter (which parks the
+// player at CENTER) doesn't immediately re-trip the margin.
 constexpr int RECENTER_MARGIN = 4;
 
 static inline int iabs(int v) { return v < 0 ? -v : v; }
@@ -85,8 +88,8 @@ static inline int iabs(int v) { return v < 0 ? -v : v; }
 // death so the post-death embark lockout (§3.4) is measured on the same clock as
 // settle()/embark and survives deep sleep.
 uint32_t epochNow() {
-    m5::rtc_date_t d; m5::rtc_time_t t;
-    M5.Rtc.getDateTime(&d, &t);
+    rtc::Date d; rtc::Time t;
+    rtc::getDateTime(&d, &t);
     struct tm tmv = {};
     tmv.tm_year = d.year - 1900; tmv.tm_mon = d.month - 1; tmv.tm_mday = d.date;
     tmv.tm_hour = t.hours; tmv.tm_min = t.minutes; tmv.tm_sec = t.seconds;
@@ -267,8 +270,9 @@ bool WorldPage::draw(m5gfx::M5Canvas& c) {
 
 void WorldPage::drawMapAndHud(m5gfx::M5Canvas& c) const {
     updateCamera();   // freeze / recenter the viewport BEFORE painting this frame
-    // Clear the HUD+map band: harmless after draw()'s fillSprite, and required on
-    // the per-step partial-repaint path (the title + surrounding pixels stay).
+    // Clear the HUD+map band. Redundant after draw()'s own fillSprite — draw() is
+    // this function's only caller now that onLocalAction repaints the whole page
+    // instead of this band alone — but left as a harmless belt-and-braces clear.
     c.fillRect(0, REPAINT_TOP, 540, MAP_Y1 - REPAINT_TOP, TFT_WHITE);
     drawHud(c, m_msgKey);
     drawMap(c, m_camX, m_camY);
@@ -276,13 +280,12 @@ void WorldPage::drawMapAndHud(m5gfx::M5Canvas& c) const {
 
 // Freeze the viewport between recenters. On an ordinary step the wanderer stays
 // inside the look-ahead margin so the camera doesn't move — drawMap then repaints
-// an unchanged frame except the '@' that shifted one cell, and the EPD per-pixel
-// diff (see onLocalAction's FASTEST push) drives only those two cells rather than
-// re-driving the whole scrolling map. The camera recenters (parks the player back
-// at CENTER, a one-frame whole-map redraw) only when it reaches the margin, or
-// when m_camInit is false / the player is off the current window (embark, resume,
-// goHome-and-re-embark, the death-frame return). That recenter is the ONE full
-// refresh that replaces what used to be a full refresh every single step.
+// an unchanged frame except the '@' that shifted one cell, which keeps the map
+// visually calm (the terrain doesn't reshuffle underfoot) between recenters, even
+// though every step now costs the same full-panel redraw regardless (see
+// onLocalAction). The camera recenters (parks the player back at CENTER) only
+// when it reaches the margin, or when m_camInit is false / the player is off the
+// current window (embark, resume, goHome-and-re-embark, the death-frame return).
 void WorldPage::updateCamera() const {
     int px = g_world.ex.x, py = g_world.ex.y;
     int col = px - m_camX, row = py - m_camY;    // player's current on-screen cell
@@ -324,11 +327,11 @@ void WorldPage::onLocalAction(uint8_t param, int x, int y) {
         // return to the village (the Path latch was already closed at embark).
         world_page::s_death = false;
         m_msgKey = nullptr;
-        M5.Speaker.tone(1800, 80);
+        beeper::tone(1800, 80);
         pager::showPage(pager::ringIndexByName("outside"), false);
         return;
     }
-    if (!g_world.ex.active) { M5.Speaker.tone(600, 120); return; }   // defensive
+    if (!g_world.ex.active) { beeper::tone(600, 120); return; }   // defensive
 
     StepResult r = g_world.move(g_game, resolveDir(x, y));
     switch (r.kind) {
@@ -338,7 +341,7 @@ void WorldPage::onLocalAction(uint8_t param, int x, int y) {
             // g_game. Persist it, then return to the village (World now hides).
             g_game.save();
             if (path_page::isOpen()) path_page::close();   // defensive latch cleanup
-            M5.Speaker.tone(1800, 80);
+            beeper::tone(1800, 80);
             pager::showPage(pager::ringIndexByName("outside"), false);
             return;
         case STEP_DIED:
@@ -349,7 +352,7 @@ void WorldPage::onLocalAction(uint8_t param, int x, int y) {
             g_game.save();
             world_page::s_death = true;
             m_msgKey = nullptr;
-            M5.Speaker.tone(300, 240);                     // somber
+            beeper::tone(300, 240);                     // somber
             pager::showPage(pager::currentRingIndex(), false);  // paints the frame
             return;
         case STEP_LANDMARK:
@@ -381,20 +384,16 @@ void WorldPage::onLocalAction(uint8_t param, int x, int y) {
             m_msgKey = r.notice;
             break;
         default:  // STEP_BLOCKED — no active expedition (shouldn't reach here)
-            M5.Speaker.tone(600, 120);
+            beeper::tone(600, 120);
             return;
     }
-    // A plain step: repaint the HUD + map under FASTEST — no press-flash, no
-    // per-step beep (the map's own redraw is the feedback). The push RECT is
-    // unchanged (the whole HUD+map band): shrinking it would save no flicker — the
-    // EPD driver diffs per-pixel and only drives changed pixels (927b072). What
-    // makes this cheap now is drawMapAndHud's frozen camera (updateCamera): on an
-    // ordinary step the frame is identical except the '@' that moved one cell, so
-    // the diff drives just those two cells instead of the whole scrolling map. The
-    // full-map redraw is spent only on the ~1-in-N recenter, not every step.
-    drawMapAndHud(canvas);
-    pager::partialRefresh(pages::Rect{ 0, REPAINT_TOP, 540, MAP_Y1 - REPAINT_TOP },
-                          pages::RefreshMode::FASTEST);
+    // A plain step: whole-page redraw, no press-flash, no per-step beep (the map's
+    // own redraw is the feedback). The panel driver free-runs and re-renders the
+    // entire 540x960 canvas in ~8ms out of the measured ~23ms scan period, so the
+    // pixel EPD diff that used to make a frozen-camera step cheap (927b072) no
+    // longer has anything to save — every step costs the same full render whether
+    // the '@' moved one cell or the camera just recentred across the whole map.
+    pager::showPage(pager::currentRingIndex(), false);
 }
 
 // Raise the shared death frame from the fight overlay (research decision 4). die()
@@ -406,7 +405,7 @@ void enterDeath() {
     g_game.deathAt = epochNow();                   // arm the post-death embark lockout (§3.4)
     g_game.save();
     s_death = true;
-    M5.Speaker.tone(300, 240);                     // somber, matching STEP_DIED
+    beeper::tone(300, 240);                     // somber, matching STEP_DIED
     pager::showPage(pager::currentRingIndex(), false);
 }
 }  // namespace world_page

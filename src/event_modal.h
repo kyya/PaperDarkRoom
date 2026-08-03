@@ -23,6 +23,13 @@ namespace event_modal {
 // True while the panel owns the screen (the guard pager reads). Set by show(),
 // cleared on exit (a choose that ends the event, or the idle timeout).
 bool active();
+// Compose this overlay's WHOLE frame into the shared canvas — no flip. Called by
+// pager::drawFrame() while active() is true, because the panel is double
+// buffered and free-running: the buffer a repaint lands in holds the frame from
+// two flips ago, so there is never anything on screen to build on and every
+// push is a complete 540x960 render. See msg_bridge.h.
+void renderFrame();
+
 
 // Bring the panel up for the currently-active engine event: one epd_quality
 // full-panel push (a deliberate flash that also clears ghosting) + a short
@@ -42,5 +49,15 @@ bool handleHold(int x, int y);
 // restore the page underneath, so a forgotten card can sleep instead of the
 // keep-awake gate pinning it on. Call each loop pass with nowMs = millis().
 void checkTimeout(uint32_t nowMs);
+
+// Forced-sleep cleanup (main.cpp sleepNow): drop the overlay's guard so the
+// page underneath is what the deghost freezes onto the glass for the whole
+// sleep. events::dismissDefault() ends the ENGINE's event but not this
+// overlay's s_active, and once the engine is done eventTitleKey() is null and
+// btnCount() is 0 — so a still-active overlay renders a blank page with only a
+// status bar. The old code could not hit this because the sleep repaint went
+// through pager::showPage, which the modal guard refused outright. No-op if
+// inactive.
+void endForSleep();
 
 }  // namespace event_modal

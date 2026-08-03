@@ -15,6 +15,8 @@
 #include "page_tabs.h"          // shared two-tab header (生火间 │ 小型村落)
 #include "pager.h"
 #include "game_state.h"
+#include "beeper.h"
+#include "rtc_bm8563.h"
 #include <M5Unified.h>
 #include <stdio.h>
 #include <string.h>
@@ -127,8 +129,8 @@ void fmt1(char* out, size_t cap, const char* tmpl, const char* arg) {
 // RTC -> Unix epoch, mirroring main.cpp's epochNow (only differences matter to
 // settle()/cooldownLeft, so the mktime timezone is irrelevant if consistent).
 uint32_t epochNow() {
-    m5::rtc_date_t d; m5::rtc_time_t t;
-    M5.Rtc.getDateTime(&d, &t);
+    rtc::Date d; rtc::Time t;
+    rtc::getDateTime(&d, &t);
     struct tm tmv = {};
     tmv.tm_year = d.year - 1900; tmv.tm_mon = d.month - 1; tmv.tm_mday = d.date;
     tmv.tm_hour = t.hours; tmv.tm_min = t.minutes; tmv.tm_sec = t.seconds;
@@ -453,21 +455,6 @@ void drawLog(m5gfx::M5Canvas& c) {
     }
 }
 
-// The log band's partial-refresh target (buttonAreaRect parity): the whole log
-// rect plus a 2px bleed. Used to surface a failed long-press's reason (v0.3.1
-// feedback 2) immediately, instead of waiting up to 1s for the next tick.
-pages::Rect logAreaRect() {
-    return pages::Rect{ 0, LOG_TOP - 2, 540, LOG_LINES * LOG_LINEH + 4 };
-}
-
-// Clear the log rect and repaint it into `c` (for the partial-refresh path —
-// the surrounding full-page pixels already sit in the canvas).
-void repaintLog(m5gfx::M5Canvas& c) {
-    pages::Rect r = logAreaRect();
-    c.fillRect(r.x, r.y, r.w, r.h, TFT_WHITE);
-    drawLog(c);
-}
-
 // Paint the whole button area (clears it first) from the given slot views,
 // placing slot s at row s/2, column s%2 (row-major reading order). Every cell
 // goes through the shared action_band renderer: a priced cell puts its title in
@@ -505,25 +492,6 @@ uint32_t contentSig() {
     return sig;
 }
 
-// Bounding rect (2px bleed) of the grid cells named in `mask` (bit s = slot s):
-// each cell is COL_X0[col], its row top, COL_W x ROOM_BTN_H. The cooldown tick
-// pushes just this union — never the 540x442 button area — so only the cell whose
-// progress bar is draining (Room has at most one, the fire verb) flips on screen.
-// Empty mask -> zero rect (the caller gates on mask, so an empty rect never ships).
-pages::Rect coolingRect(uint16_t mask) {
-    int x0 = 540, y0 = BTN_AREA_BOTTOM, x1 = 0, y1 = BTN_TOP;
-    for (int s = 0; s < MAX_SLOTS; s++) {
-        if (!(mask & (1u << s))) continue;
-        int col = s % MAX_COLS;
-        int top = BTN_TOP + (s / MAX_COLS) * (ROOM_BTN_H + BTN_GAP);
-        if (COL_X0[col] < x0)         x0 = COL_X0[col];
-        if (COL_X0[col] + COL_W > x1) x1 = COL_X0[col] + COL_W;
-        if (top < y0)                 y0 = top;
-        if (top + ROOM_BTN_H > y1)    y1 = top + ROOM_BTN_H;
-    }
-    if (x1 <= x0) return pages::Rect{ 0, 0, 0, 0 };
-    return pages::Rect{ x0 - 2, y0 - 2, (x1 - x0) + 4, (y1 - y0) + 4 };
-}
 }  // namespace
 
 // ================================ Page API =================================
@@ -578,12 +546,12 @@ void RoomPage::onLocalAction(uint8_t param, int x, int y) {
     int row  = param;
     int col  = (x < COL_MID) ? 0 : 1;
     int slot = row * MAX_COLS + col;
-    if (slot < 0 || slot >= m_slotCount) { M5.Speaker.tone(600, 120); return; }
+    if (slot < 0 || slot >= m_slotCount) { beeper::tone(600, 120); return; }
     uint8_t code = m_slotCodes[slot];
 
     if (code == A_MORE) {
         m_page++;
-        M5.Speaker.tone(1800, 80);
+        beeper::tone(1800, 80);
         pager::showPage(pager::currentRingIndex(), false);
         return;
     }
@@ -596,7 +564,7 @@ void RoomPage::onLocalAction(uint8_t param, int x, int y) {
         case A_TRAPS:  r = g_game.checkTraps(now); break;
         default: {
             uint8_t id = (uint8_t)(code - A_CRAFT_BASE);
-            if (id >= CRAFT_COUNT) { M5.Speaker.tone(600, 120); return; }
+            if (id >= CRAFT_COUNT) { beeper::tone(600, 120); return; }
             r = craftIsBuilding(id) ? g_game.build(id) : g_game.craft(id);
             break;
         }
@@ -614,44 +582,36 @@ void RoomPage::onLocalAction(uint8_t param, int x, int y) {
         // settles + compares against this, so this same action no longer trips a
         // SECOND full-page redraw next tick — only genuine economy advancing in the
         // following second still does.
-        M5.Speaker.tone(1800, 80);
+        beeper::tone(1800, 80);
         g_game.save();
         pager::showPage(pager::currentRingIndex(), false);
         m_lastSig = contentSig();
     } else if (r == RC_ERR_COST || r == RC_ERR_COLD) {
-        M5.Speaker.tone(600, 120);
-        repaintLog(canvas);
-        pager::partialRefresh(logAreaRect(), pages::RefreshMode::FAST);
+        beeper::tone(600, 120);
+        // Whole-frame redraw. The panel driver free-runs and re-renders the entire
+        // 540x960 canvas in ~8ms out of the measured ~23ms scan period, so a partial
+        // saved nothing measurable even before this — the machinery it needed
+        // (pager::partialRefresh, repaintLog's own fillRect+drawLog) is gone with
+        // it; showPage's draw() repaints the log as part of the same full render.
+        pager::showPage(pager::currentRingIndex(), false);
         // The engine already pushed the reason (game_state lightFire/stokeFire/
-        // makeCraftable) and the partial above already put it on screen, so sync the
+        // makeCraftable) and the redraw above already put it on screen, so sync the
         // tick baseline to it. Without this the +1 logCount makes the next tick see
-        // contentSig() != m_lastSig and run a whole redundant full-page showPage.
-        // That showPage would not even visibly re-flash the log — the M5GFX Panel_EPD
-        // driver diffs per-pixel (task_update compares _step_framebuf vs _buf, only a
-        // changed pixel gets a drive step), so the already-drawn line is not re-driven
-        // — but it still burns a full 540x960 draw() + a full-panel scanline sweep +
-        // status-bar rebuild for nothing. (Same reason a SMALLER push never saves
-        // flicker: shrinking the rect changes no driven pixels. Do not reintroduce a
-        // "narrow the rect / point-refresh to reduce flicker" design — it was tried
-        // in 0.5.4 and reverted once the driver diff was confirmed.)
+        // contentSig() != m_lastSig and run a second, redundant full-page showPage.
         m_lastSig = contentSig();
     } else {
-        M5.Speaker.tone(600, 120);   // cooldown / locked / max — unchanged, silent
+        beeper::tone(600, 120);   // cooldown / locked / max — unchanged, silent
     }
 }
 
 // Time axis (awake only). Settle the economy each second, then repaint what
 // changed: a content change (fire/temp/stores/log/unlocks — which also flips a
 // button's available/dashed state) redraws the whole page. Otherwise, while an
-// action cools its bar drains — so paint every button into the canvas as before
-// but push ONLY the cooling cell(s) (coolingRect), and on the tick a cooldown
-// hits zero push just the cell that JUST cleared. Both use FASTEST (DU), never
-// QUALITY: a full-area grayscale wipe to chase the bar/dashed-frame ghost is
-// exactly the "jarring when it fires while the user is looking" flash (pager.cpp)
-// the user reported as a big black block. That ghost is instead cleaned at sleep
-// entry by pager::payGhostDebtIfDue, when nobody is watching. onLocalAction
-// re-baselines m_lastSig after its own showPage, so a press no longer forces a
-// second full redraw here. Mirrors the outside_page cadence.
+// action cools its bar drains, so a live or just-cleared cooldown also earns a
+// redraw — whole-page now (see the call site below); there is no sub-rect push
+// left to gate by mask. onLocalAction re-baselines m_lastSig after its own
+// showPage, so a press no longer forces a second full redraw here. Mirrors the
+// outside_page cadence.
 void RoomPage::tick(uint32_t nowMs) {
     static uint32_t s_lastTick     = 0;
     static uint16_t s_lastCoolMask = 0;   // cooling cells the previous tick pushed
@@ -681,15 +641,13 @@ void RoomPage::tick(uint32_t nowMs) {
     }
 
     if (coolMask || s_lastCoolMask) {
-        BandView views[MAX_SLOTS];
-        m_regionCount = layoutBands(m_regions, m_slotCodes, views, m_page, now,
-                                    &m_slotCount);
-        paintButtons(canvas, views, m_slotCount);
-        // Union of the cells cooling now and the ones that just cleared this tick
-        // (were cooling last tick) — never the whole button area. FASTEST; the
-        // ghost cleanup is deferred to sleep (see the function note).
-        pager::partialRefresh(coolingRect((uint16_t)(coolMask | s_lastCoolMask)),
-                              pages::RefreshMode::FASTEST);
+        // Whole-frame redraw. The panel driver free-runs and re-renders the entire
+        // 540x960 canvas in ~8ms out of the measured ~23ms scan period, so pushing
+        // cooling cell(s) saved nothing measurable and the coolingRect union
+        // bookkeeping it needed is gone along with pager::partialRefresh. draw()
+        // recomputes m_regionCount/m_slotCount the same way the deleted layoutBands
+        // call here did, so nothing downstream loses track of the grid.
+        pager::showPage(pager::currentRingIndex(), false);
     }
     s_lastCoolMask = coolMask;
 }

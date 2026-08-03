@@ -5,6 +5,8 @@
 #include "pomo.h"
 #include "minecraftia16.h"
 #include "tomato_icons.h"
+#include "power_s3.h"
+#include "rtc_bm8563.h"
 #include <M5Unified.h>
 #include <math.h>       // lroundf — page-dot spacing
 #include <string.h>
@@ -54,8 +56,7 @@ static const uint8_t BT_ICON_BITS[] = {
 // A small charging bolt as two filled triangles (a zigzag), drawn at a pixel
 // offset so callers can stamp a white halo around a black core — the bolt has
 // to read on BOTH the battery's black fill and its white remainder, so a bare
-// black glyph would vanish over a nearly-full (mostly-black) battery. Draws to
-// any LovyanGFX target (page canvas or the strip sprite), not M5.Display alone.
+// black glyph would vanish over a nearly-full (mostly-black) battery.
 static void drawBolt(LovyanGFX* dst, int cx, int cy, uint16_t color, int dx, int dy) {
     dst->fillTriangle(cx + 3 + dx, cy - 7 + dy, cx - 4 + dx, cy + 1 + dy,
                       cx + 1 + dx, cy + 1 + dy, color);
@@ -74,8 +75,30 @@ static void drawBolt(LovyanGFX* dst, int cx, int cy, uint16_t color, int dx, int
 static int32_t s_batEmaX256 = -1;   // 8.8 fixed point; -1 = no valid sample yet
 static int     s_batShown   = -1;   // last value adopted for display
 
-int batteryPercent() {
-    int raw = (int)M5.Power.getBatteryLevel();
+// Cached clock, refreshed by sample() alongside the battery. Read by drawTo()
+// and by main.cpp's change detector — the SAME value, which is the point.
+static int s_clkHour = -1, s_clkMin = -1;
+
+// SAMPLING AND DRAWING ARE SEPARATE, and keeping them separate is not tidiness.
+//
+// Under MSG the bar is composited into EVERY frame (pager::drawFrame), and a
+// frame happens on every repaint: four or so per button press, one a second
+// while anything is cooling. When the ADC burst and the EMA step lived inside
+// drawTo() that cadence became the filter's cadence, so the ~8-sample time
+// constant this filter was designed around collapsed to about a second and the
+// 1.5% deadband was being punched through by raw voltage jitter — the exact
+// flapping the EMA exists to suppress.
+//
+// It also broke the "only repaint on a visible change" gate outright: main.cpp
+// sampled once to decide, then drawTo() sampled AGAIN and drew a different
+// number, so the gate could fire on nothing and miss a real change. On e-ink
+// that is a full-panel refresh a second, for a digit that did not move.
+//
+// So: sample() is the ONE sampler, called from main.cpp's 1 s tick (and once at
+// boot, before the first frame); batteryPercent() and clockHHMM() are pure
+// reads of what it cached; drawTo() touches no hardware at all.
+void sample() {
+    int raw = power::batteryLevel();
     if (raw >= 0 && raw <= 100) {
         int32_t x = (int32_t)raw << 8;
         s_batEmaX256 = (s_batEmaX256 < 0) ? x
@@ -84,15 +107,18 @@ int batteryPercent() {
         if (s_batShown < 0 || err >= 384 || err <= -384)   // 384 = 1.5 in 8.8
             s_batShown = (int)((s_batEmaX256 + 128) >> 8);
     }
-    return s_batShown;   // -1 only if no valid reading has ever landed
+    rtc::Time t;
+    if (rtc::getTime(&t)) { s_clkHour = t.hours; s_clkMin = t.minutes; }
 }
 
-// Composite the whole band onto `dst` (page canvas OR the strip sprite) with
-// its top row at `barTop`. Pure drawing — no EPD-mode work, so it's reusable
-// on a sprite (whose push the caller sequences). Reads all live state itself.
-// Both targets are grayscale_8bit LovyanGFX surfaces; TFT_BLACK/WHITE map the
-// same way on each, so the element geometry is identical to the old in-place
-// draw — only the surface differs.
+int batteryPercent() { return s_batShown; }   // -1 until a reading has landed
+int clockMinute()    { return s_clkMin; }     // -1 until the clock has been read
+
+// Composite the whole band onto `dst` with its top row at `barTop`. Pure
+// drawing — the caller sequences the push. Reads all live state itself.
+// The target is the shared 1bpp page canvas; TFT_BLACK/TFT_WHITE reach the
+// panel's ink convention through the bridge's colour converter (msg_bridge.h),
+// so every element's geometry and colour is written exactly as it always was.
 // otaPct < 0 (default) → the steady-state bar (center = page dots). otaPct >= 0
 // → the OTA-progress variant: the center slot is replaced by a graphical
 // progress bar + "NN%" (see the center section). Left clock/BLE glyph and right
@@ -114,10 +140,10 @@ static void drawTo(LovyanGFX* dst, int barTop, int otaPct = -1) {
 
     // ---- left: RTC clock, then BLE glyph (if connected) ----
     int xl = MARGIN;
-    m5::rtc_time_t t;
-    M5.Rtc.getTime(&t);
+    // Cached by sample(), never read from the chip here — see the note there.
     char clk[6];
-    snprintf(clk, sizeof(clk), "%02d:%02d", t.hours, t.minutes);
+    if (s_clkMin < 0) snprintf(clk, sizeof(clk), "--:--");
+    else              snprintf(clk, sizeof(clk), "%02d:%02d", s_clkHour, s_clkMin);
     dst->setTextDatum(middle_left);
     dst->drawString(clk, xl, cy);
     xl += dst->textWidth(clk) + 6;
@@ -243,70 +269,59 @@ static void drawTo(LovyanGFX* dst, int barTop, int otaPct = -1) {
     }
 }
 
-// Path 1 — full-page repaint: draw straight into the page canvas's bottom
-// band so the caller's single pushSprite lands bar + page together (no
-// vanish-then-return across a page turn). rot 0/2 are both 540x960, so the
-// canvas bottom is height()-BAR_H. No EPD work here; showPage owns the push.
+// Which center variant the NEXT composed frame gets: <0 = steady state (page
+// dots), >=0 = the OTA progress bar at that percentage. It has to be state
+// rather than an argument now, because the bar no longer has an update path of
+// its own — see draw() below.
+static int s_otaPct = -1;
+
+// The bar is composed into the page canvas's bottom band, so page + chrome land
+// in one frame (no vanish-then-return across a page turn). The canvas is always
+// 540x960, so the band's top row is height()-BAR_H. Pure drawing; pager::repaint
+// owns the push.
 void drawOnto(m5gfx::M5Canvas& canvas) {
-    drawTo(&canvas, canvas.height() - BAR_H);
+    drawTo(&canvas, canvas.height() - BAR_H, s_otaPct);
 }
 
-// A strip sprite the size of the band (W x BAR_H, grayscale_8bit like the page
-// canvas). Composing the band off-screen then pushing it as one blit means an
-// independent bar refresh is a single strip-local EPD update — the white clear
-// and every element land together, so no fillRect-then-primitives flicker.
-// Width is stable across rot 0/2 (both 540), so one lazy alloc serves forever;
-// PSRAM-backed like every M5Canvas (parent's _psram default), 540x32 is tiny.
-static M5Canvas s_strip(&M5.Display);
-static bool     s_stripReady = false;
-
-// Shared strip push for both bar variants: compose the band into the off-screen
-// strip then blit it once. otaPct<0 → steady-state (page dots), pushed under
-// epd_fast; otaPct>=0 → the OTA-progress center, pushed under epd_fastest (pure
-// B/W binary waveform — the progress bar is a flat fill, so ghosting is moot:
-// success reboots straight into a quality boot-restore, and the error path
-// already redraws the normal bar with epd_fast). draw() and drawOtaProgress()
-// differ only in this argument, so the single-EPD-update, no-flicker guarantee
-// is identical either way.
-static void pushStrip(int otaPct) {
-    auto& disp = M5.Display;
-    // rot 0/2 are both 540 wide/960 tall — read live, never assume a constant.
-    int W = disp.width();
-    int barTop = disp.height() - BAR_H;
-
-    if (!s_stripReady) {
-        s_strip.setColorDepth(m5gfx::grayscale_8bit);
-        s_stripReady = s_strip.createSprite(W, BAR_H);
-    }
-
-    epd_mode_t prev = disp.getEpdMode();
-    disp.setEpdMode(otaPct >= 0 ? epd_mode_t::epd_fastest : epd_mode_t::epd_fast);
-    if (s_stripReady) {
-        drawTo(&s_strip, 0, otaPct);   // band's own top row is 0 in the strip
-        s_strip.pushSprite(0, barTop); // one EPD update: erase+draw merged
-    } else {
-        drawTo(&disp, barTop, otaPct); // alloc failed (shouldn't): draw in place
-    }
-    disp.setEpdMode(prev);
+// An independent bar refresh (main.cpp's 1s tick, on a visible clock/battery/USB
+// change) is a WHOLE-FRAME repaint now.
+//
+// It used to be a 540x32 off-screen strip sprite blitted over just the band, so
+// that the white clear and every element landed in a single strip-local EPD
+// update instead of flickering through a fillRect. Both halves of that reasoning
+// are gone: the panel driver is free-running and double-buffered, so there is no
+// such thing as updating one band (the buffer a partial write would land in is
+// two frames stale), and there is no waveform to spare either. Recomposing the
+// whole page to move a clock digit costs ~8 ms of the measured ~23 ms scan
+// period, which is
+// cheaper than the strip alloc was.
+void draw() {
+    s_otaPct = -1;
+    pager::repaint();
 }
-
-void draw() { pushStrip(-1); }
 
 // OTA-progress variant of the bar (fw 0.8.9): center replaced by "OTA <bar> NN%"
 // (see drawTo). Called by main.cpp's loop on a throttle (percent-advanced or a
 // time floor) while an OTA is streaming — NOT from the BLE callback; it just
 // reads ble_link::otaReceived()/otaTotal() via the caller. total==0 → 0%.
+//
+// UNREACHABLE IN THIS WAVE: ble_link's OTA BEGIN is refused outright while the
+// panel driver has no park protocol around a flash erase, so otaBusy() is never
+// true. Kept live (rather than deleted with the rest of the display-side dead
+// code) because it is a pure drawing path with nothing EPD-specific left in it,
+// and the OTA wave will want it back unchanged.
 void drawOtaProgress(uint32_t received, uint32_t total) {
     int pct = total ? (int)((received * 100ULL) / total) : 0;
     if (pct > 100) pct = 100;
-    pushStrip(pct);
+    s_otaPct = pct;
+    pager::repaint();
 }
 
 // Firmware version, self-drawn into the panel's TOP-RIGHT corner so a flashed
 // build announces which image it is right on the screen (the STATUS fw-string is
 // identical across re-flashes of the same version — useless for telling two
-// builds apart). Baked into the page canvas by pager::showPage BEFORE its single
-// pushSprite, so it rides the page's own EPD update — no separate refresh. Same
+// builds apart). Baked into the page canvas by pager::drawFrame right after the
+// bar, so it rides the page's own frame — there is no separate refresh. Same
 // Minecraftia16 face as the bottom bar, black on the already-white header.
 //
 // GEOMETRY — this firmware's page-tab header (page_tabs.cpp), NOT the retired

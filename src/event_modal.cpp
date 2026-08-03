@@ -15,6 +15,7 @@
 #include "cjk_text.h"            // cjk::drawText/drawWrapped/textWidth, tr()
 #include "status_bar.h"
 #include "pager.h"
+#include "beeper.h"
 #include <M5Unified.h>
 #include <stdio.h>
 #include <string.h>
@@ -138,20 +139,16 @@ void render() {
     status_bar::drawOnto(canvas);   // keep the clock/battery/dots chrome band
 }
 
-// Repaint after a choose that stayed in the event. A scene change replaces the
-// whole narrative block, so it takes a QUALITY full-panel clean (no ghost of the
-// previous scene's text); a same-scene repaint (repeat trade -> only a button's
-// dashed state may flip) is FAST, so trading twice doesn't flash the panel each
-// time.
+// Repaint after a choose that stayed in the event. s_scene used to pick between
+// a QUALITY full-panel clean (a scene change replaces the whole narrative block,
+// so it earned a grayscale wipe) and a FAST push (a repeat trade only flips a
+// button's dashed frame, and flashing the panel on every trade was jarring).
+// Neither waveform exists any more — every frame is one whole render at the
+// driver's own rate — so the distinction is gone and only the scene BOOKKEEPING
+// survives, because show() still uses it to know which scene it opened on.
 void repaint() {
-    int sc = events::currentScene();
-    bool sceneChanged = (sc != s_scene);
-    s_scene = sc;
-    render();
-    auto& disp = M5.Display;
-    disp.setEpdMode(sceneChanged ? epd_mode_t::epd_quality : epd_mode_t::epd_fast);
-    canvas.pushSprite(0, 0);
-    disp.setEpdMode(epd_mode_t::epd_fast);
+    s_scene = events::currentScene();
+    pager::repaint();
 }
 
 // Clear the overlay and repaint the page underneath (the shared exit path for a
@@ -168,21 +165,25 @@ void closeAndRestore() {
 
 bool active() { return s_active; }
 
+void renderFrame() { render(); }
+
 void show(uint32_t nowMs) {
     s_active = true;
     s_scene  = events::currentScene();
     s_openMs = nowMs;
     s_lastMs = nowMs;
-    render();
-    auto& disp = M5.Display;
-    disp.setEpdMode(epd_mode_t::epd_quality);   // one deliberate flash on entry
-    canvas.pushSprite(0, 0);
-    disp.setEpdMode(epd_mode_t::epd_fast);
+    // s_active is already set, so pager::drawFrame routes to renderFrame() below
+    // and this paints the overlay rather than the page under it. The deliberate
+    // epd_quality flash that used to mark an event popping open is gone with the
+    // waveforms; the two-note chime is the alert now, and losing the flash also
+    // takes with it the phantom GT911 contact it used to induce (pager.cpp's
+    // modal-open bounce guard).
+    pager::repaint();
     // Event alert: a short rising two-note chime, distinct from the action chime
     // (1800) and the switcher tone (2000) so a pop-up is unmistakable.
-    M5.Speaker.tone(1047, 90);
+    beeper::tone(1047, 90);
     delay(100);
-    M5.Speaker.tone(1568, 150);
+    beeper::tone(1568, 150);
     Serial.printf("[event] show ev=%d scene=%d\n",
                   events::currentEventId(), events::currentScene());
 }
@@ -190,28 +191,35 @@ void show(uint32_t nowMs) {
 bool handleHold(int x, int y) {
     s_lastMs = millis();                    // any long-press resets the idle clock
     int b = hitButton(x, y);
-    if (b < 0) { M5.Speaker.tone(600, 120); return true; }  // missed every band
+    if (b < 0) { beeper::tone(600, 120); return true; }  // missed every band
 
     // Press feedback: invert-flash the chosen choice band before resolving it
-    // (pager::flashPressRect leaves the canvas restored but the screen showing the
-    // inverted rect). An RC_OK repaint (repaint / closeAndRestore) paints over it;
-    // the non-repainting branches rebound the rect so the black flash bounces off.
+    // (pager::flashPressRect shows the frame with the band in reverse video for a
+    // beat, then puts the normal frame back itself).
     pages::Rect pr = btnRect(b, events::btnCount());
     pager::flashPressRect(pr);
 
     adr::Result r = events::choose(b);
     if (r == adr::RC_OK) {
-        M5.Speaker.tone(1800, 80);          // settle chime (same as page actions)
+        beeper::tone(1800, 80);          // settle chime (same as page actions)
         g_game.save();                      // events mutate stores; persist now
         if (events::active()) repaint();    // stayed (repeat trade / new scene)
         else                  closeAndRestore();  // event ended
         return true;                        // the repaint overwrote the flash
     }
-    // No committing choice: nothing repaints the panel, so rebound the flashed
-    // band. Only RC_ERR_COST low-beeps (unchanged); a bare no-op stays silent.
-    if (r == adr::RC_ERR_COST) M5.Speaker.tone(600, 120);   // unaffordable
-    pager::partialRefresh(pr, pages::RefreshMode::FASTEST);
+    // No committing choice: put a clean frame back up (flashPressRect already
+    // restored one, but the reject may still have changed a button's state).
+    // Only RC_ERR_COST low-beeps (unchanged); a bare no-op stays silent.
+    if (r == adr::RC_ERR_COST) beeper::tone(600, 120);      // unaffordable
+    pager::repaint();
     return true;
+}
+
+void endForSleep() {
+    if (!s_active) return;
+    s_active = false;
+    s_scene  = -1;
+    Serial.println("[event] forced sleep -> overlay released");
 }
 
 void checkTimeout(uint32_t nowMs) {

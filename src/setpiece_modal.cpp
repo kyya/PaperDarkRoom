@@ -20,6 +20,7 @@
 #include "cjk_text.h"            // cjk::drawText/drawWrapped/textWidth, tr()
 #include "status_bar.h"
 #include "pager.h"
+#include "beeper.h"
 #include <M5Unified.h>
 #include <stdio.h>
 #include <string.h>
@@ -131,13 +132,12 @@ void render() {
     status_bar::drawOnto(canvas);
 }
 
-void pushFull() {                         // deliberate QUALITY flash (scene change)
-    render();
-    auto& disp = M5.Display;
-    disp.setEpdMode(epd_mode_t::epd_quality);
-    canvas.pushSprite(0, 0);
-    disp.setEpdMode(epd_mode_t::epd_fast);
-}
+// Put this overlay on the panel. It used to take a deliberate epd_quality flash
+// on every scene change (a whole new narrative block earned a grayscale clean);
+// there is no waveform to ask for now, just one whole-frame render at the
+// driver's own rate. pager::repaint routes back into renderFrame() below while
+// s_active is set.
+void pushFull() { pager::repaint(); }
 
 void closeToWorld() {
     s_active = false;
@@ -158,15 +158,17 @@ void afterTransition() {
 
 bool active() { return s_active; }
 
+void renderFrame() { render(); }
+
 void begin(uint8_t spId, uint32_t nowMs) {
     if (!setpiece::begin(spId)) return;      // no setpiece for this landmark: inert
     s_active = true;
     s_lastMs = nowMs;
     // Entry chime: a short rising two-note, distinct from the event pop and the
     // fight's falling chime.
-    M5.Speaker.tone(1175, 90);
+    beeper::tone(1175, 90);
     delay(100);
-    M5.Speaker.tone(1568, 150);
+    beeper::tone(1568, 150);
     Serial.printf("[setpiece] begin id=%u\n", (unsigned)spId);
     afterTransition();
 }
@@ -174,20 +176,20 @@ void begin(uint8_t spId, uint32_t nowMs) {
 bool handleHold(int x, int y) {
     s_lastMs = millis();
     int b = hitButton(x, y);
-    if (b < 0) { M5.Speaker.tone(600, 120); return true; }
+    if (b < 0) { beeper::tone(600, 120); return true; }
 
     pages::Rect pr = btnRect(b, setpiece::btnCount());
     pager::flashPressRect(pr);
 
     Result r = setpiece::choose(b);
     if (r == RC_OK) {
-        M5.Speaker.tone(1800, 80);
+        beeper::tone(1800, 80);
         g_game.save();                        // perks / log / (trek saved by engine)
         afterTransition();
         return true;
     }
-    if (r == RC_ERR_COST) M5.Speaker.tone(600, 120);   // can't afford (no torch/charm)
-    pager::partialRefresh(pr, pages::RefreshMode::FASTEST);
+    if (r == RC_ERR_COST) beeper::tone(600, 120);   // can't afford (no torch/charm)
+    pushFull();                    // clean frame back over the press flash
     return true;
 }
 

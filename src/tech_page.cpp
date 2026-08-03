@@ -20,6 +20,7 @@
 #include "pager.h"
 #include "game_state.h"
 #include "world_state.h"        // g_world.ex.outfitItem — the packed-for-a-trek copy
+#include "beeper.h"
 #include <M5Unified.h>
 #include <stdio.h>
 
@@ -269,8 +270,8 @@ bool TechPage::draw(m5gfx::M5Canvas& c) {
 // a stale region table, so it low-beeps.
 void TechPage::onLocalAction(uint8_t param, int x, int y) {
     (void)x; (void)y;
-    if (param != 0) { M5.Speaker.tone(600, 120); return; }
+    if (param != 0) { beeper::tone(600, 120); return; }
     tech_page::close();
-    M5.Speaker.tone(1800, 80);
+    beeper::tone(1800, 80);
     pager::showPage(pager::ringIndexByName("outside"), false);
 }

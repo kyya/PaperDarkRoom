@@ -10,6 +10,9 @@
 #include "assign_page.h"
 #include "path_page.h"
 #include "tech_page.h"
+#include "msg_bridge.h"
+#include "touch_gt911.h"
+#include "beeper.h"
 #include <M5Unified.h>
 #include <climits>
 #include <cstring>
@@ -18,17 +21,28 @@ extern M5Canvas canvas;   // main.cpp owns the full-screen sprite
 
 namespace pager {
 
-// The full (epd_quality) refresh flashes the whole panel black — jarring when
-// it fires while the user is looking. Policy: every visible redraw (background
-// push AND user page turn) is epd_fast; the ghosting debt they accumulate is
-// normally paid off at SLEEP ENTRY (payGhostDebtIfDue) — a quality redraw of
-// the current page right before timerSleep, when nobody is watching. Escape
-// valve: a marathon interactive session that piles past HIGH_WATER fast
-// refreshes without sleeping pays on the next turn, so ghosting can't grow
-// unbounded. Boot restore also uses quality (power-button = user action).
+// Ghosting debt, in USER-VISIBLE SCREEN CHANGES (see presentFrame, which is the
+// only thing that charges it). The panel driver (lib/msg, see msg_bridge.h)
+// drives each pixel only until it has settled, which is a DU-class update and
+// accumulates the same ghosting an epd_fast push used to: the counter, its unit
+// and its two thresholds are all carried over unchanged from the M5GFX era, and
+// only what "paying" MEANS changed.
+// It is now the deghost pair in deghost() — eight fields of "lighten
+// everything" followed by eight fields of the frame that was up — rather than an
+// epd_quality redraw. Policy is unchanged too: the debt is normally settled at
+// SLEEP ENTRY (main.cpp's sleepNow calls deghost() outright, since the frame it
+// leaves behind is on show for the whole sleep), with a marathon interactive
+// session past HIGH_WATER paying on the next turn so ghosting can't grow
+// unbounded. Boot restore also pays (power-button = user action).
 static int s_fastCount = 0;
-static const int QUALITY_EVERY = 8;    // fast-refresh debt that a sleep deep-clean settles
+static const int QUALITY_EVERY = 8;    // refresh debt that a sleep deep-clean settles
 static const int HIGH_WATER   = 24;    // in-session escape valve: pay on the next turn past this
+
+// How long the press-feedback flash holds the inverted frame on the glass. The
+// driver's pipeline puts a submitted frame on the panel one scan (~23 ms) after
+// the flip returns, so anything under ~60 ms would be submitted and superseded
+// before the eye ever saw it.
+static const uint32_t FLASH_MS = 120;
 
 // Generic tap regions: any page can have a table of (y0,y1) rows pushed for
 // it; the device only ever does geometry (which row did y land in) — what a
@@ -55,16 +69,11 @@ static int      s_pendingItem = -1;
 // showPageOrNext steps over (cache hole). Exposed via skipCount() for STATUS.
 static uint16_t s_skipCount   = 0;
 
-static int s_curRing = 0;   // ring index of the page currently shown
+// Swallow every touch until the panel reads fully untouched once. Set by the
+// >=3-finger grip latch in handleTouch() and by deghost(); cleared there.
+static bool s_ignoreUntilClear = false;
 
-// Full-page push generation — bumped once per successful showPage() panel push
-// (NOT by partialRefresh). dispatchRegion's press-flash reads it to tell whether
-// the action already repainted the button (gen changed) or the black flash still
-// needs a manual rebound (gen unchanged — a host tap, a silent cooldown reject,
-// or an action whose only repaint was a partialRefresh that doesn't cover the
-// button, e.g. Room's RC_ERR_COST log-only refresh). Counting only whole-page
-// pushes is what lets that log-only partial still leave the button to be rebounded.
-static uint32_t s_showGen = 0;
+static int s_curRing = 0;   // ring index of the page currently shown
 
 // Last server-page count observed by currentRingIndex(). s_curRing is a raw
 // live ring index, but frame_store's server count can change under it (first
@@ -140,6 +149,17 @@ public:
         snprintf(name_, sizeof(name_), "srv:%d", idx_);
         return name_;
     }
+    // DEAD CODE WITH A TRIPWIRE ON IT. This firmware has no host and never
+    // registers a server page (frame_store::pageCount() is always 0), so this
+    // never runs — but it is NOT safe to start using again as-is under MSG, for
+    // two reasons that both arrived with the migration:
+    //   - it does not fillSprite() first, and every frame is now composed into a
+    //     buffer holding the frame from two flips ago (msg_bridge.h), so a PNG
+    //     smaller than the panel would leave stale pixels around it;
+    //   - the canvas is 1bpp behind a REPLACED colour converter (inkPalette1),
+    //     which maps by LSB parity — so decoded photographic pixels come out as
+    //     noise, not as a dither.
+    // Anyone re-enabling host pages has to fix both before trusting this.
     bool draw(m5gfx::M5Canvas& canvas) override {
         size_t len = 0;
         const uint8_t* png = frame_store::pagePng(idx_, &len);
@@ -253,9 +273,135 @@ const char* currentName() {
     return p ? p->name() : "";
 }
 
+// Compose the WHOLE 540x960 frame from scratch into the canvas — page (or
+// whichever overlay owns the panel) plus the chrome band.
+//
+// This exists because the panel is double-buffered now: msg_bridge::present()
+// hands the composed buffer to the scan and gives back the OTHER one, which
+// holds the frame from two flips ago. Nothing on screen can be touched up, so
+// every path that used to push a sub-rect goes through here instead. It is
+// affordable — a complete render measures ~8 ms against the measured ~23 ms
+// scan period —
+// and it is why partialRefresh() and the waveform selection around it are gone
+// rather than ported.
+//
+// The overlay dispatch is the same ownership ladder showPage() enforces below,
+// read in the same order: an interleaved setpiece combat is drawn by the FIGHT,
+// so the fight is tested before the setpiece that raised it.
+static void drawFrame() {
+    if (event_modal::active())    { event_modal::renderFrame();    return; }
+    if (fight_modal::active())    { fight_modal::renderFrame();    return; }
+    if (setpiece_modal::active()) { setpiece_modal::renderFrame(); return; }
+    pages::Page* p = pageAt(currentRingIndex());
+    if (p && p->draw(canvas)) {
+        status_bar::drawOnto(canvas);
+        status_bar::drawVersionOnto(canvas);
+        return;
+    }
+    // No page, or one that declined to paint (a cold/torn server-page cache).
+    // The buffer is two frames stale, so it cannot simply be left alone.
+    canvas.fillSprite(TFT_WHITE);
+    status_bar::drawOnto(canvas);
+}
+
+// What the USER would call "a different screen": which overlay owns the panel,
+// or which page is up when none does. Two frames with the same identity are the
+// same screen redrawn — a cooldown bar draining, a clock digit, a press flash —
+// however many of them there are.
+static uint32_t frameIdentity() {
+    if (event_modal::active())    return 0xE0000000u;
+    if (fight_modal::active())    return 0xF0000000u;
+    if (setpiece_modal::active()) return 0x50000000u;
+    return (uint32_t)currentRingIndex();
+}
+
+static uint32_t s_shownId = 0xFFFFFFFFu;   // identity of the last frame presented
+
+// Present, and charge the ghosting debt ONLY when the screen actually changed.
+//
+// THE DEBT COUNTS SCREEN CHANGES, NOT FRAMES, and under whole-frame redraw those
+// two had to be decoupled or the counter stops meaning anything. Its original
+// sense was "user-visible fast page turns since the last deep clean", which is a
+// sound proxy for accumulated ghosting because that is what leaves a ghost: new
+// ink in place of old. The migration accidentally bound it to the repaint rate
+// instead, and repaints now happen for reasons that put no new ink on the glass
+// — a 1 s bar tick, a cooldown tick, four frames per button press. At those
+// rates HIGH_WATER (24) was reached within seconds, so nearly every page turn
+// dragged a 400 ms full-panel white flash behind it.
+//
+// Counting identity changes restores the old cadence exactly (~8 turns to a
+// sleep-time clean, 24 to the in-session escape valve) without touching either
+// threshold, and it correctly charges the two things that DO replace the whole
+// screen: a page turn, and an overlay appearing or disappearing.
+static void presentFrame() {
+    uint32_t id = frameIdentity();
+    if (id != s_shownId) {
+        s_shownId = id;
+        if (s_fastCount < INT_MAX) s_fastCount++;
+    }
+    msg_bridge::present();
+}
+
+void repaint() {
+    drawFrame();
+    presentFrame();
+}
+
+// Settle the ghosting debt: eight fields of "lighten everything" through image
+// mode's fixed LUT waveform, then eight fields of the frame that was up.
+//
+// PUSHING THE SAME FRAME BACK IS NOT COSMETIC, and this is the one thing to
+// understand before touching this function. Image mode writes the glass without
+// going through — or updating — video mode's per-pixel state model, and lib/msg
+// is vendored unmodified by policy so there is no hook to re-seed that model.
+// A lone white push would therefore leave video believing the panel still holds
+// the old picture, and the next frame would drive only the pixels that differ
+// from it: everything the two frames agree on would stay white. Ending the
+// image sequence on exactly the frame the model already believes is displayed
+// is what keeps the two consistent. Hence the sequence below — compose, keep a
+// byte copy, drive it through VIDEO so the model owns it, let it settle, then
+// white-flash and put the copy back.
+// `compose` is false when the caller has ALREADY composed the frame into the
+// canvas — showPage() has to draw before it can know the page is displayable at
+// all (that return value is the availability probe), so making it draw again
+// here would render every quality page turn twice for nothing.
+static void deghostFrame(bool compose) {
+    uint8_t* snap = msg_bridge::scratch();
+    if (!snap) {
+        // Allocation failed at boot: no deghost is possible, but the frame still
+        // has to reach the panel — showPage's caller is relying on this having
+        // presented it. Clear the debt so we don't retry every turn.
+        if (compose) drawFrame();
+        presentFrame();
+        s_fastCount = 0;
+        return;
+    }
+    if (compose) drawFrame();
+    memcpy(snap, msg_bridge::frame(), msg_bridge::frameBytes());
+    presentFrame();          // keeps s_shownId in step; s_fastCount zeroed below
+    msg_bridge::waitSettled(2000);
+    memset(msg_bridge::frame(), 0xFF, msg_bridge::frameBytes());
+    msg_bridge::pushImage(msg_bridge::frame(), true);    // lighten everything
+    msg_bridge::pushImage(snap, false);                  // ... and the frame back
+    s_fastCount = 0;
+    // Sixteen fields of the whole panel being driven hard is a far bigger
+    // electrical and optical disturbance than the epd_quality flash this
+    // replaced — and that flash was already documented to induce phantom
+    // contacts on the GT911 (the modal-open bounce guard in handleTouch exists
+    // for exactly that). So arm the same swallow-until-lift latch here rather
+    // than a fixed delay: a time window cannot work, because a phantom that
+    // lands as a HOLD needs 500ms of contact to be reported and no window short
+    // enough to be unobtrusive can cover that. Waiting for the panel to read
+    // untouched once is the only test that actually terminates on reality.
+    // Covers the page-turn path, which had nothing but the 350ms tap debounce.
+    s_ignoreUntilClear = true;
+}
+
+void deghost() { deghostFrame(/*compose=*/true); }
+
 bool showPage(int ring, bool quality) {
     // A modal owns the panel while it's up: refuse every redraw (background BLE
-    // push, auto-rotate, pomo phase flip) so none can clobber it. The event modal
+    // push, pomo phase flip) so none can clobber it. The event modal
     // (research.md §4.1) first: while a random event is on screen no background
     // push / tick can repaint the page under it.
     // event_modal::closeAndRestore() clears the flag before its own showPage.
@@ -269,81 +415,47 @@ bool showPage(int ring, bool quality) {
     if (setpiece_modal::active()) return false;
     pages::Page* p = pageAt(ring);
     if (!p) return false;
-    M5.Display.setEpdMode(quality ? epd_mode_t::epd_quality
-                                  : epd_mode_t::epd_fast);
     bool ok = p->draw(canvas);
     if (ok) {
         // Set current FIRST — the bar reads currentRingIndex() to pick the
         // solid page dot, so bake it in before drawOnto or the dots lag.
         s_curRing = ring;
         frame_store::setCurrentName(p->name());
-        // Bar + version bake into the canvas so page + chrome land in ONE EPD
-        // update (no vanish-then-return flicker). Every redraw path (turn,
-        // push, rotate, boot) funnels through here.
+        // Bar + version bake into the canvas so page + chrome land in ONE frame.
+        // Every redraw path (turn, push, boot) funnels through here.
         status_bar::drawOnto(canvas);
         status_bar::drawVersionOnto(canvas);
-        canvas.pushSprite(0, 0);
-        s_showGen++;   // whole-page push — press-flash rebound reads this (see above)
-        if (quality) s_fastCount = 0; else s_fastCount++;
+        // The canvas is already composed at this point, so tell the deghost not
+        // to redo it — the draw above was the availability probe and cannot be
+        // skipped, which is exactly why the deghost's own compose has to be.
+        if (quality) {
+            deghostFrame(/*compose=*/false);
+        } else {
+            presentFrame();
+        }
     }
-    M5.Display.setEpdMode(epd_mode_t::epd_fast);
     return ok;
 }
 
-// Push a sub-rect of the already-drawn canvas under a chosen EPD waveform —
-// the client-page repaint primitive (a seconds counter blits ~10x14px, not
-// the whole panel). The caller draws its updated pixels into `canvas` first;
-// this clips the display to `r`, pushes, and restores. FAST charges the rect
-// to the ghosting debt (settled at sleep by payGhostDebtIfDue); QUALITY is a
-// grayscale-clean rect that clears local ghosting and resets the debt.
-void partialRefresh(const pages::Rect& r, pages::RefreshMode mode) {
-    auto& disp = M5.Display;
-    epd_mode_t prev = disp.getEpdMode();
-    epd_mode_t em = epd_mode_t::epd_fast;
-    switch (mode) {
-        case pages::RefreshMode::FASTEST: em = epd_mode_t::epd_fastest; break;
-        case pages::RefreshMode::QUALITY: em = epd_mode_t::epd_quality; break;
-        case pages::RefreshMode::FAST:    em = epd_mode_t::epd_fast;    break;
-    }
-    disp.setEpdMode(em);
-    disp.setClipRect(r.x, r.y, r.w, r.h);   // limit the pushed/updated region
-    canvas.pushSprite(0, 0);
-    disp.clearClipRect();
-    disp.setEpdMode(prev);
-    switch (mode) {
-        case pages::RefreshMode::FAST:
-        case pages::RefreshMode::FASTEST:
-            if (s_fastCount < INT_MAX) s_fastCount++;
-            break;
-        case pages::RefreshMode::QUALITY:
-            s_fastCount = 0;
-            break;
-    }
-}
-
-// Invert-flash a button rect as press feedback: XOR-invert the canvas's
-// grayscale_8bit pixels inside `r` (1 byte/pixel, row stride = canvas width),
-// push just that rect under FASTEST (a quick DU flash), then invert the canvas
-// back — so the CANVAS ends up unchanged while the SCREEN briefly shows the rect
-// in reverse video. The caller either repaints over it (any showPage) or rebounds
-// it with a second partialRefresh of the now-restored rect. Rect is clamped to the
-// panel; an empty rect (pressRect's "don't flash" signal) never reaches here.
+// Invert-flash a button rect as press feedback: compose the frame, flip the bits
+// inside `r` in the back buffer, present that, hold it long enough to be seen,
+// then compose and present the normal frame again.
+//
+// The old implementation inverted the CANVAS and pushed just the rect, so the
+// canvas ended unchanged and the caller had to "rebound" the flash afterwards if
+// its action happened not to repaint. None of that survives double buffering:
+// the buffer this writes into is discarded on the next flip anyway, and
+// repaint() below is what puts the panel back — so the rebound bookkeeping (and
+// the push-generation counter that drove it) is deleted, not ported. An empty
+// rect (pressRect's "don't flash" signal) never reaches here, but is rejected
+// anyway because msg_bridge::invertRect would clip it to nothing silently.
 void flashPressRect(const pages::Rect& r) {
-    const int W = canvas.width(), H = canvas.height();
-    int x0 = r.x < 0 ? 0 : r.x, y0 = r.y < 0 ? 0 : r.y;
-    int x1 = r.x + r.w, y1 = r.y + r.h;
-    if (x1 > W) x1 = W;
-    if (y1 > H) y1 = H;
-    if (x1 <= x0 || y1 <= y0) return;
-    uint8_t* buf = (uint8_t*)canvas.getBuffer();
-    if (!buf) return;
-    for (int pass = 0; pass < 2; pass++) {           // invert -> push -> invert back
-        for (int y = y0; y < y1; y++) {
-            uint8_t* row = buf + (size_t)y * W;
-            for (int x = x0; x < x1; x++) row[x] = (uint8_t)(255 - row[x]);
-        }
-        if (pass == 0) partialRefresh(r, pages::RefreshMode::FASTEST);
-    }
+    if (r.w <= 0 || r.h <= 0) return;
+    drawFrame();
+    msg_bridge::invertRect(r.x, r.y, r.w, r.h);
+    msg_bridge::present();
+    delay(FLASH_MS);
+    repaint();
 }
 
 // Show the nearest displayable page starting one step from startIdx in `dir`
@@ -368,29 +480,15 @@ bool showPageOrNext(int startIdx, int dir, bool quality) {
     return false;
 }
 
-// Settle the accumulated ghosting debt at sleep entry, when nobody is looking.
-// If enough background/turn fast-refreshes have piled up (>= QUALITY_EVERY) and
-// there's a page to redraw, repaint the CURRENT page with epd_quality — a ~1s
-// full-panel deep-clean that also resets s_fastCount (showPage does it on a
-// successful quality push). No-op below the threshold or with no pages, so the
-// common case adds zero awake time.
-void payGhostDebtIfDue() {
-    if (s_fastCount < QUALITY_EVERY) return;
-    if (ringCount() <= 0) return;
-    int before = s_fastCount;
-    if (showPage(currentRingIndex(), true))
-        Serial.printf("[pager] ghost debt paid (%d fast)\n", before);
-}
-
 // Grip-graze mechanism (2026-07-17 investigation): the GT911 tracks up to 5
-// simultaneous points, but examining only slot 0 (M5.Touch.getDetail()) misreads
+// simultaneous points, but examining only slot 0 (touch::detail(0)) misreads
 // a handheld card. The holding hand's finger/thumb can (a) briefly graze an edge
 // (<500ms, under the hold threshold) — a genuine wasClicked at edge coordinates
 // that spuriously turns a page (a left-edge graze reads as "backward", the user's
 // reported symptom), or (b) rest on the panel while the user's deliberate tap
 // lands in slot 1+, where slot-0-only code never examines it (taps feel dead).
 // Fix: scan every touch slot; among clicks that release in the same frame pick
-// the most recent (largest base_msec = the deliberate tap, not the earlier
+// the most recent (largest baseMsec = the deliberate tap, not the earlier
 // graze); and never turn a page on an edge-band click. Rotation was ruled out —
 // coords are already rotation-corrected live (0.8.7 investigation).
 // Sustained multi-finger grip guard. GT911 tracks up to 5 points; >=3 held
@@ -418,42 +516,49 @@ static bool dispatchRegion(int ring, int tx, int ty) {
         // (pressRect resolves the sub-cell — a Room grid column, an Outside verb
         // half — and returns w<=0 for an empty cell so it never flashes) BEFORE
         // the action runs, so the black flash reads as "press registered".
-        pages::Rect pr = pg->pressRect(tbl[k], tx, ty);
-        bool flashed = pr.w > 0 && pr.h > 0;
-        if (flashed) flashPressRect(pr);
-        uint32_t gen = s_showGen;
-        if (tbl[k].type == 1) {
-            pg->onLocalAction(tbl[k].param, tx, ty);
+        // COPY THE REGION FIRST. flashPressRect() now calls drawFrame(), which
+        // calls Page::draw(), which re-runs the page's layout in place — Room and
+        // Outside rebuild m_regions/m_slotCodes from epochNow() on every draw. So
+        // `tbl` is the page's live table and it can be rewritten underneath us
+        // during the ~130ms flash: a cooldown expiring or an unlock landing
+        // repacks the slots, and the action would then fire on a layout the user
+        // never saw. The old flashPressRect only inverted canvas pixels and could
+        // not do this. Rare, but the fix is one copy.
+        const pages::Region rg = tbl[k];
+        pages::Rect pr = pg->pressRect(rg, tx, ty);
+        if (pr.w > 0 && pr.h > 0) flashPressRect(pr);
+        if (rg.type == 1) {
+            pg->onLocalAction(rg.param, tx, ty);
             Serial.printf("[pager] local-action page=%d region=%d param=%u\n",
-                          ring, k, tbl[k].param);
+                          ring, k, rg.param);
         } else {
             s_tapSeq++;
             s_pendingSeq  = s_tapSeq;
             s_pendingPage = ring;
             s_pendingItem = k;
-            M5.Speaker.tone(1800, 80);   // confirm the press landed on a region
+            beeper::tone(1800, 80);      // confirm the press landed on a region
             Serial.printf("[pager] region-press page=%d region=%d seq=%lu\n",
                           ring, k, (unsigned long)s_tapSeq);
         }
-        // Rebound the flash: if the action did NO full-page showPage (gen
-        // unchanged — a host tap, a silent cooldown reject, or a partial-only
-        // repaint like Room's RC_ERR_COST log refresh that leaves the button rect
-        // black), push the now-restored canvas rect back so the black flash bounces
-        // off. A showPage already repainted the button, so nothing to do then.
-        if (flashed && s_showGen == gen)
-            partialRefresh(pr, pages::RefreshMode::FASTEST);
+        // Whatever the action did or did not repaint, put a fresh frame up. The
+        // old code tracked a push generation here so that an action which drew
+        // nothing (a host tap, a silent cooldown reject) could rebound just the
+        // flashed rect; a whole frame costs ~8 ms now, so the bookkeeping bought
+        // nothing and is gone. Deliberately unconditional: an action that DID
+        // repaint pays one extra frame rather than this having to guess.
+        repaint();
         return true;
     }
     return false;
 }
 
 bool handleTouch() {
-    int tc = M5.Touch.getCount();
+    int tc = touch::count();
     uint32_t nowMs = millis();
 
-    // Swallow everything until all fingers lift once, after a multi-finger grip
-    // latched — keeps that release out of the normal tap paths.
-    static bool s_ignoreUntilClear = false;
+    // Swallow everything until all fingers lift once — armed by a latched
+    // multi-finger grip, and by deghost() (see there). Keeps that release out of
+    // the normal tap paths.
     if (s_ignoreUntilClear) {
         if (tc != 0) return true;                  // still interacting, consumed
         s_ignoreUntilClear = false;
@@ -469,8 +574,8 @@ bool handleTouch() {
     // that race.
     if (event_modal::active()) {
         for (int i = 0; tc <= 1 && i < tc; i++) {
-            auto t = M5.Touch.getDetail(i);
-            if (!t.wasHold() && !t.wasClicked()) continue;
+            auto t = touch::detail(i);
+            if (!t.held && !t.clicked) continue;
             return event_modal::handleHold(t.x, t.y);   // coords already content-frame
         }
         return true;                               // consume anything else / multi-touch
@@ -507,8 +612,8 @@ bool handleTouch() {
     if (fightActive) {
         if (s_modalGuard) return true;             // swallow open-bounce until first full lift
         for (int i = 0; tc <= 1 && i < tc; i++) {
-            auto t = M5.Touch.getDetail(i);
-            if (!t.wasHold() && !t.wasClicked()) continue;
+            auto t = touch::detail(i);
+            if (!t.held && !t.clicked) continue;
             return fight_modal::handleHold(t.x, t.y);
         }
         return true;                               // consume anything else / multi-touch
@@ -523,8 +628,8 @@ bool handleTouch() {
     if (spActive) {
         if (s_modalGuard) return true;             // swallow open-bounce until first full lift
         for (int i = 0; tc <= 1 && i < tc; i++) {
-            auto t = M5.Touch.getDetail(i);
-            if (!t.wasHold() && !t.wasClicked()) continue;
+            auto t = touch::detail(i);
+            if (!t.held && !t.clicked) continue;
             return setpiece_modal::handleHold(t.x, t.y);
         }
         return true;                               // consume anything else / multi-touch
@@ -555,8 +660,8 @@ bool handleTouch() {
     // down, so a three-finger press-down can't fire a type=1 region hold (e.g.
     // cancel a running pomo) on its way to the switcher gesture.
     for (int i = 0; tc <= 1 && i < tc; i++) {
-        auto t = M5.Touch.getDetail(i);
-        if (!t.wasHold()) continue;
+        auto t = touch::detail(i);
+        if (!t.held) continue;
         // Coords reaching pager code are content-frame at rot 2 (full rationale on
         // the click path below) — no correction needed. dispatchRegion does the
         // hit-test + action; a hold that lands outside every region selects nothing
@@ -566,19 +671,19 @@ bool handleTouch() {
     }
     // Collect clicks across all slots; when a holding-hand graze and the
     // deliberate tap release in the same frame, the deliberate tap is the more
-    // recent press — the slot with the largest base_msec.
+    // recent press — the slot with the largest baseMsec.
     int chosen = -1;
     uint32_t chosenMsec = 0;
     for (int i = 0; i < tc; i++) {
-        auto t = M5.Touch.getDetail(i);
-        if (!t.wasClicked()) continue;
-        if (chosen < 0 || t.base_msec > chosenMsec) {
+        auto t = touch::detail(i);
+        if (!t.clicked) continue;
+        if (chosen < 0 || t.baseMsec > chosenMsec) {
             chosen = i;
-            chosenMsec = t.base_msec;
+            chosenMsec = t.baseMsec;
         }
     }
     if (chosen < 0) return false;
-    auto t = M5.Touch.getDetail(chosen);
+    auto t = touch::detail(chosen);
     int n = ringCount();
     // Rotation-2 coordinates. DEVICE-EMPIRICAL (2026-07-18 live experiment on
     // 0.9.1, with the dots-lag bug already fixed): taps register cleanly but
@@ -589,7 +694,7 @@ bool handleTouch() {
     // needed; trust the raw coords. tx feeds the edge grip band + the
     // left/right half test; ty feeds regionHit.
     int tx = t.x, ty = t.y;
-    int W = M5.Display.width();
+    int W = msg_bridge::UI_W;
     Serial.printf("[pager] tap x=%d y=%d w=%d cnt=%d idx=%d pages=%d\n",
                   tx, ty, W, tc, chosen, n);
     // Edge grip band: a click within 24px of either edge is almost certainly the
@@ -642,7 +747,7 @@ bool handleTouch() {
     bool left = tx < W / 2;
     int dir = left ? -1 : 1;
     // Turns are epd_fast so the flash never lands on the user's own action — the
-    // debt is normally settled at sleep instead (payGhostDebtIfDue). Escape valve:
+    // debt is normally settled at sleep instead (pager::deghost). Escape valve:
     // past HIGH_WATER a marathon in-session run pays on this turn so ghosting can't
     // grow unbounded. showPage repaints the bar itself. Scan for the nearest
     // available page in the tapped direction (showPageOrNext) rather than one fixed
@@ -658,7 +763,7 @@ bool handleTouch() {
 // every loop() pass; no-op for pages whose tick() is empty (ServerPage).
 void tickCurrent(uint32_t nowMs) {
     // Suppress every page-tick draw side effect while a modal is up — a running
-    // pomo's per-second partialRefresh would otherwise paint MM:SS over it. Least-
+    // pomo's per-second repaint would otherwise paint MM:SS over it. Least-
     // intrusive choke point (one guard covers all page ticks); the pomo service
     // keeps counting, only its VIEW repaint is held off.
     if (event_modal::active()) return;   // event modal owns the panel

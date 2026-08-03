@@ -19,6 +19,8 @@
 #include "pager.h"
 #include "game_state.h"
 #include "world_state.h"        // WorldState::embark + bag/water caps + weightCenti
+#include "beeper.h"
+#include "rtc_bm8563.h"
 #include <M5Unified.h>
 #include <stdio.h>
 #include <string.h>
@@ -105,8 +107,8 @@ int ceilDiv(int a, int b) { return (a + b - 1) / b; }
 
 // RTC -> Unix epoch, mirroring assign_page/main.cpp's epochNow.
 uint32_t epochNow() {
-    m5::rtc_date_t d; m5::rtc_time_t t;
-    M5.Rtc.getDateTime(&d, &t);
+    rtc::Date d; rtc::Time t;
+    rtc::getDateTime(&d, &t);
     struct tm tmv = {};
     tmv.tm_year = d.year - 1900; tmv.tm_mon = d.month - 1; tmv.tm_mday = d.date;
     tmv.tm_hour = t.hours; tmv.tm_min = t.minutes; tmv.tm_sec = t.seconds;
@@ -437,33 +439,33 @@ pages::Rect PathPage::pressRect(const pages::Region& rg, int x, int y) const {
 void PathPage::onLocalAction(uint8_t param, int x, int y) {
     if (param == PARAM_RETURN) {
         path_page::close();
-        M5.Speaker.tone(1800, 80);
+        beeper::tone(1800, 80);
         pager::showPage(pager::ringIndexByName("outside"), false);
         return;                                  // navigates away — no tick to double up
     }
     if (param == PARAM_PAGER) {
         if (m_pageCount > 1) {
             m_page = (m_page + 1) % m_pageCount;
-            M5.Speaker.tone(1800, 80);
+            beeper::tone(1800, 80);
             pager::showPage(pager::currentRingIndex(), false);
             m_lastSig = contentSig();
         } else {
-            M5.Speaker.tone(600, 120);
+            beeper::tone(600, 120);
         }
         return;
     }
     if (param == PARAM_EMBARK) { doEmbark(); return; }
 
-    if ((int)param >= m_slotCount) { M5.Speaker.tone(600, 120); return; }   // stale
+    if ((int)param >= m_slotCount) { beeper::tone(600, 120); return; }   // stale
     int carryIdx = m_slotCarry[param];
     int bandTop  = BAND_TOP + (int)param * BAND_PITCH;
     int delta    = stepper::deltaFor(bandRect(bandTop), x, y);
     if (adjustOutfit(carryIdx, delta)) {
-        M5.Speaker.tone(1800, 80);
+        beeper::tone(1800, 80);
         pager::showPage(pager::currentRingIndex(), false);
         m_lastSig = contentSig();                // AssignPage re-baseline (no double redraw)
     } else {
-        M5.Speaker.tone(600, 120);               // at 0, at stock, or bag full
+        beeper::tone(600, 120);               // at 0, at stock, or bag full
     }
 }
 
@@ -473,7 +475,7 @@ void PathPage::onLocalAction(uint8_t param, int x, int y) {
 // the boot restore that normally loads it).
 void PathPage::doEmbark() {
     if (carriedOf(CARRY_CURED_MEAT) <= 0 || deathCooldownLeft() > 0) {
-        M5.Speaker.tone(600, 120);               // no meat packed, or still cooling (§3.4)
+        beeper::tone(600, 120);               // no meat packed, or still cooling (§3.4)
         return;
     }
     if (!g_world.generated) {                    // first embark: make + save a map
@@ -483,7 +485,7 @@ void PathPage::doEmbark() {
     }
     if (!g_world.embark(g_game, m_outfitRes, m_outfitItem, g_game.nextRand(),
                         epochNow())) {
-        M5.Speaker.tone(600, 120);               // defensive: gate + generated ensured above
+        beeper::tone(600, 120);               // defensive: gate + generated ensured above
         return;
     }
     g_game.save();                               // persist the deducted stores
@@ -498,10 +500,10 @@ void PathPage::doEmbark() {
     int world = pager::ringIndexByName("world");
     if (world >= 0) {
         path_page::close();
-        M5.Speaker.tone(1800, 80);
+        beeper::tone(1800, 80);
         pager::showPage(world, false);
     } else {
-        M5.Speaker.tone(600, 120);
+        beeper::tone(600, 120);
         pager::showPage(pager::currentRingIndex(), false);   // repaint post-embark state
         m_lastSig = contentSig();
     }

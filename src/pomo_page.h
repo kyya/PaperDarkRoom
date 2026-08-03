@@ -1,7 +1,7 @@
 // The pomodoro VIEW — a firmware-rendered client page (fw 0.10.0). Idle: clock
 // header + three duration buttons (25/45/60 min, each a type=1 long-press
 // region). Counting: the chosen button block shows MM:SS + phase disc + drain
-// bar, redrawn every second via pager::partialRefresh (Task 6). Fonts match the
+// bar, redrawn every second via pager::repaint (Task 6). Fonts match the
 // daemon's pixel pages glyph-for-glyph: HH:MM/MM:SS/button numerals in VCR OSD
 // Mono (60/68px), weekday+date in Minecraftia16, "min" in PixelOperator @32px.
 // No CJK font enters the firmware. The service (pomo.h) owns timing; this owns

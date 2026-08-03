@@ -2,7 +2,8 @@
 #include "pager.h"
 #include "frame_store.h"
 #include "status_bar.h"
-#include <M5Unified.h>
+#include "beeper.h"
+#include "power_s3.h"
 #include <string.h>
 
 extern bool g_lowBattery;   // main.cpp — gate pomo start at <=5% (SYNC-mode
@@ -41,9 +42,9 @@ int remainingMinutes() {
 static void alertWorkEnd() {
     Serial.println("[pomo] WORK end -> break");
     for (int i = 0; i < 3; i++) {
-        M5.Speaker.tone(1800 + i * 200, 120);
-        M5.Power.setLed(255); delay(100);
-        M5.Power.setLed(0);   delay(100);
+        beeper::tone(1800 + i * 200, 120);
+        power::setLed(255); delay(100);
+        power::setLed(0);   delay(100);
     }
 }
 
@@ -51,9 +52,9 @@ static void alertWorkEnd() {
 static void alertBreakEnd() {
     Serial.println("[pomo] BREAK end -> idle");
     for (int i = 0; i < 2; i++) {
-        M5.Speaker.tone(1500, 120);
-        M5.Power.setLed(255); delay(120);
-        M5.Power.setLed(0);   delay(120);
+        beeper::tone(1500, 120);
+        power::setLed(255); delay(120);
+        power::setLed(0);   delay(120);
     }
 }
 
@@ -84,13 +85,13 @@ void onLocalAction(uint8_t minutes) {
         s_spanMs     = (uint32_t)minutes * 60000UL;
         s_startParam = minutes;
         s_shownMin   = -1;
-        M5.Speaker.tone(1800, 80);             // start chime
+        beeper::tone(1800, 80);             // start chime
         Serial.printf("[pomo] start %u min\n", minutes);
         redrawCurrent(false);                  // button block -> MM:SS view
     } else {
         s_phase    = Phase::IDLE;
         s_shownMin = -1;
-        M5.Speaker.tone(1200, 120);            // cancel: lower, longer
+        beeper::tone(1200, 120);            // cancel: lower, longer
         Serial.println("[pomo] cancelled");
         redrawCurrent(false);                  // back to the button page
     }

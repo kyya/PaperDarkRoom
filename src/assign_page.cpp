@@ -17,6 +17,8 @@
 #include "page_tabs.h"          // shared tab header (生火间 │ 村落 │ 贸易站)
 #include "pager.h"
 #include "game_state.h"
+#include "beeper.h"
+#include "rtc_bm8563.h"
 #include <M5Unified.h>
 #include <stdio.h>
 #include <time.h>
@@ -70,8 +72,8 @@ constexpr int STEP_DIV_X = stepper::dividerX(BAND_W); // 344 — zone's left rul
 
 // RTC -> Unix epoch, mirroring outside_page/main.cpp's epochNow.
 uint32_t epochNow() {
-    m5::rtc_date_t d; m5::rtc_time_t t;
-    M5.Rtc.getDateTime(&d, &t);
+    rtc::Date d; rtc::Time t;
+    rtc::getDateTime(&d, &t);
     struct tm tmv = {};
     tmv.tm_year = d.year - 1900; tmv.tm_mon = d.month - 1; tmv.tm_mday = d.date;
     tmv.tm_hour = t.hours; tmv.tm_min = t.minutes; tmv.tm_sec = t.seconds;
@@ -242,11 +244,11 @@ bool AssignPage::draw(m5gfx::M5Canvas& c) {
 // to add, or already 0 — both magnitudes are equally dead in that direction)
 // low-beeps, the same feedback the ±1-only stepper gave.
 void AssignPage::onLocalAction(uint8_t param, int x, int y) {
-    if ((int)param > m_jobCount) { M5.Speaker.tone(600, 120); return; }
+    if ((int)param > m_jobCount) { beeper::tone(600, 120); return; }
 
     if ((int)param == m_jobCount) {                  // 返回 band
         assign_page::close();
-        M5.Speaker.tone(1800, 80);
+        beeper::tone(1800, 80);
         pager::showPage(pager::ringIndexByName("outside"), false);
         return;                                      // navigates away — no tick to double up
     }
@@ -258,7 +260,7 @@ void AssignPage::onLocalAction(uint8_t param, int x, int y) {
     g_game.assignWorker(job, delta);
 
     if ((int)g_game.workers[job] != before) {        // a villager actually moved
-        M5.Speaker.tone(1800, 80);
+        beeper::tone(1800, 80);
         g_game.save();
         pager::showPage(pager::currentRingIndex(), false);
         // Re-baseline tick()'s content signature to the state we JUST drew, so this
@@ -267,7 +269,7 @@ void AssignPage::onLocalAction(uint8_t param, int x, int y) {
         // settle: draw() paints un-settled g_game and contentSig() must mirror it.
         m_lastSig = contentSig();
     } else {
-        M5.Speaker.tone(600, 120);                   // no idle pop / already at 0
+        beeper::tone(600, 120);                   // no idle pop / already at 0
     }
 }
 

@@ -113,6 +113,17 @@ void sendStatus(const char* fwVersion, bool onUsb, int rot, bool interactive);
 // must not sleep then); otaPollFinish() is called every loop iteration and, on
 // the last byte, commits + reboots (never returns) or reports ota=err.
 bool otaBusy();
+
+// Pre-park frame handshake. A BLE OTA parks the panel driver for the whole
+// transfer, so the frame that happens to be up when it parks is what the user
+// looks at until the image lands — and the BEGIN callback cannot draw it itself,
+// because the panel is single-owner and belongs to the app task (ble_link.cpp's
+// ConnectCb explains what happens when a BLE callback draws). So the callback
+// asks: otaFrameWanted() goes true, main.cpp's loop paints an "OTA 0%" frame and
+// calls otaFrameReady(), and the callback — which is blocked on that for up to
+// ~800ms — then parks and erases.
+bool otaFrameWanted();
+void otaFrameReady();
 void otaPollFinish(const char* fwVersion, bool onUsb, int rot, bool interactive);
 
 // OTA progress (read-only) — the same s_otaOff/s_otaTotal counters STATUS's
