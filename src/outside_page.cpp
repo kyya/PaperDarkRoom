@@ -79,22 +79,41 @@ constexpr int CONTENT_W = 540 - 2 * PAD;     // 492px usable (§9.2)
 //       3 rows -> floor((596-564-6)/28) = 0 -> the `availRows < 1 -> 1` floor
 //                 gives 1 row (3 cells); the box then ends at 598, overshooting
 //                 INV_MAX_BOTTOM by 2px but still clearing the grid by 10px.
-// So the third action row costs the inventory 7 rows at the very worst — and it
-// only costs that once the compass is bought, by which point the player is deep
-// enough that 库存 has long been in tail-collapse anyway. Early on the grid is a
-// single row and 库存 gets the space back.
+// So the third action row shrinks the inventory box to a single 3-cell row at
+// the very worst — and only once the compass is bought, by which point the
+// player has amassed the most stuff. Early on the grid is a single row and
+// 库存 gets the space back.
 // Max 库存 entries = RES_COUNT(19) + ITEM_COUNT(14) = 33, so any clamp below 11
-// rows tail-collapses the last cell to "…" (the pre-existing mechanism, now
-// driven by remaining-space rows instead of a fixed INV_ROWS constant).
-// FS_MIN_ROWS=2 is deliberately NOT honoured in the 3-row worst case: the space
-// clamp outranks the min-height floor, which is the pre-existing precedence and
-// the only way to guarantee no overlap.
+// rows can't show everything on one screen. FIXED IN THIS PASS (2026-08, user
+// report: "库存被隐藏不可见"): a box too small to fit every non-zero entry used
+// to silently tail-collapse the remainder behind a trailing "…" — an information
+// black hole once a village had more than a screenful of stuff, worst case 1 row
+// / 3 cells. Upstream (doublespeakgames/adarkroom script/room.js, the
+// #storesContainer builder around updateVillage) appends a .storeRow div per
+// stores/weapons key ever seen and NEVER truncates — the browser just scrolls —
+// so tail-collapse was purely a fixed-panel-height accommodation introduced by
+// this port, not upstream behavior worth preserving. The fix pages instead: the
+// whole fieldset becomes a tap target (see appendInvRegion/onLocalAction) that
+// cycles fixed-size batches of `invRows*INV_COLS` cells, reserving the LAST cell
+// for "…" only on a batch that has a follow-up (see drawInventory) — so "…" now
+// means "tap for more" instead of "the rest is gone". FS_MIN_ROWS=2 is
+// deliberately NOT honoured in the 3-row worst case: the space clamp outranks
+// the min-height floor, which is the pre-existing precedence and the only way to
+// guarantee no overlap.
 // Verified exhaustively over every reachable combination of the three gates
 // (trap / job / compass) crossed with nJobs 0..9 and nzBuildings 0..13, skipping
 // states the gates make impossible: NO collision in any of them, and the minimum
 // clearance between the 库存 box and the grid is 278px at 1 row, 88px at 2 rows
 // and 10px at 3 rows. All region y's and the cooldown-refresh rects are derived
 // from the same packing, so nothing needs a separate recompute.
+// 建筑/工人 are NOT space-clamped the way 库存 is (computeLayout gives them
+// ceil(nz/cols) rows unconditionally) — but they cannot silently overflow
+// either: both are bounded by a compile-time enum ceiling (BLD_COUNT=13,
+// JOB_COUNT<=9) already baked into the exhaustive check above, so "every
+// building/job ever added" is already the worst case this budget verified, with
+// real clearance to spare (88-278px). Nothing to page there; flagged here per
+// the lateral check this fix's task asked for, not because either box is at
+// risk.
 // ----------------------------------------------------------------------------
 
 // ---- shared fieldset geometry (all three boxes span the same x, PAD..540-PAD).
@@ -143,6 +162,12 @@ constexpr int INV_COLX[INV_COLS] = {
     FS_CONTENT_X0 + (INV_COL_W + INV_COL_GAP),            // 196
     FS_CONTENT_X0 + 2 * (INV_COL_W + INV_COL_GAP),        // 356
 };
+
+// Region param sentinel for the 库存 box's own whole-fieldset tap target (fw
+// 库存分页, 2026-08) — out of range of the action grid's row params (0..2,
+// MAX_ACT_ROWS==3), so pressRect/onLocalAction can tell the two apart on the
+// same param field. Mirrors trade_page.cpp's A_MORE sentinel.
+constexpr uint8_t INV_REGION_PARAM = 0xFF;
 
 // ---- 野外 action AREA (v0.4.5): two 240px columns, THREE rows (v0.14),
 // bottom-anchored. The bottom row hugs 916 (< 928 status bar) and each row above
@@ -206,6 +231,32 @@ int buildCells(uint8_t* out) {
 }
 
 int ceilDiv(int a, int b) { return (a + b - 1) / b; }
+
+// Count of non-zero 库存 entries (every whole resource + every held item), in
+// the SAME order drawInventory walks them (resources 0..RES_COUNT-1, then items
+// 0..ITEM_COUNT-1). The one shared source of "how much stuff is there" for
+// computeLayout's box-height math, drawInventory's pagination and the region
+// table's "is this box even clickable" gate — three call sites that used to be
+// two separately-duplicated loops (computeLayout / drawInventory) before this
+// pass; folded into one so they can't drift out of sync.
+int invNonZeroCount() {
+    int nz = 0;
+    for (int r = 0; r < RES_COUNT; r++)  if (g_game.whole((uint8_t)r) > 0) nz++;
+    for (int i = 0; i < ITEM_COUNT; i++) if (g_game.items[i] > 0)          nz++;
+    return nz;
+}
+
+// How many 库存 batches `nz` entries split into at `cells` (= invRows*INV_COLS)
+// per batch. 1 while everything fits. Past that, every batch except the true
+// last one yields its OWN last cell to the "…" continuation cue, so a non-final
+// batch really only carries `cells-1` real entries — hence dividing the
+// overflow by `cells-1`, not `cells` (see drawInventory for the matching
+// start/take math). cells is always >=3 (INV_COLS, with invRows floored to >=1
+// by computeLayout), so `cells-1` never divides by zero.
+int invNumPages(int cells, int nz) {
+    if (nz <= cells) return 1;
+    return 1 + ceilDiv(nz - cells, cells - 1);
+}
 
 // Rows the packed grid needs (1..3), and where its top edge lands. The area is
 // BOTTOM-anchored at ACT_BOTTOM, so shedding a row moves the whole block DOWN
@@ -307,10 +358,10 @@ Layout computeLayout() {
     }
 
     // 库存: ceil(nz/3) rows (min 1 for "空"), clamped to the space above the
-    // action area — past the cap the last cell collapses to "…".
-    int nzI = 0;
-    for (int r = 0; r < RES_COUNT; r++)  if (g_game.whole((uint8_t)r) > 0) nzI++;
-    for (int i = 0; i < ITEM_COUNT; i++) if (g_game.items[i] > 0)          nzI++;
+    // action area — past the cap the box pages instead of growing (see
+    // invNumPages / drawInventory), so its HEIGHT still only ever needs the
+    // clamped row count, same as before this pass.
+    int nzI = invNonZeroCount();
     int legendY = prevBottom + FS_BOX_GAP;
     L.invBoxY0  = legendY + GLYPH / 2;
     L.invRowTop = legendY + GLYPH + FS_ROW_GAP;
@@ -438,29 +489,50 @@ void drawInvCell(m5gfx::M5Canvas& c, int rowTop, int idx, const char* name, long
 }
 
 // 库存 fieldset: the box + every non-zero resource (whole units) followed by
-// every non-zero crafted item, three columns, name-left/qty-right. The box holds
-// L.invRows*3 cells (space-clamped by computeLayout); past that the last cell
-// collapses to "…". An empty inventory shows "空".
-void drawInventory(m5gfx::M5Canvas& c, const Layout& L) {
-    drawFieldset(c, L.invBoxY0, L.invBoxY1, tr("stores"));   // "库存"
-
+// every non-zero crafted item, three columns, name-left/qty-right. The box
+// holds L.invRows*3 cells (space-clamped by computeLayout); past that capacity
+// the fieldset PAGES (fw 库存分页, 2026-08 — see the WORST-CASE BUDGET comment
+// above for the "why", and appendInvRegion/onLocalAction for the tap-to-cycle
+// wiring) instead of the old tail-collapse-and-hide. `page` is the raw click
+// counter (OutsidePage::m_invPage); it is taken modulo the batch count computed
+// HERE, from the CURRENT nz/cells, so a shrinking inventory or a space-clamp
+// change can never leave it pointing past the end — it just wraps.
+//
+// Batching: a batch that has a FOLLOW-UP batch only carries `cells-1` real
+// entries, its last cell going to "…" — now a "there's more, tap the box"
+// cue instead of "the rest is gone forever". The true LAST batch gets the
+// full `cells` capacity and no "…"; if it doesn't fill, the remainder is
+// left blank exactly as an unpaginated box always has been. A single-batch
+// box (nz<=cells, the common case) is unaffected: full capacity, no "…",
+// same as before this pass. An empty inventory shows "空".
+void drawInventory(m5gfx::M5Canvas& c, const Layout& L, int page) {
     int cells = L.invRows * INV_COLS;
-    int nz = 0;
-    for (int r = 0; r < RES_COUNT; r++)  if (g_game.whole((uint8_t)r) > 0) nz++;
-    for (int i = 0; i < ITEM_COUNT; i++) if (g_game.items[i] > 0)          nz++;
+    int nz    = invNonZeroCount();
+    int numPages = invNumPages(cells, nz);
+    int pg = numPages > 1 ? ((page % numPages) + numPages) % numPages : 0;
+    bool hasMore = pg < numPages - 1;            // another batch follows this one
+    int startIdx = pg * (cells - 1);             // logical position this batch opens at
+    int take     = hasMore ? cells - 1 : nz - startIdx;
 
-    bool overflow = nz > cells;
-    int limit = overflow ? cells - 1 : nz;   // reserve the last cell for "…"
-    int shown = 0;
-    for (int r = 0; r < RES_COUNT && shown < limit; r++) {
+    char legend[24];
+    if (numPages > 1) snprintf(legend, sizeof legend, "%s (%d/%d)", tr("stores"), pg + 1, numPages);
+    else              snprintf(legend, sizeof legend, "%s", tr("stores"));
+    drawFieldset(c, L.invBoxY0, L.invBoxY1, legend);
+
+    int logicalIdx = 0, shown = 0;
+    for (int r = 0; r < RES_COUNT && shown < take; r++) {
         long q = (long)g_game.whole((uint8_t)r);
-        if (q > 0) drawInvCell(c, L.invRowTop, shown++, tr(RES_KEY[r]), q);
+        if (q <= 0) continue;
+        if (logicalIdx++ < startIdx) continue;
+        drawInvCell(c, L.invRowTop, shown++, tr(RES_KEY[r]), q);
     }
-    for (int i = 0; i < ITEM_COUNT && shown < limit; i++)
-        if (g_game.items[i] > 0)
-            drawInvCell(c, L.invRowTop, shown++, tr(ITEM_KEY[i]), (long)g_game.items[i]);
+    for (int i = 0; i < ITEM_COUNT && shown < take; i++) {
+        if (g_game.items[i] <= 0) continue;
+        if (logicalIdx++ < startIdx) continue;
+        drawInvCell(c, L.invRowTop, shown++, tr(ITEM_KEY[i]), (long)g_game.items[i]);
+    }
 
-    if (overflow) {
+    if (hasMore) {
         int col = (cells - 1) % INV_COLS, row = (cells - 1) / INV_COLS;
         cjk::drawText(c, INV_COLX[col], L.invRowTop + row * ROWH, "…", SCALE);
     } else if (shown == 0) {
@@ -539,6 +611,26 @@ int layoutCells(pages::Region* regionsOut, uint8_t* slotCodes, CellView* views,
     return rows;
 }
 
+// Appends the 库存 fieldset's own whole-box tap region right after the packed
+// action rows returned by layoutCells — but ONLY when the box is actually
+// paginated (invPages>1): a single-batch box needs no touch target, same as
+// how Trade's "更多" band only exists once its good list overflows one screen
+// (see trade_page.cpp layoutBands). `rowCount` is layoutCells' return value;
+// returns the new total region count. Shared by draw() and tick() so the
+// region table never drops this entry between full redraws — tick() rebuilds
+// the SAME table every second for the cooldown mask (see OutsidePage::tick),
+// so if only draw() appended it, a press landing more than a second after any
+// redraw would silently miss the box.
+int appendInvRegion(pages::Region* regionsOut, int rowCount, int invY0, int invY1,
+                    int invPages) {
+    if (invPages <= 1) return rowCount;
+    regionsOut[rowCount].y0    = (uint16_t)invY0;
+    regionsOut[rowCount].y1    = (uint16_t)invY1;
+    regionsOut[rowCount].type  = 1;                     // firmware-local
+    regionsOut[rowCount].param = INV_REGION_PARAM;
+    return rowCount + 1;
+}
+
 // Paint the packed action grid: cell i at row i/2, column i%2. A live
 // gather/traps cooldown renders its cell dashed + draining.
 void drawActionArea(m5gfx::M5Canvas& c, const CellView* views, int n, int areaTop) {
@@ -583,10 +675,21 @@ pages::Rect coolingRect(uint16_t mask, int areaTop) {
 // by the buildings[] loop; 尘土之路 reads whole(R_COMPASS), covered by the
 // resource loop. 伐木/科技树 are never gated. Nothing more to add, but do not
 // remove those loops.
+// `invPage` (OutsidePage::m_invPage) is mixed in too (fw 库存分页, 2026-08) so
+// onLocalAction's re-baseline after a box tap actually changes the signature —
+// otherwise the very next tick, seeing an unchanged sig, would look like nothing
+// happened. The non-zero SPECIES count is mixed in as well, explicitly, so
+// "a brand-new item type enters the inventory" and "the batch count itself
+// changed" are guaranteed to register even though the raw-quantity loop below
+// already covers them indirectly — belt and suspenders for the one thing this
+// pass is about. Per-second QUANTITY jitter (wood ticking up, say) still forces
+// a redraw exactly as it always has (that's pre-existing, out of scope here);
+// what it must NOT do is disturb invPage, and it can't — nothing here resets
+// that counter, drawInventory just re-clamps it to the current batch count.
 // tick() compares it each second to decide a full redraw; onLocalAction re-baselines
 // it right after its own showPage so the same action's state change doesn't force a
 // SECOND full redraw next tick (see onLocalAction). Reads only g_game, never mutates.
-uint32_t contentSig() {
+uint32_t contentSig(int invPage) {
     uint32_t sig = 2166136261u;
     auto mix = [&](uint32_t v) { sig = (sig ^ v) * 16777619u; };
     mix(g_game.population); mix((uint32_t)g_game.maxPopulation());
@@ -596,6 +699,8 @@ uint32_t contentSig() {
     for (int i = 0; i < BLD_COUNT; i++) mix(g_game.buildings[i]);
     for (int i = 0; i < RES_COUNT; i++)  mix((uint32_t)g_game.whole((uint8_t)i));
     for (int i = 0; i < ITEM_COUNT; i++) mix((uint32_t)g_game.items[i]);
+    mix((uint32_t)invNonZeroCount());          // 库存 species count (belt + suspenders)
+    mix((uint32_t)invPage);                    // 库存 current batch
     return sig;
 }
 
@@ -614,8 +719,15 @@ const pages::Region* OutsidePage::regions(int* n) const {
 // (the odd trailing half when the cell count is odd) returns w=0, so the empty
 // half never flashes black. There is no per-cell gating left to mirror here:
 // gated-off cells are absent from the packing entirely rather than drawn blank.
+// The 库存 box's own region (param==INV_REGION_PARAM) flashes its WHOLE drawn
+// frame — x/y don't pick a sub-cell there, the tap target is the entire
+// fieldset — using the region's own y0/y1 (== L.invBoxY0/Y1 the draw used) and
+// the shared fieldset x-span (FS_BOX_X0..FS_BOX_X1), so this never has to
+// recompute the layout just to know its own rect.
 pages::Rect OutsidePage::pressRect(const pages::Region& rg, int x, int y) const {
     (void)y;
+    if (rg.param == INV_REGION_PARAM)
+        return pages::Rect{ FS_BOX_X0, rg.y0, FS_BOX_X1 - FS_BOX_X0, rg.y1 - rg.y0 };
     int slot = (int)rg.param * ACT_COLS + (x < ACT_DIV ? 0 : 1);
     if (slot < 0 || slot >= m_slotCount) return pages::Rect{ 0, rg.y0, 0, 0 };
     return actCellRect(slot, m_areaTop);
@@ -637,13 +749,19 @@ bool OutsidePage::draw(m5gfx::M5Canvas& c) {
     // that same packing, so the fieldsets above take back whatever the grid does
     // not use.
     CellView views[AC_MAX];
-    m_regionCount = layoutCells(m_regions, m_slotCodes, views, epochNow(),
-                                &m_slotCount, &m_areaTop);
+    int rows = layoutCells(m_regions, m_slotCodes, views, epochNow(),
+                           &m_slotCount, &m_areaTop);
 
     Layout L = computeLayout();      // flowed fieldset y-geometry for this state
+    int invPages = invNumPages(L.invRows * INV_COLS, invNonZeroCount());
+    // Append the 库存 box's own tap region (only when it's actually paginated —
+    // see appendInvRegion), AFTER the action rows so a click hit-test never
+    // ambiguates the two.
+    m_regionCount = appendInvRegion(m_regions, rows, L.invBoxY0, L.invBoxY1, invPages);
+
     drawWorkerSummary(c, L);         // 工人 fieldset (人口 line + read-only grid)
     if (L.bldShown) drawBuildings(c, L);   // 建筑 fieldset (hidden when empty)
-    drawInventory(c, L);             // 库存 fieldset
+    drawInventory(c, L, m_invPage);  // 库存 fieldset (paged past one screen)
 
     drawActionArea(c, views, m_slotCount, m_areaTop);
     return true;
@@ -654,9 +772,18 @@ bool OutsidePage::draw(m5gfx::M5Canvas& c) {
 // to whatever cell is actually drawn there. 伐木/查看陷阱 run their engine verb;
 // 科技树/分工/尘土之路 latch their sub-page and jump to it by name. A success
 // high-beeps + persists + repaints; a rejected press or an empty trailing half
-// low-beeps.
+// low-beeps. A press on the 库存 box itself (param==INV_REGION_PARAM) advances
+// to the next batch — same beep + showPage + re-baseline shape as a successful
+// action below, mirroring Trade's "更多" band (trade_page.cpp).
 void OutsidePage::onLocalAction(uint8_t param, int x, int y) {
     (void)y;
+    if (param == INV_REGION_PARAM) {
+        m_invPage++;                   // drawInventory() wraps this to the live batch count
+        M5.Speaker.tone(1800, 80);
+        pager::showPage(pager::currentRingIndex(), false);
+        m_lastSig = contentSig(m_invPage);   // no second full redraw next tick
+        return;
+    }
     int slot = (int)param * ACT_COLS + (x < ACT_DIV ? 0 : 1);
     if (slot < 0 || slot >= m_slotCount) { M5.Speaker.tone(600, 120); return; }
     uint8_t code = m_slotCodes[slot];
@@ -687,7 +814,7 @@ void OutsidePage::onLocalAction(uint8_t param, int x, int y) {
         // only genuine economy advancing in the following second still does. (The
         // navigation branches above leave for another page, so they have no such
         // tick to double up.)
-        m_lastSig = contentSig();
+        m_lastSig = contentSig(m_invPage);
     } else {
         M5.Speaker.tone(600, 120);                    // cooldown / engine reject
     }
@@ -712,7 +839,7 @@ void OutsidePage::tick(uint32_t nowMs) {
     uint32_t now = epochNow();
     g_game.settle(now);
 
-    uint32_t sig = contentSig();
+    uint32_t sig = contentSig(m_invPage);
 
     // 野外 cooldowns drain a bar, but — unlike the content above — they are NOT in
     // the signature: the wood/meat they yield is banked at press time, so nothing
@@ -720,8 +847,15 @@ void OutsidePage::tick(uint32_t nowMs) {
     // fixed rows, so it is built from the same layoutCells() result the painter
     // uses — 查看陷阱's slot moves depending on which cells exist.
     CellView views[AC_MAX];
-    m_regionCount = layoutCells(m_regions, m_slotCodes, views, now,
-                                &m_slotCount, &m_areaTop);
+    int rows = layoutCells(m_regions, m_slotCodes, views, now,
+                           &m_slotCount, &m_areaTop);
+    // Rebuild the SAME region table draw() builds (action rows + the 库存 box's
+    // own region, when paginated) — this runs every second regardless of a full
+    // redraw, so a press landing between two full redraws still hits the box
+    // (see appendInvRegion's note).
+    Layout L = computeLayout();
+    int invPages = invNumPages(L.invRows * INV_COLS, invNonZeroCount());
+    m_regionCount = appendInvRegion(m_regions, rows, L.invBoxY0, L.invBoxY1, invPages);
     uint16_t coolMask = 0;
     for (int i = 0; i < m_slotCount; i++)
         if (views[i].coolTotal > 0 && views[i].coolLeft > 0)
