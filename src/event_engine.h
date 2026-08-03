@@ -61,6 +61,14 @@ void dismissDefault();
 // the timer (does not consume nextEventAt).
 bool startEvent(int eventId, uint32_t epochNow);
 
+// Raise `eventId` from GAME CODE, skipping the isAvailable pool filter entirely —
+// for the AV_SCRIPTED events, which exist only to be triggered by name (the ship
+// page's "Ready to Leave?" confirmation). Refuses while another event is already
+// on screen, so a scripted pop can never displace a random one mid-choice.
+// Everything downstream is identical to startEvent: the same scene machine, the
+// same event_modal, the same endEvent() reschedule of the next random event.
+bool startScripted(int eventId, uint32_t epochNow);
+
 // ---- queries (all safe when no event is active) ----
 bool        active();              // an event is on screen
 int         currentEventId();      // EventId, or -1

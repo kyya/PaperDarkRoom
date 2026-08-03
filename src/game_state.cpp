@@ -27,12 +27,16 @@ void GameState::init() {
     temp = TEMP_FREEZING;
     builderLevel = -1;
     outsideUnlocked = craftablesUnlocked = woodSeen = seenForest = false;
+    shipUnlocked = shipSeenWarning = false;
+    shipHull = SHIP_BASE_HULL;        // 0 — a fresh ship cannot fly (ship.js:8)
+    shipThrusters = SHIP_BASE_THRUSTERS;
     seen = 0;
     craftShown = 0;
     perks = 0;
     deathAt = 0;                      // no post-death embark lockout on a fresh game
     clearSavedOutfit();               // fresh game: empty remembered Path outfit
     cdFire = cdGather = cdTraps = 0;
+    cdLiftoff = 0;
     tTemp = ROOM_WARM_S;
     tBuilder = BUILDER_STATE_S;
     tNeedWood = NEED_WOOD_S;
@@ -107,6 +111,85 @@ bool GameState::hasUnlockedJob() const {
     for (uint8_t j = J_HUNTER; j < JOB_COUNT; j++)
         if (JOB_REQ_BLD[j] != BLD_NONE && buildings[JOB_REQ_BLD[j]] > 0) return true;
     return false;
+}
+
+// ===================== starship (ship.js) =================================
+// The W landmark's payoff. Every gate here is upstream's; the only 3a deviation
+// is liftOff() itself, which has no Space module to hand off to yet.
+
+void GameState::unlockShip() {
+    if (shipUnlocked) return;             // world.js goHome's !features.location
+                                          // .spaceShip guard: a later cleared trip
+                                          // must not reset a reinforced ship.
+    shipUnlocked = true;
+    shipHull = SHIP_BASE_HULL;
+    shipThrusters = SHIP_BASE_THRUSTERS;
+    // Ship.onArrival's one-shot notice (game.spaceShip.seenShip upstream). The
+    // unlock itself happens exactly once, so the guard above IS the one-shot latch
+    // and no separate seenShip bit is needed.
+    pushLog("somewhere above the debris cloud, the wanderer fleet hovers. "
+            "been on this rock too long.");
+}
+
+// reinforceHull / upgradeEngine are deliberately two near-identical functions
+// rather than one parameterised helper: upstream writes them out twice too
+// (ship.js:100-125), they will diverge the moment either stat grows a rule of
+// its own, and a shared body with a "which stat" flag would cost more to read
+// than the four duplicated lines it saves.
+Result GameState::reinforceHull() {
+    if (!shipUnlocked) return RC_ERR_LOCKED;
+    if (stores[R_ALIEN_ALLOY] < (int32_t)ALLOY_PER_HULL * FP) {
+        pushLog("not enough alien alloy");
+        return RC_ERR_COST;
+    }
+    stores[R_ALIEN_ALLOY] -= (int32_t)ALLOY_PER_HULL * FP;
+    shipHull++;                           // no maximum, on purpose (game_data.h)
+    return RC_OK;
+}
+
+Result GameState::upgradeEngine() {
+    if (!shipUnlocked) return RC_ERR_LOCKED;
+    if (stores[R_ALIEN_ALLOY] < (int32_t)ALLOY_PER_THRUSTER * FP) {
+        pushLog("not enough alien alloy");
+        return RC_ERR_COST;
+    }
+    stores[R_ALIEN_ALLOY] -= (int32_t)ALLOY_PER_THRUSTER * FP;
+    shipThrusters++;
+    return RC_OK;
+}
+
+// Same epoch arithmetic as cooldownLeft(), including `now < last` -> 0: an RTC
+// that jumped backwards (a resync, a battery swap) must never strand the button
+// for hours, so a backwards clock reads as "ready" rather than as a huge remainder.
+int GameState::liftoffCooldownLeft(uint32_t now) const {
+    if (cdLiftoff == 0 || now < cdLiftoff) return 0;
+    uint32_t el = now - cdLiftoff;
+    return el >= (uint32_t)LIFTOFF_COOLDOWN_S ? 0 : (LIFTOFF_COOLDOWN_S - (int)el);
+}
+
+Result GameState::startLiftoff(uint32_t now) {
+    if (!shipUnlocked) return RC_ERR_LOCKED;
+    // ship.js:142 — `if(hull <= 0) Button.setDisabled(liftoffButton)`. The UI
+    // already draws the band dashed in this state; this is the engine-side twin
+    // so a stale region table can't fly an unreinforced ship.
+    if (shipHull <= 0) return RC_ERR_LOCKED;
+    if (liftoffCooldownLeft(now) > 0) return RC_ERR_COOLDOWN;
+    // The cooldown starts on the PRESS, before checkLiftOff() decides between the
+    // warning and the flight — which is exactly why 「裹足徘徊」 has to clear it
+    // again (ship.js:157).
+    cdLiftoff = now;
+    return RC_OK;
+}
+
+void GameState::liftOff() {
+    // PHASE 3a STUB. Upstream slides the Space panel in and hands the app over to
+    // it; that module lands in 3b. Reporting the non-event beats silently eating
+    // the press — the player has just paid a 120s cooldown for it.
+    //   Firmware-local literal, not a tr() key: this line describes OUR staging,
+    // so it has no upstream English original to key off. tr() falls through to the
+    // key it was handed (cjk_text.cpp), so a Chinese literal renders verbatim, and
+    // every glyph in it is already in the strings_zh.h closure (no font rebuild).
+    pushLog("点火之后，星舰还是没有离开地面");
 }
 
 int GameState::cooldownLeft(int action, uint32_t now) const {
@@ -680,12 +763,25 @@ size_t GameState::toJson(char* out, size_t cap) const {
        (unsigned long)lastSettleTs, (unsigned long)rng);
     AP("\"fire\":%d,\"temp\":%d,\"bl\":%d,\"pop\":%u,",
        fire, temp, builderLevel, population);
+    // Bits 32/64 are the v4 starship flags. They ride the EXISTING "fl" integer
+    // rather than two new keys because a bitfield that a pre-v4 reader parses as a
+    // plain int is upgrade-safe in both directions: an old firmware reading a v4
+    // save picks up flags it does not know and masks them off, and a v4 firmware
+    // reading a v1..v3 save simply finds those bits clear == "no ship yet".
     int flags = (outsideUnlocked ? 1 : 0) | (craftablesUnlocked ? 2 : 0) |
                 (woodSeen ? 4 : 0) | (seenForest ? 8 : 0) |
-                (needWoodActive ? 16 : 0);
+                (needWoodActive ? 16 : 0) |
+                (shipUnlocked ? 32 : 0) | (shipSeenWarning ? 64 : 0);
     AP("\"fl\":%d,", flags);
     AP("\"cd\":[%lu,%lu,%lu],", (unsigned long)cdFire,
        (unsigned long)cdGather, (unsigned long)cdTraps);
+    // Starship stats + the liftoff cooldown epoch as three flat keys, NOT appended
+    // to the "cd" array: readIntArr stops at the ']' of a short array, so a 4th
+    // slot would read back as 0 on every v3 save — silently correct today, but it
+    // would make the array's length load-bearing across versions. A named key that
+    // is simply absent is the convention the rest of this file already relies on.
+    AP("\"shiph\":%d,\"shipt\":%d,\"cdlift\":%lu,",
+       shipHull, shipThrusters, (unsigned long)cdLiftoff);
     AP("\"tm\":[%d,%d,%d,%d,%d],", tTemp, tBuilder, tNeedWood, tFireCool, tPop);
     AP("\"nev\":%lu,", (unsigned long)nextEventAt);
     AP("\"echo\":[%d,%ld,%lu],", echoRes, (long)echoAmt,
@@ -728,7 +824,7 @@ size_t GameState::toJson(char* out, size_t cap) const {
 bool GameState::fromJson(const char* j) {
     if (!j) return false;
     long v = readLong(afterKey(j, "v"));
-    if (v < 1 || v > 3) return false;    // accept v1 (pre-events), v2, v3 saves
+    if (v < 1 || v > 4) return false;    // accept v1 (pre-events), v2, v3, v4 saves
     init();                              // defaults, then overwrite
     lastSettleTs = (uint32_t)readLong(afterKey(j, "ts"));
     rng          = (uint32_t)readLong(afterKey(j, "rng"));
@@ -742,8 +838,17 @@ bool GameState::fromJson(const char* j) {
     woodSeen           = flags & 4;
     seenForest         = flags & 8;
     needWoodActive     = flags & 16;
+    shipUnlocked       = flags & 32;     // v4; clear on v1..v3 -> no ship page
+    shipSeenWarning    = flags & 64;     // v4; clear on v1..v3 -> warning still due
     int32_t cd[3];  readIntArr(afterKey(j, "cd"), cd, 3);
     cdFire = (uint32_t)cd[0]; cdGather = (uint32_t)cd[1]; cdTraps = (uint32_t)cd[2];
+    // v4 starship. PRESENCE-CHECKED, not readLong'd blind: shipThrusters defaults
+    // to 1, not 0, so on a v1..v3 save the missing key must leave init()'s value
+    // standing rather than zero it. (hull and the cooldown default to 0 either
+    // way, but they go through the same guard so the three read as one block.)
+    { const char* p = afterKey(j, "shiph"); if (p) shipHull      = (int16_t)readLong(p); }
+    { const char* p = afterKey(j, "shipt"); if (p) shipThrusters = (int16_t)readLong(p); }
+    cdLiftoff = (uint32_t)readLong(afterKey(j, "cdlift"));   // absent -> 0 (ready)
     int32_t tm[5];  readIntArr(afterKey(j, "tm"), tm, 5);
     tTemp = tm[0]; tBuilder = tm[1]; tNeedWood = tm[2];
     tFireCool = tm[3]; tPop = tm[4];

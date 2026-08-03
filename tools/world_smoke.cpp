@@ -7,8 +7,10 @@
 // natively and asserts: deterministic map generation (landmark counts / radius
 // bands / spawn / terrain sanity), diamond visibility, move upkeep + starvation/
 // thirst death, goHome commit (mine unlock + loot bank + fog persist), die
-// discard, drawRoad, world.bin + trek.bin round-trip / cold-boot restore, and
-// the main-save headroom after the game_data enum growth.
+// discard, drawRoad, world.bin + trek.bin round-trip / cold-boot restore, the
+// main-save headroom after the game_data enum growth, and (Phase 3a) the W
+// landmark chain: salvage -> walk home -> the starship page unlocks, versus
+// salvage -> die -> it does not and the wreck is salvageable again.
 //
 // Build (clang++ is the host toolchain on this box):
 //   clang++ -std=c++17 -I src tools/world_smoke.cpp src/world_state.cpp \
@@ -668,6 +670,8 @@ int main() {
         for (int i = 0; i < JOB_COUNT; i++) gs.workers[i] = 9999;
         gs.population = 65535;
         gs.seen = 0xFFFFFFFF; gs.craftShown = 0xFFFFFFFF;
+        gs.shipUnlocked = gs.shipSeenWarning = true;    // P3a: the v4 ship keys
+        gs.shipHull = 32767; gs.shipThrusters = 32767; gs.cdLiftoff = 4294967295u;
         // 8 DISTINCT long entries so the log ring is genuinely full (pushLog
         // collapses repeats of the newest key, so identical pushes wouldn't
         // stress it) — an honest worst case for the byte measurement.
@@ -1088,6 +1092,93 @@ int main() {
         r = w.move(gs, DIR_EAST);
         CHECK(r.kind != STEP_LANDMARK,
               "trip3: committed-visited house no longer triggers (persisted like 'H!')");
+    }
+
+    // ======================= Phase 3a: the W landmark ======================
+    // research-phase3.md §11 3a acceptance 1/2/7: salvage the crashed starship,
+    // walk home ALIVE, and the ship page unlocks; die on the way back and it does
+    // not — because clearedShip lives on the Expedition, which die() discards.
+    printf("== [3a ship] salvage -> goHome unlocks the starship page ==\n");
+    {
+        GameState gs; WorldState w;
+        plant(w, gs, VILLAGE_X + 3, VILLAGE_Y, T_BARRENS, 4242);
+        w.ex.tiles[VILLAGE_Y * WORLD_DIM + (VILLAGE_X + 4)] = T_SHIP;
+        setpiece::bind(&w, &gs);
+        CHECK(!gs.shipUnlocked, "a fresh game has no starship page");
+
+        StepResult r = w.move(gs, DIR_EAST);              // step onto the W
+        CHECK(r.kind == STEP_LANDMARK && r.scene == SP_SHIP,
+              "stepping onto W triggers the ship setpiece");
+        CHECK(setpiece::begin(r.scene), "ship setpiece begins");
+        CHECK(setpiece::btnCount() == 1, "one scene, one 「salvage」 button");
+        CHECK(setpiece::choose(0) == RC_OK, "salvage");
+        CHECK(!setpiece::active(), "salvage ends the setpiece (no combat, no cost)");
+        CHECK(w.ex.clearedShip, "salvage recorded the ship on the EXPEDITION");
+        CHECK(w.exVisited(VILLAGE_X + 4, VILLAGE_Y),
+              "the W tile is spent (markVisited) so it can't re-trigger");
+        CHECK(w.exTileAt(VILLAGE_X + 4, VILLAGE_Y) == T_SHIP,
+              "the W tile itself survives (clearMine keeps the landmark glyph)");
+        CHECK(w.exTileAt(VILLAGE_X + 2, VILLAGE_Y) == T_ROAD &&
+              w.exTileAt(VILLAGE_X + 3, VILLAGE_Y) == T_ROAD,
+              "salvage drew the road back toward the village");
+        CHECK(!gs.shipUnlocked, "still locked mid-trip: goHome is what opens it");
+
+        // Walk home. Two steps west, the second lands on the village.
+        w.ex.x = VILLAGE_X + 1; w.ex.y = VILLAGE_Y;
+        r = w.move(gs, DIR_WEST);
+        CHECK(r.kind == STEP_HOME, "reached the village -> goHome");
+        CHECK(gs.shipUnlocked, "goHome unlocked the starship page");
+        CHECK(gs.shipHull == SHIP_BASE_HULL, "hull seeded to BASE_HULL (0 — can't fly yet)");
+        CHECK(gs.shipThrusters == SHIP_BASE_THRUSTERS, "thrusters seeded to BASE_THRUSTERS (1)");
+        {   // Ship.onArrival's one-shot notice landed in the log — compared
+            // EXACTLY against the upstream key, because a key that got truncated
+            // by LOG_KEY_MAX would still pass a substring test but would miss
+            // strings_zh.h at tr() time and render as raw English on the panel.
+            const char* key = "somewhere above the debris cloud, the wanderer "
+                              "fleet hovers. been on this rock too long.";
+            int hits = 0;
+            for (int i = 0; i < gs.logCount; i++)
+                if (strcmp(gs.log[i].enKey, key) == 0) hits++;
+            CHECK(hits == 1, "the arrival notice was pushed once, key intact");
+        }
+        // A SECOND cleared trip must not reset a reinforced ship back to base.
+        gs.stores[R_ALIEN_ALLOY] = 2 * FP;
+        gs.reinforceHull(); gs.upgradeEngine();
+        gs.unlockShip();
+        CHECK(gs.shipHull == 1 && gs.shipThrusters == 2,
+              "unlockShip is idempotent: a later trip can't reset the stats");
+
+        // ...and the wreck stays spent across expeditions (goHome committed the
+        // visited mark), so a second trip out there is a plain walk.
+        gs.stores[R_CURED_MEAT] = 5 * FP;
+        int16_t out2[RES_COUNT] = { 0 }; out2[R_CURED_MEAT] = 5;
+        CHECK(w.embark(gs, out2, nullptr, 3), "re-embark after the successful trip");
+        w.ex.x = VILLAGE_X + 3; w.ex.y = VILLAGE_Y;
+        r = w.move(gs, DIR_EAST);                        // back onto the W
+        CHECK(r.kind != STEP_LANDMARK, "stepping on the spent W does nothing");
+    }
+
+    printf("== [3a ship] salvage then DIE -> the page stays locked ==\n");
+    {
+        GameState gs; WorldState w;
+        plant(w, gs, VILLAGE_X + 3, VILLAGE_Y, T_BARRENS, 4243);
+        w.ex.tiles[VILLAGE_Y * WORLD_DIM + (VILLAGE_X + 4)] = T_SHIP;
+        setpiece::bind(&w, &gs);
+        StepResult r = w.move(gs, DIR_EAST);
+        CHECK(r.kind == STEP_LANDMARK && r.scene == SP_SHIP, "W triggers");
+        setpiece::begin(r.scene);
+        setpiece::choose(0);                              // salvage
+        CHECK(w.ex.clearedShip, "salvaged");
+        w.die();
+        CHECK(!gs.shipUnlocked, "died before reaching home -> no starship page");
+        // die() discarded the WORKING map, so the visited mark never reached the
+        // committed layer either: next trip the wreck is there to salvage again.
+        // (Checked through a re-embark, which is what re-seeds ex from committed.)
+        gs.stores[R_CURED_MEAT] = 5 * FP;
+        int16_t out[RES_COUNT] = { 0 }; out[R_CURED_MEAT] = 5;
+        CHECK(w.embark(gs, out, nullptr, 2), "re-embark after the death");
+        CHECK(!w.exVisited(VILLAGE_X + 4, VILLAGE_Y),
+              "the wreck is unspent again: a lost trip costs the salvage, not the map");
     }
 
     printf("\n==== %d passed, %d failed ====\n", g_pass, g_fail);

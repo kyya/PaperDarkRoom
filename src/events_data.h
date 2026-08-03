@@ -64,6 +64,12 @@ enum AvailCond : uint8_t {
     AV_ROOM_MED,        // medicine > 0                                (Sick Man)
     AV_OUT_POP_RANGE_MED, // outsideUnlocked && arg1<pop<arg2 && medicine>0 (Sickness)
     AV_OUT_POP_MED,     // outsideUnlocked && pop>arg1 && medicine>0   (Plague)
+    AV_SCRIPTED,        // NEVER available to the random scheduler — the event is
+                        // raised by name from game code (events::startScripted).
+                        // Upstream has no pool for these: ship.js builds the
+                        // "Ready to Leave?" object inline and hands it straight to
+                        // Events.startEvent, which is a scripted trigger by
+                        // construction. We keep one pool, so the marker does it.
 };
 
 // ---- Scene onLoad side effects (effect code + param, no lambdas in data) --
@@ -78,6 +84,12 @@ enum Effect : uint8_t {
     EFF_KILL_POP_HALF,   // kill rand[1..floor(pop/2)] villagers (Sickness death)
     EFF_KILL_RANGE,      // kill rand[base..base+span-1]; arg=(base<<16)|span
                          //   (Plague healed 2..6 = (2<<16)|5, death 10..89 = (10<<16)|80)
+    // ---- button onChoose effects (BtnDef.effect, not SceneDef.effect) ----
+    // Every upstream event button is an onChoose closure; ours were pure
+    // cost/reward/next until Phase 3a, because no Phase-1 button did anything
+    // else. ship.js checkLiftOff's two choices are the first that do.
+    EFF_SHIP_LIFTOFF,    // ship.js 'fly':  seenWarning = true; Ship.liftOff()
+    EFF_SHIP_LINGER,     // ship.js 'wait': Button.clearCooldown(liftoffButton)
 };
 
 // ---- Delayed echo (Mysterious Wanderer) -----------------------------------
@@ -100,6 +112,11 @@ struct BtnDef {
     uint8_t     next;        // scene idx | SCENE_PROB | SCENE_STAY | SCENE_END
     uint8_t     probStart;   // into PROBS[] when next == SCENE_PROB
     uint8_t     probCount;
+    // onChoose side effect (Effect), run AFTER cost/reward/notify and BEFORE the
+    // scene transition. Every row below written before Phase 3a leaves this
+    // initializer off and is therefore value-initialized to EFF_NONE (0) — the
+    // deliberate reason the field is LAST.
+    uint8_t     effect;
 };
 
 // ---- Scene ---------------------------------------------------------------
@@ -129,6 +146,7 @@ enum EventId : uint8_t {
     EV_NOMAD = 0, EV_NOISES_OUT, EV_NOISES_IN, EV_BEGGAR, EV_SHADY,
     EV_WANDER_WOOD, EV_WANDER_FUR, EV_RUINED_TRAP, EV_FIRE, EV_BEAST,
     EV_SICK_MAN, EV_SICKNESS, EV_PLAGUE,          // v0.4.9 medicine events
+    EV_SHIP_LIFTOFF,                              // 3a, scripted (ship page only)
     EVENT_COUNT
 };
 
@@ -160,6 +178,7 @@ enum {
     S_SICK_START, S_SICK_ALLOY, S_SICK_CELLS, S_SICK_SCALES, S_SICK_NOTHING,  // Sick Man
     S_SICKNESS_START, S_SICKNESS_HEALED, S_SICKNESS_DEATH,                    // Sickness
     S_PLAGUE_START, S_PLAGUE_HEALED, S_PLAGUE_DEATH,                          // Plague
+    S_SHIP_LIFTOFF,                                                           // Ready to Leave?
     SCENE_COUNT
 };
 
@@ -202,7 +221,8 @@ enum {
     B_SICKNESS_HEALED = 47, B_SICKNESS_DEATH = 48,
     B_PLAGUE_START = 49,     // buy medicine, heal (5 medicine), ignore
     B_PLAGUE_HEALED = 52, B_PLAGUE_DEATH = 53,
-    BTN_COUNT = 54
+    B_SHIP_LIFTOFF = 54,     // lift off, linger
+    BTN_COUNT = 56
 };
 
 #define RA1 {RA_END,0}
@@ -291,6 +311,14 @@ static const BtnDef BTNS[BTN_COUNT] = {
     { "do nothing", { RAEND }, { RAEND }, nullptr, S_PLAGUE_DEATH, 0, 0 },
     { "go home", { RAEND }, { RAEND }, nullptr, SCENE_END, 0, 0 },  // healed
     { "go home", { RAEND }, { RAEND }, nullptr, SCENE_END, 0, 0 },  // death
+
+    // --- Ready to Leave? (S_SHIP_LIFTOFF, ship.js checkLiftOff) ---
+    // Free, both of them: liftoff costs nothing and does not even look at the
+    // Path bag (research-phase3.md §1.4). 「点火起飞」 latches seenWarning so the
+    // question is never asked again; 「裹足徘徊」 gives the 120s back, because the
+    // cooldown started the instant the band was pressed.
+    { "lift off", { RAEND }, { RAEND }, nullptr, SCENE_END, 0, 0, EFF_SHIP_LIFTOFF },
+    { "linger",   { RAEND }, { RAEND }, nullptr, SCENE_END, 0, 0, EFF_SHIP_LINGER },
 };
 
 // ===========================================================================
@@ -427,6 +455,14 @@ static const SceneDef SCENES[SCENE_COUNT] = {
         "the only hope is a quick death.", nullptr },
       "population is almost exterminated", EFF_KILL_RANGE, (10 << 16) | 80, { RAEND }, {0,0,0},
       B_PLAGUE_DEATH, 1, 0 },
+
+    // ---- Ready to Leave? (scripted; ship.js:151-158) ----
+    // defaultBtn = 1 (linger): the modal's 2-minute idle watchdog clicks it, and
+    // "walked away from the card" must not silently launch the ship — nor eat the
+    // cooldown, which is exactly what linger's EFF_SHIP_LINGER prevents.
+    { { "time to get out of this place. won't be coming back.",
+        nullptr, nullptr, nullptr },
+      nullptr, EFF_NONE, 0, { RAEND }, {0,0,0}, B_SHIP_LIFTOFF, 2, 1 },
 };
 
 #undef RA1
@@ -449,6 +485,7 @@ static const EventDef EVENTS[EVENT_COUNT] = {
     { "The Sick Man",            AV_ROOM_MED,          0,  0, S_SICK_START },
     { "Sickness",                AV_OUT_POP_RANGE_MED, 10, 50, S_SICKNESS_START },
     { "Plague",                  AV_OUT_POP_MED,      50,  0, S_PLAGUE_START },
+    { "Ready to Leave?",         AV_SCRIPTED,          0,  0, S_SHIP_LIFTOFF },
 };
 
 }  // namespace adr

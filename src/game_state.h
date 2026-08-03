@@ -57,10 +57,15 @@ struct LogEntry {
 };
 
 constexpr int   LOG_CAP    = 8;
-constexpr int   SAVE_VER   = 3;    // v2 adds the random-event fields (nextEventAt,
+constexpr int   SAVE_VER   = 4;    // v2 adds the random-event fields (nextEventAt,
                                    // delayed-echo slot); v3 adds the craft-unlock
-                                   // bitsets (seen / craftShown). v1 & v2 saves
-                                   // still load (missing fields derived on read).
+                                   // bitsets (seen / craftShown); v4 adds the
+                                   // starship (shiph / shipt / cdlift + two `fl`
+                                   // bits). EVERY older version still loads —
+                                   // fromJson's "absent key -> init() default"
+                                   // rule is what makes each bump lossless, so a
+                                   // v1..v3 save upgrades in place on first load
+                                   // and is rewritten as v4 on the next save().
 constexpr uint8_t ECHO_NONE = 0xFF;  // delayedEcho.res sentinel: slot empty
 #ifndef ADR_SAVE_PATH
 #define ADR_SAVE_PATH "/.darkroom/adr_save.json"
@@ -91,6 +96,24 @@ public:
     bool craftablesUnlocked;         // builder Helping (level 4)
     bool woodSeen;                   // stores.wood is a real number (not "free")
     bool seenForest;                 // first Outside arrival notice shown
+
+    // ---- Starship (Phase 3a, ship.js) ----
+    // shipUnlocked == upstream $SM 'features.location.spaceShip': the W landmark
+    // was salvaged AND the wanderer walked home alive (world.js goHome), which is
+    // what opens the 破旧星舰 ring page. It is the ONE predicate ShipPage::
+    // available() reads, so the page, its status-bar dot and its ring slot can
+    // never disagree.
+    bool shipUnlocked;
+    // ship.js game.spaceShip.seenWarning: the "Ready to Leave?" confirmation is a
+    // ONE-SHOT. Once the player has answered it, every later liftoff press flies
+    // straight off. Persisted so a reboot cannot make it ask twice.
+    bool shipSeenWarning;
+    // ship.js game.spaceShip.{hull,thrusters}. hull IS the maximum hull, not a
+    // current value — it counts how many times the hull has been reinforced, and
+    // the Space level's damage lives in a temporary of its own (research-phase3.md
+    // §1.2), so crashing never spends these. Unbounded by design (game_data.h).
+    int16_t shipHull;
+    int16_t shipThrusters;
 
     // Craftable progressive-unlock bitsets (room.js craftUnlocked, v0.4.3).
     // seen: bit r set once stores[r] has ever been >0 — a craftable's non-wood
@@ -133,6 +156,13 @@ public:
 
     // cooldown last-press epochs (0 = ready). Light & stoke share one button.
     uint32_t cdFire, cdGather, cdTraps;
+    // The liftoff button's own 120s cooldown (ship.js liftoffButton). Kept out of
+    // the cdFire/cdGather/cdTraps trio — and out of cooldownLeft()'s 0/1/2 action
+    // switch — because those three are Room/Outside buttons whose durations all
+    // come from the same room.js block; folding a Phase-3 page's clock into that
+    // switch would leak an unrelated action index into the ship page. Same epoch
+    // model though, rollback fail-open included (liftoffCooldownLeft).
+    uint32_t cdLiftoff;
 
     // settle step timers (seconds remaining to next event)
     int32_t tTemp, tBuilder, tNeedWood, tFireCool, tPop;
@@ -199,6 +229,36 @@ public:
     Result craft(uint8_t craftId);          // tools/upgrades/weapons
     Result buy(uint8_t tradeId);            // trading-post goods
     Result assignWorker(uint8_t job, int delta);  // +/- villagers to a job
+
+    // ---- starship (ship.js) ----
+    // world.js goHome: World.state.ship && !features.location.spaceShip ->
+    // Ship.init(). Idempotent — seeds hull/thrusters to their BASE values and
+    // pushes Ship.onArrival's one-shot notice exactly once, so a second cleared
+    // trip cannot reset a reinforced ship back to base.
+    void   unlockShip();
+    // Ship.reinforceHull / Ship.upgradeEngine: spend 1 alien alloy, +1 stat. Both
+    // push "not enough alien alloy" and return RC_ERR_COST when short (ship.js
+    // :105-108/:119-122 — a failed press notifies and costs no cooldown), and
+    // RC_ERR_LOCKED before the page is even unlocked.
+    Result reinforceHull();
+    Result upgradeEngine();
+    // Seconds left on the liftoff button (0 = ready), same shape and same
+    // clock-rollback fail-open as cooldownLeft().
+    int    liftoffCooldownLeft(uint32_t now) const;
+    // The gate half of ship.js checkLiftOff(): refuse while the hull is still 0
+    // (RC_ERR_LOCKED — that is what disables the button on a freshly found ship)
+    // or the button is cooling (RC_ERR_COOLDOWN), else stamp the 120s cooldown and
+    // return RC_OK. The CALLER then takes the upstream branch: !shipSeenWarning ->
+    // raise the confirmation event, else -> liftOff().
+    Result startLiftoff(uint32_t now);
+    // Button.clearCooldown($('#liftoffButton')) — what the confirmation's 「裹足
+    // 徘徊」 choice does, since the cooldown already started on the press.
+    void   clearLiftoffCooldown() { cdLiftoff = 0; }
+    // Ship.liftOff(). PHASE 3a STUB: the Space module is 3b, so this only reports
+    // that the ship stayed on the ground. Everything AROUND it (the cooldown, the
+    // one-shot warning, the hull gate) is already the real thing, so 3b replaces
+    // exactly this body and nothing else.
+    void   liftOff();
 
     // ---- read helpers ----
     int32_t whole(uint8_t res) const { return stores[res] / FP; }  // display units

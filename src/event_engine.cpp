@@ -61,8 +61,30 @@ static bool isAvailable(int eventId) {
             return gs->outsideUnlocked &&
                    (int32_t)gs->population > e.availArg1 &&
                    gs->stores[R_MEDICINE] > 0;
+        case AV_SCRIPTED:
+            return false;   // never in the random pool; startScripted() raises it
     }
     return false;
+}
+
+// A button's onChoose side effect (BtnDef.effect). Separate from applyEffect(),
+// which is scene-scoped and needs effectArg — a button carries no argument, and
+// keeping the two switches apart stops a scene code from being reachable through
+// a button (or the reverse) by a typo in a data table.
+static void applyBtnEffect(uint8_t effect) {
+    switch (effect) {
+        case EFF_SHIP_LIFTOFF:
+            // ship.js: `$SM.set('game.spaceShip.seenWarning', true); Ship.liftOff()`.
+            gs->shipSeenWarning = true;
+            gs->liftOff();
+            break;
+        case EFF_SHIP_LINGER:
+            // ship.js: `Button.clearCooldown($('#liftoffButton'))` — the press
+            // already started the 120s, and declining must not charge for it.
+            gs->clearLiftoffCooldown();
+            break;
+        default: break;
+    }
 }
 
 // Run a scene's onLoad side effect (effect code + param).
@@ -169,6 +191,15 @@ bool startEvent(int eventId, uint32_t epochNow) {
     return true;
 }
 
+bool startScripted(int eventId, uint32_t epochNow) {
+    if (!gs || eventId < 0 || eventId >= EVENT_COUNT) return false;
+    if (s_activeEvent >= 0) return false;    // something is already on screen
+    s_epoch = epochNow;
+    s_activeEvent = eventId;
+    loadScene(EVENTS[eventId].sceneStart);
+    return true;
+}
+
 static bool tryTrigger(uint32_t epochNow) {
     uint8_t pool[EVENT_COUNT];
     int n = 0;
@@ -242,6 +273,9 @@ Result choose(int localBtn) {
     addStores(b.reward);
     // notification
     if (b.notifyKey) gs->pushLog(b.notifyKey);
+    // onChoose side effect — after the ledger moved, before the scene switches,
+    // so an effect always sees the state the player just paid for.
+    applyBtnEffect(b.effect);
 
     // next scene
     if (b.next == SCENE_STAY) {

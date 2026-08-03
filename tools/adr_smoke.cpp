@@ -9,6 +9,10 @@
 //   -> check traps -> build hut -> villagers arrive -> build lodge
 //   -> assign hunter, plus an explicit break-on-shortage (断料停产) check and a
 //   save/load JSON round-trip.
+// It also covers the Phase-3a starship engine (ship.js): the alien-alloy ledger
+// behind 加固船身/升级引擎, the hull gate + 120s cooldown behind 点火起飞, the
+// scripted one-shot 「Ready to Leave?」 confirmation, and — the load-bearing one —
+// that a v3 save still loads into the v4 schema without losing a field.
 //
 // Build (clang++ is the available host toolchain on this box):
 //   clang++ -std=c++17 -I src tools/adr_smoke.cpp src/game_state.cpp \
@@ -20,6 +24,7 @@
 #include <cstdio>
 #include <cstdint>
 #include <cstring>
+#include <cstdlib>          // strtol — the v3 save-downgrade fixture
 
 using namespace adr;
 
@@ -716,6 +721,8 @@ int main() {
         d.cdFire = d.cdGather = d.cdTraps = 12345;
         d.needWoodActive = true; d.lastSettleTs = 55555;
         d.nextEventAt = 7777; d.armDelayedEcho(R_FUR, 300, 8888);
+        d.shipUnlocked = d.shipSeenWarning = true;      // P3a
+        d.shipHull = 9; d.shipThrusters = 9; d.cdLiftoff = 4321;
         d.pushLog("the wind howls outside");
 
         d.init();
@@ -735,6 +742,10 @@ int main() {
         CHECK(!d.needWoodActive && d.lastSettleTs == 0, "init: needWood + settle clock reset");
         CHECK(d.nextEventAt == 0 && d.echoRes == ECHO_NONE, "init: event scheduler + echo cleared");
         CHECK(d.logCount == 0, "init: log ring emptied");
+        CHECK(!d.shipUnlocked && !d.shipSeenWarning && d.cdLiftoff == 0,
+              "init: P3a starship flags + liftoff cooldown cleared");
+        CHECK(d.shipHull == SHIP_BASE_HULL && d.shipThrusters == SHIP_BASE_THRUSTERS,
+              "init: hull/thrusters back to BASE (0 / 1), not to zero");
     }
 
     printf("== [v0.4.8] B4: trade goods gated on trading post + seen (buyOfferable) ==\n");
@@ -868,6 +879,173 @@ int main() {
         CHECK(events::choose(2) == RC_OK, "do nothing ok");
         CHECK(d.population < popB2, "plague death kills villagers");
         CHECK(d.population >= popB2 - 89, "deaths bounded by [10..89]");
+    }
+
+    // =====================================================================
+    // Phase 3a — the starship (ship.js). Engine half only: the alloy ledger, the
+    // hull gate, the 120s liftoff cooldown, the one-shot warning event, and the
+    // v3 -> v4 save upgrade. The salvage -> goHome unlock chain that FEEDS this
+    // needs a WorldState and lives in tools/world_smoke.cpp.
+    // =====================================================================
+
+    printf("== [3a ship] locked until goHome; unlockShip seeds BASE hull/thrusters ==\n");
+    {
+        GameState s; s.init();
+        CHECK(!s.shipUnlocked, "fresh game: no starship");
+        s.stores[R_ALIEN_ALLOY] = 5 * FP;
+        CHECK(s.reinforceHull() == RC_ERR_LOCKED, "reinforce refused before the unlock");
+        CHECK(s.upgradeEngine() == RC_ERR_LOCKED, "upgrade refused before the unlock");
+        CHECK(s.startLiftoff(1000) == RC_ERR_LOCKED, "liftoff refused before the unlock");
+        CHECK(s.whole(R_ALIEN_ALLOY) == 5, "a refused press spends nothing");
+        s.unlockShip();
+        CHECK(s.shipUnlocked, "unlockShip opens the page");
+        CHECK(s.shipHull == 0, "BASE_HULL is 0 — a salvaged ship cannot fly yet");
+        CHECK(s.shipThrusters == 1, "BASE_THRUSTERS is 1");
+    }
+
+    printf("== [3a ship] alloy ledger: 1 alloy per point, and NO maximum ==\n");
+    {
+        GameState s; s.init(); s.unlockShip();
+        CHECK(s.reinforceHull() == RC_ERR_COST, "no alloy -> RC_ERR_COST");
+        {
+            bool sawShort = false;
+            for (int i = 0; i < s.logCount; i++)
+                if (strcmp(s.log[i].enKey, "not enough alien alloy") == 0) sawShort = true;
+            CHECK(sawShort, "a short press notifies 「外星合金不足」");
+        }
+        CHECK(s.shipHull == 0, "a refused reinforce leaves the hull alone");
+        s.stores[R_ALIEN_ALLOY] = 3 * FP;
+        CHECK(s.reinforceHull() == RC_OK, "reinforce with alloy in hand");
+        CHECK(s.shipHull == 1 && s.whole(R_ALIEN_ALLOY) == 2, "hull +1, alloy -1");
+        CHECK(s.upgradeEngine() == RC_OK, "upgrade engine");
+        CHECK(s.shipThrusters == 2 && s.whole(R_ALIEN_ALLOY) == 1, "thrusters +1, alloy -1");
+        CHECK(s.upgradeEngine() == RC_OK, "spend the last alloy");
+        CHECK(s.whole(R_ALIEN_ALLOY) == 0 && s.shipThrusters == 3, "alloy exhausted");
+        CHECK(s.upgradeEngine() == RC_ERR_COST, "and then it is short again");
+        // research-phase3.md §1.2: neither stat has a cap upstream — the alloy
+        // supply IS the ceiling. Buy well past any plausible UI bound to prove it.
+        s.stores[R_ALIEN_ALLOY] = 40 * FP;
+        for (int i = 0; i < 20; i++) { s.reinforceHull(); s.upgradeEngine(); }
+        CHECK(s.shipHull == 21 && s.shipThrusters == 23,
+              "no maximum on hull/thrusters (upstream has no cap)");
+        CHECK(s.whole(R_ALIEN_ALLOY) == 0, "every point cost exactly 1 alloy");
+    }
+
+    printf("== [3a ship] liftoff: hull gate + 120s cooldown + clock-rollback ==\n");
+    {
+        GameState s; s.init(); s.unlockShip();
+        uint32_t t = 500000;
+        CHECK(s.startLiftoff(t) == RC_ERR_LOCKED, "hull 0 -> liftoff is disabled");
+        CHECK(s.liftoffCooldownLeft(t) == 0, "a refused press starts no cooldown");
+        s.stores[R_ALIEN_ALLOY] = 1 * FP;
+        s.reinforceHull();
+        CHECK(s.startLiftoff(t) == RC_OK, "one reinforcement arms the button");
+        CHECK(s.liftoffCooldownLeft(t) == LIFTOFF_COOLDOWN_S, "120s cooldown started");
+        CHECK(s.startLiftoff(t + 1) == RC_ERR_COOLDOWN, "a second press is refused");
+        CHECK(s.liftoffCooldownLeft(t + 119) == 1, "one second left at +119");
+        CHECK(s.liftoffCooldownLeft(t + 120) == 0, "ready again at +120");
+        CHECK(s.startLiftoff(t + 120) == RC_OK, "and pressable again");
+        // An RTC that jumped backwards must not strand the button (same fail-open
+        // rule as cooldownLeft for fire/gather/traps).
+        CHECK(s.liftoffCooldownLeft(t - 5000) == 0, "clock rollback reads as ready");
+        s.clearLiftoffCooldown();
+        CHECK(s.liftoffCooldownLeft(t + 121) == 0, "clearLiftoffCooldown releases it");
+    }
+
+    printf("== [3a ship] 「Ready to Leave?」 is scripted-only and one-shot ==\n");
+    {
+        GameState s; s.init(); s.unlockShip();
+        uint32_t t = 600000; s.settle(t);
+        s.stores[R_ALIEN_ALLOY] = 1 * FP; s.reinforceHull();
+        events::bind(&s);
+        CHECK(!events::startEvent(EV_SHIP_LIFTOFF, t),
+              "the warning is AV_SCRIPTED: the random scheduler can never pick it");
+        CHECK(events::startScripted(EV_SHIP_LIFTOFF, t), "the ship page can raise it");
+        CHECK(events::btnCount() == 2, "two choices: 点火起飞 / 裹足徘徊");
+        CHECK(events::defaultBtnIndex() == 1,
+              "the idle watchdog takes 裹足徘徊, never the launch");
+        CHECK(!events::startScripted(EV_SHIP_LIFTOFF, t),
+              "it cannot displace an event already on screen");
+        CHECK(events::choose(0) == RC_OK, "choose 点火起飞");
+        CHECK(!events::active(), "the confirmation ends");
+        CHECK(s.shipSeenWarning, "seenWarning latched: never asked again");
+
+        // linger: the press already started the cooldown, and declining refunds it
+        GameState d; d.init(); d.unlockShip(); d.settle(t);
+        d.stores[R_ALIEN_ALLOY] = 1 * FP; d.reinforceHull();
+        events::bind(&d);
+        CHECK(d.startLiftoff(t) == RC_OK, "press starts the 120s");
+        CHECK(events::startScripted(EV_SHIP_LIFTOFF, t), "warning raised");
+        CHECK(events::choose(1) == RC_OK, "choose 裹足徘徊");
+        CHECK(d.liftoffCooldownLeft(t) == 0, "linger cleared the cooldown");
+        CHECK(!d.shipSeenWarning, "linger does NOT latch the warning — it is still due");
+    }
+
+    printf("== [3a ship] save v4 round-trip, and a v3 save upgrades cleanly ==\n");
+    {
+        GameState s; s.init(); s.settle(900000);
+        s.unlockShip();
+        s.stores[R_ALIEN_ALLOY] = 4 * FP;
+        s.reinforceHull(); s.reinforceHull(); s.upgradeEngine();
+        s.shipSeenWarning = true;
+        s.startLiftoff(900000);
+        s.population = 11;
+
+        char json[4096];
+        size_t n = s.toJson(json, sizeof json);
+        CHECK(n > 0 && n < sizeof json, "v4 save fits the 4KB buffer");
+        CHECK(strstr(json, "\"v\":4") != nullptr, "SAVE_VER is 4");
+
+        GameState r; r.init();
+        CHECK(r.fromJson(json), "v4 save loads");
+        CHECK(r.shipUnlocked && r.shipSeenWarning, "ship flags round-trip");
+        CHECK(r.shipHull == 2 && r.shipThrusters == 2, "hull/thrusters round-trip");
+        CHECK(r.cdLiftoff == 900000, "the liftoff cooldown epoch round-trips");
+        CHECK(r.whole(R_ALIEN_ALLOY) == 1, "the alloy the ship ate stays eaten");
+
+        // Now DOWNGRADE that same text to exactly what a v3 firmware would have
+        // written — bump the version back, drop the three v4 keys, and mask the
+        // two v4 `fl` bits — and prove the upgrade path is lossless everywhere it
+        // matters. This is the red line: an existing save must never be corrupted
+        // by the version bump.
+        char v3[4096];
+        snprintf(v3, sizeof v3, "%s", json);
+        char* vp = strstr(v3, "\"v\":4");
+        CHECK(vp != nullptr, "found the version field to downgrade");
+        vp[4] = '3';
+        {   // "fl":N -> "fl":(N & 31)
+            char* f = strstr(v3, "\"fl\":");
+            long flv = strtol(f + 5, nullptr, 10);
+            CHECK((flv & 96) == 96, "the v4 save really did carry both ship bits");
+            char tail[4096];
+            snprintf(tail, sizeof tail, "%s", strchr(f + 5, ','));
+            snprintf(f, sizeof(v3) - (size_t)(f - v3), "\"fl\":%ld%s", flv & 31, tail);
+        }
+        {   // strip "shiph":..,"shipt":..,"cdlift":..,  (one contiguous run)
+            char* a = strstr(v3, "\"shiph\":");
+            CHECK(a != nullptr, "found the v4 ship keys to strip");
+            char* b = strstr(a, "\"cdlift\":");
+            b = strchr(b, ',') + 1;              // just past the run's trailing comma
+            memmove(a, b, strlen(b) + 1);
+            CHECK(strstr(v3, "shiph") == nullptr && strstr(v3, "cdlift") == nullptr,
+                  "the v3 text carries no ship keys at all");
+        }
+
+        GameState old; old.init();
+        CHECK(old.fromJson(v3), "the v3 save still loads (fromJson accepts v<=4)");
+        CHECK(old.population == 11 && old.whole(R_ALIEN_ALLOY) == 1,
+              "v3 migration: every pre-existing field survives untouched");
+        CHECK(!old.shipUnlocked, "v3 migration: no ship -> the page stays hidden");
+        CHECK(!old.shipSeenWarning, "v3 migration: the warning is still due");
+        CHECK(old.shipHull == SHIP_BASE_HULL, "v3 migration: hull defaults to 0");
+        CHECK(old.shipThrusters == SHIP_BASE_THRUSTERS,
+              "v3 migration: thrusters default to 1, NOT to the absent key's 0");
+        CHECK(old.cdLiftoff == 0, "v3 migration: liftoff button is ready");
+        // ...and the very next save writes it back out as a full v4.
+        char again[4096];
+        old.toJson(again, sizeof again);
+        CHECK(strstr(again, "\"v\":4") && strstr(again, "\"shipt\":1"),
+              "a migrated save is rewritten as v4 with the defaults materialised");
     }
 
     printf("\n==== %d passed, %d failed ====\n", g_pass, g_fail);

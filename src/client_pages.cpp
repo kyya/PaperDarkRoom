@@ -6,6 +6,7 @@
 #include "path_page.h"
 #include "world_page.h"
 #include "tech_page.h"
+#include "ship_page.h"
 #include "event_engine.h"
 #include "fight_modal.h"
 #include "setpiece_modal.h"
@@ -50,8 +51,17 @@ static WorldPage s_world;
 // the ring indices they already had; the Room's open jump resolves it by name
 // (pager::ringIndexByName), not by position.
 static TechPage s_tech;
+// ShipPage (P3a) is the W landmark's payoff — a location page of its own, not a
+// village sub-page, so it has no latch: available() reads the persistent
+// g_game.shipUnlocked that world_state goHome sets. Appended to the TAIL (the
+// research-phase3.md §12 Q9 recommendation) so every earlier slot keeps the ring
+// index it already had; nothing resolves this one by position — path_page/
+// world_page/tech_page all jump by pager::ringIndexByName — and frame_store
+// persists the current page by NAME (meta.json curName), so a cold boot that
+// last sat on "ship" comes back to it without a version bump.
+static ShipPage s_ship;
 static pages::Page* s_reg[] = { &s_room, &s_outside, &s_trade, &s_assign, &s_path,
-                                &s_world, &s_tech };
+                                &s_world, &s_tech, &s_ship };
 
 int count() { return (int)(sizeof(s_reg) / sizeof(s_reg[0])); }
 

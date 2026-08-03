@@ -538,7 +538,15 @@ void WorldState::goHome(GameState& gs) {
         gs.buildings[B_COAL_MINE] = 1;
     if (ex.clearedSulphur && gs.buildings[B_SULPHUR_MINE] == 0)
         gs.buildings[B_SULPHUR_MINE] = 1;
-    // clearedShip / clearedExec unlock Ship / Fabricator (Phase 3) — deferred.
+    // world.js goHome:965-968 — `if(World.state.ship && !$SM.get('features.
+    // location.spaceShip')) Ship.init()`. clearedShip lives on the EXPEDITION, so
+    // this line is the whole "die on the way back and the salvage was for nothing"
+    // rule: die() drops ex without ever reaching here, and the W tile's own
+    // markVisited lives in the working map that die() also discards, so the
+    // landmark is still there to salvage again next trip. unlockShip() is
+    // idempotent and seeds hull/thrusters, so a second cleared trip is a no-op.
+    if (ex.clearedShip) gs.unlockShip();
+    // clearedExec unlocks the Fabricator (Phase 3c) — still deferred.
     // Bank the bag: EVERYTHING returns to the village stores (upstream returnOutfit
     // does $SM.add('stores[k]', outfit[k]) for every k). Then the leaveItAtHome
     // nicety writes the RETAINED slots into the persistent Path outfit so the next

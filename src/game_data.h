@@ -42,6 +42,24 @@ constexpr int STOKE_FIRE_WOOD = 1;
 
 constexpr int HUT_ROOM = 4;              // _HUT_ROOM: villagers per hut
 
+// ---- Starship (ship.js:5-9, Phase 3a) ------------------------------------
+// The W landmark's payoff: a village page that spends alien alloy on two ship
+// stats. These live here rather than in world_data.h (where
+// docs/research-phase3.md §10.2 sketched them) because nothing about them is a
+// World/expedition concept — hull/thrusters are persistent GAME state, bought
+// out of the village stores, and game_state.cpp is the only engine translation
+// unit that touches them.
+constexpr int LIFTOFF_COOLDOWN_S  = 120;   // Ship.LIFTOFF_COOLDOWN (liftoffButton)
+constexpr int ALLOY_PER_HULL      = 1;     // Ship.ALLOY_PER_HULL
+constexpr int ALLOY_PER_THRUSTER  = 1;     // Ship.ALLOY_PER_THRUSTER
+// BASE_HULL is 0 ON PURPOSE (ship.js:8): a freshly salvaged ship cannot fly, so
+// the liftoff button opens DISABLED and the first hull reinforcement is what
+// arms it. There is deliberately NO maximum on either stat — ship.js's
+// reinforceHull/upgradeEngine carry no cap, the alien-alloy supply is the only
+// ceiling (research-phase3.md §1.2).
+constexpr int SHIP_BASE_HULL      = 0;     // Ship.BASE_HULL
+constexpr int SHIP_BASE_THRUSTERS = 1;     // Ship.BASE_THRUSTERS
+
 // ---- Fire / Temperature state machines (room.js FireEnum/TempEnum) --------
 enum Fire : uint8_t { FIRE_DEAD = 0, FIRE_SMOLDERING, FIRE_FLICKERING,
                       FIRE_BURNING, FIRE_ROARING };
