@@ -22,9 +22,23 @@
 //   per UNLOCKED job (120 + n*90, a 36px name + a 24px "xN" count with the shared
 //   right-hand two-column stepper — assignWorker(job, ±1) from the fine column
 //   and ±10 from the coarse one, truncated to the idle/assigned count) · a
-//   「返回」band. P1 unlocks
-//   <=6 assignable jobs (miners are P2), so 6*90 + 80 = 620px from y=120 ends at
-//   740 < 928 status bar — one page, no pagination (a P2 job add would need it).
+//   「返回」band.
+//
+// v0.10.2 fix (user-reported): P1 shipped with <=6 assignable jobs (miners were
+// P2), so the original MAX_JOBS=6 comfortably covered every unlocked job AND
+// doubled as this page's one-screen render cap. Once P2 added the 3 miner/
+// steelworker/armourer jobs (9 assignable jobs total), that single constant fed
+// STRAIGHT into the engine query (`unlockedJobs(m_jobs, MAX_JOBS)`), so any job
+// past the 6th in enum order (hunter/trapper/tanner/charcutier/iron miner/coal
+// miner) was silently dropped from the query itself — no row, no stepper,
+// nothing to press for 炼钢工人 (steelworker) et al., even though the Outside
+// page's 工人 fieldset (a JOB_COUNT-sized, never-truncated buffer) kept showing
+// the true "炼钢工人 x0" cell. The fix splits the two roles the old constant
+// conflated: the engine query now runs into a JOB_COUNT-sized scratch inside
+// layoutBands() (game_state.cpp's unlockedJobs() can never return more than
+// JOB_COUNT-1 real jobs, so that buffer structurally cannot truncate), and
+// MAX_BANDS below is ONLY the page's own render capacity — paginated exactly
+// trade_page.cpp's layoutBands way once the unlocked list outgrows one screen.
 // tick() settles the offline economy and repaints on change while open.
 #pragma once
 #include "page.h"
@@ -50,17 +64,25 @@ public:
     // wantsAwake stays false: the economy accrues offline via settle() on wake.
 
 private:
-    // <=6 unlocked P1 jobs + a trailing 返回 band = 7 regions. param is the band
-    // index: 0..m_jobCount-1 are job bands (m_jobs maps them to Job ids), and the
-    // index == m_jobCount is the 返回 band. Within a job band the press x picks
-    // the stepper column (±1 / ±10) and the y picks the half (▲ / ▼) — see
-    // stepper.h; param itself needed no new encoding, since the Region already
-    // identifies the band and both hooks already receive x and y.
-    static constexpr int MAX_JOBS = 6;
-    mutable pages::Region m_regions[MAX_JOBS + 1];
+    // One page shows at most MAX_BANDS job/"更多" slots + a trailing 返回 band
+    // = MAX_BANDS+1 regions (see assign_page.cpp's vertical-budget derivation:
+    // BAND_TOP=120, 90px pitch, 8 job/更多 slots + the mandatory 返回 band ends
+    // at 920 < 928, the tightest a 9th slot would break). param is the band
+    // index: 0..m_slotCount-1 are job/更多 bands (m_slotCodes maps them to Job
+    // ids, or the A_MORE sentinel), and index == m_slotCount is the 返回 band.
+    // Within a real job band the press x picks the stepper column (±1 / ±10)
+    // and the y picks the half (▲ / ▼) — see stepper.h; a 更多/返回 band takes
+    // the whole-band press instead (see pressRect). The engine query itself is
+    // NOT bounded by MAX_BANDS — layoutBands() (assign_page.cpp) queries the
+    // full unlocked-job list into a JOB_COUNT-sized local scratch first and
+    // only THEN slices out one page's worth, so a job can never again vanish
+    // from the query the way the old MAX_JOBS=6 cap did (see the file header).
+    static constexpr int MAX_BANDS = 8;
+    mutable pages::Region m_regions[MAX_BANDS + 1];
     mutable int           m_regionCount = 0;
-    mutable uint8_t       m_jobs[MAX_JOBS];     // Job id per visible band
-    mutable int           m_jobCount = 0;
+    mutable uint8_t       m_slotCodes[MAX_BANDS];  // Job id per band, or A_MORE
+    mutable int           m_slotCount = 0;
+    int                   m_page = 0;       // which batch of unlocked jobs is shown
     uint32_t              m_lastSig = 0;   // tick()'s content baseline; onLocalAction
                                            // re-syncs it after its showPage so an
                                            // assignment doesn't force a second full

@@ -47,10 +47,16 @@ constexpr int CONTENT_W = 540 - 2 * PAD;     // 492px usable (§9.2)
 // tab lit — this is the village's sub-page), so the top matches room/outside/
 // trade. Top -> bottom:
 //   tab header(0..72) · info row 人口 X/Y + 伐木者 xN (80, 24px) · one 80px
-//   full-width band per unlocked job (120 + n*90) · 返回 band. 6 jobs max (P1):
-//   the 6th band ends at 120 + 5*90 + 80 = 650, the 返回 band at 120 + 6*90 =
-//   660 ends 740 < 928. One page — a P2 job add is what would force pagination
-//   (a "更多" band, the Outside/Trade 手法).
+//   full-width band per visible job/更多 slot (120 + n*90) · 返回 band.
+// P1 shipped with <=6 assignable jobs, comfortably one page (the 6th band ends
+// at 120 + 5*90 + 80 = 650, 返回 at 660 ends 740 < 928). P2 raised the real
+// ceiling to 9 assignable jobs (miners/steelworker/armourer), so the page must
+// now paginate: MAX_BANDS below is the largest job/更多 slot count whose
+// trailing 返回 band still clears 928 — MAX_BANDS=8 ends the 返回 band at
+// 120 + 8*90 + 80 = 920 < 928; a 9th slot (MAX_BANDS=9) would end at
+// 120 + 9*90 + 80 = 1010, well past the status bar. layoutBands() below
+// mirrors trade_page.cpp's split exactly: perPage = MAX_BANDS-1 (7) real jobs
+// + a trailing "更多" band once the unlocked list exceeds MAX_BANDS.
 constexpr int INFO_Y    = 80;                // info row (below the tab header)
 constexpr int BAND_TOP  = 120;               // first job band top (below info)
 constexpr int BAND_H    = 80;                // long-press band (§9.3: >=80px floor)
@@ -141,6 +147,67 @@ void drawReturnBand(m5gfx::M5Canvas& c, int top) {
     action_band::draw(c, bandRect(top), tr("go home"), nullptr, true, 0, 0);
 }
 
+// "更多" pagination sentinel; real slot codes are Job ids (0..JOB_COUNT-1) —
+// the Outside/Trade/Room pager 手法 (trade_page.cpp's A_MORE), ported here now
+// that P2 pushed the unlocked-job list past one page (see assign_page.h).
+constexpr uint8_t A_MORE = 0xFF;
+
+// The "更多 (n/N)" pager band: same plain shared band as 返回 (centred lone
+// label, no subtitle, no stepper) — a whole-band press, not a stepper zone
+// (see pressRect/onLocalAction).
+void drawMoreBand(m5gfx::M5Canvas& c, int top, const char* label) {
+    action_band::draw(c, bandRect(top), label, nullptr, true, 0, 0);
+}
+
+// Compute the visible job/更多 slot list for `page`: fills slotCodes[] (a Job
+// id, or A_MORE) and regionsOut[] (one full-width y-band per slot, param =
+// slot index), and — when a "更多" slot is placed — the "更多 (n/N)" label
+// into moreLabel. This is trade_page.cpp's layoutBands split verbatim: query
+// the FULL unlocked list into a JOB_COUNT-sized LOCAL scratch first (so the
+// query itself can never truncate — game_state.cpp's unlockedJobs() never
+// returns more than JOB_COUNT-1 real jobs), THEN slice out one page's worth
+// (maxBands-1 real jobs + a trailing "更多") once the full list exceeds
+// maxBands. Returns the slot count (== region count, excluding 返回).
+int layoutBands(pages::Region* regionsOut, uint8_t* slotCodes, int page,
+                int maxBands, int* slotCountOut, char* moreLabel,
+                size_t moreLabelCap) {
+    uint8_t all[JOB_COUNT];
+    int total = g_game.unlockedJobs(all, (int)sizeof(all));
+
+    int numPages, start, take;
+    bool more;
+    int pg = 0;
+    if (total <= maxBands) {
+        numPages = 1; start = 0; take = total; more = false;
+    } else {
+        int perPage = maxBands - 1;                  // 7 real + 1 "更多"
+        numPages = (total + perPage - 1) / perPage;
+        pg = ((page % numPages) + numPages) % numPages;
+        start = pg * perPage;
+        take = total - start; if (take > perPage) take = perPage;
+        more = true;
+    }
+
+    int k = 0;
+    for (int i = 0; i < take && k < maxBands; i++) slotCodes[k++] = all[start + i];
+    if (more && k < maxBands) {
+        slotCodes[k++] = A_MORE;
+        if (moreLabel) snprintf(moreLabel, moreLabelCap, "更多 (%d/%d)",
+                                (pg + 1 < numPages ? pg + 2 : 1), numPages);
+    }
+    int slotCount = k;
+
+    for (int s = 0; s < slotCount; s++) {
+        int top = BAND_TOP + s * (BAND_H + BAND_GAP);
+        regionsOut[s].y0 = (uint16_t)top;
+        regionsOut[s].y1 = (uint16_t)(top + BAND_H);
+        regionsOut[s].type  = 1;                     // firmware-local
+        regionsOut[s].param = (uint8_t)s;            // slot index
+    }
+    *slotCountOut = slotCount;
+    return slotCount;
+}
+
 // Content signature — a hash of every live value that alters a painted number
 // (population, worker mix, buildings — a new building unlocks a job band). tick()
 // compares it each second to decide a full redraw; onLocalAction re-baselines it
@@ -180,9 +247,14 @@ const pages::Region* AssignPage::regions(int* n) const {
 // Every press dispatches — assignWorker no-ops silently (still low-beeping) when
 // the band is disabled or already at a limit, it is never skipped — so there is
 // no "don't flash" case to mirror here.
+// 更多 band: a whole-band press like 返回 (no stepper — it just flips m_page),
+// so it mirrors 返回's branch rather than falling into the stepper zone decode.
 pages::Rect AssignPage::pressRect(const pages::Region& rg, int x, int y) const {
-    if ((int)rg.param == m_jobCount) {                     // 返回 band
+    if ((int)rg.param == m_slotCount) {                    // 返回 band
         return bandRect(rg.y0);                            // drawReturnBand's own frame
+    }
+    if (m_slotCodes[rg.param] == A_MORE) {                 // 更多 band
+        return bandRect(rg.y0);                            // drawMoreBand's own frame
     }
     return stepper::zoneRect(bandRect(rg.y0), x, y);
 }
@@ -206,32 +278,36 @@ bool AssignPage::draw(m5gfx::M5Canvas& c) {
     page_tabs::draw(c, 1);           // shared tab header, 村落 lit (this is its sub-page)
     drawInfoRow(c);
 
-    m_jobCount = g_game.unlockedJobs(m_jobs, MAX_JOBS);
-    for (int i = 0; i < m_jobCount; i++) {
+    char moreLabel[24] = {0};
+    layoutBands(m_regions, m_slotCodes, m_page, MAX_BANDS, &m_slotCount,
+                moreLabel, sizeof(moreLabel));
+    for (int i = 0; i < m_slotCount; i++) {
         int top = BAND_TOP + i * (BAND_H + BAND_GAP);
-        char sub[12];
-        snprintf(sub, sizeof(sub), "x%u", (unsigned)g_game.workers[m_jobs[i]]);
-        drawJobBand(c, top, tr(JOB_KEY[m_jobs[i]]), sub, jobBandDisabled(m_jobs[i]));
-        m_regions[i].y0 = (uint16_t)top;
-        m_regions[i].y1 = (uint16_t)(top + BAND_H);
-        m_regions[i].type  = 1;                 // firmware-local
-        m_regions[i].param = (uint8_t)i;        // band index
+        if (m_slotCodes[i] == A_MORE) {
+            drawMoreBand(c, top, moreLabel);
+        } else {
+            uint8_t job = m_slotCodes[i];
+            char sub[12];
+            snprintf(sub, sizeof(sub), "x%u", (unsigned)g_game.workers[job]);
+            drawJobBand(c, top, tr(JOB_KEY[job]), sub, jobBandDisabled(job));
+        }
     }
 
-    // 返回 band right after the last job band (index == m_jobCount).
-    int retTop = BAND_TOP + m_jobCount * (BAND_H + BAND_GAP);
+    // 返回 band right after the last visible job/更多 band (index == m_slotCount).
+    int retTop = BAND_TOP + m_slotCount * (BAND_H + BAND_GAP);
     drawReturnBand(c, retTop);
-    m_regions[m_jobCount].y0 = (uint16_t)retTop;
-    m_regions[m_jobCount].y1 = (uint16_t)(retTop + BAND_H);
-    m_regions[m_jobCount].type  = 1;
-    m_regions[m_jobCount].param = (uint8_t)m_jobCount;
-    m_regionCount = m_jobCount + 1;
+    m_regions[m_slotCount].y0 = (uint16_t)retTop;
+    m_regions[m_slotCount].y1 = (uint16_t)(retTop + BAND_H);
+    m_regions[m_slotCount].type  = 1;
+    m_regions[m_slotCount].param = (uint8_t)m_slotCount;
+    m_regionCount = m_slotCount + 1;
     return true;
 }
 
-// Long-press on a band. param is the band index: the last band (== m_jobCount) is
-// 返回 (close + jump back to the village); a job band assigns/unassigns villagers,
-// the press picking BOTH the size and the direction — stepper::deltaFor turns
+// Long-press on a band. param is the band index: the last band (== m_slotCount)
+// is 返回 (close + jump back to the village); a 更多 band advances m_page (the
+// Outside/Trade/Room pager 手法); a job band assigns/unassigns villagers, the
+// press picking BOTH the size and the direction — stepper::deltaFor turns
 // (x,y) into ±1 (fine column, or the name area) or ±10 (coarse column).
 // GameState::assignWorker already TRUNCATES to what is available in either
 // direction (min(delta, idle gatherers) adding, min(delta, workers) removing —
@@ -242,16 +318,23 @@ bool AssignPage::draw(m5gfx::M5Canvas& c) {
 // to add, or already 0 — both magnitudes are equally dead in that direction)
 // low-beeps, the same feedback the ±1-only stepper gave.
 void AssignPage::onLocalAction(uint8_t param, int x, int y) {
-    if ((int)param > m_jobCount) { M5.Speaker.tone(600, 120); return; }
+    if ((int)param > m_slotCount) { M5.Speaker.tone(600, 120); return; }
 
-    if ((int)param == m_jobCount) {                  // 返回 band
+    if ((int)param == m_slotCount) {                 // 返回 band
         assign_page::close();
         M5.Speaker.tone(1800, 80);
         pager::showPage(pager::ringIndexByName("outside"), false);
         return;                                      // navigates away — no tick to double up
     }
 
-    uint8_t job = m_jobs[param];
+    if (m_slotCodes[param] == A_MORE) {              // 更多 band
+        m_page++;
+        M5.Speaker.tone(1800, 80);
+        pager::showPage(pager::currentRingIndex(), false);
+        return;
+    }
+
+    uint8_t job = m_slotCodes[param];
     int before  = (int)g_game.workers[job];
     int bandTop = BAND_TOP + (int)param * (BAND_H + BAND_GAP);
     int delta   = stepper::deltaFor(bandRect(bandTop), x, y);
