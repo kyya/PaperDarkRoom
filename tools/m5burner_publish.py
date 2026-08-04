@@ -280,6 +280,11 @@ def main() -> int:
     check_merged_image(bin_path)
     print(f"[plan] version={version} bin={bin_path} ({bin_path.stat().st_size} bytes)")
 
+    if args.output and os.path.realpath(args.output) == os.path.realpath(bin_path):
+        print(f"[log] --output {args.output} resolves to the same file as --bin {bin_path} — "
+              "refusing, this would truncate the firmware image before upload")
+        return 2
+
     logger = RequestLogger(args.output) if args.output else None
     if logger:
         print(f"[log] HTTP traffic -> {args.output}")
@@ -293,16 +298,27 @@ def main() -> int:
         print(f"[entry] {firmware.get('name')} fid={fid} category={firmware.get('category')} "
               f"versions={existing}")
 
-        if version in existing:
-            print(f"[abort] version {version} already exists on this entry. "
-                  "Bump -DCARD_VERSION / pass a different --tag, or delete it in the GUI.")
-            return 1
+        existing_entry = next(
+            (v for v in firmware.get("versions") or [] if v.get("version") == version), None
+        )
+        if existing_entry is not None:
+            if existing_entry.get("published"):
+                print(f"[abort] version {version} already exists and is published on this "
+                      "entry. Bump -DCARD_VERSION / pass a different --tag, or delete it in "
+                      "the GUI.")
+                return 1
+            print(f"[resume] version {version} was uploaded but never published — skipping "
+                  "upload, retrying publish only")
 
         if args.dry_run:
-            print(f"[dry-run] would upload {bin_path} as version {version}, then publish it")
+            if existing_entry is not None:
+                print(f"[dry-run] would publish existing unpublished version {version}")
+            else:
+                print(f"[dry-run] would upload {bin_path} as version {version}, then publish it")
             return 0
 
-        client.upload_version(firmware, version, bin_path)
+        if existing_entry is None:
+            client.upload_version(firmware, version, bin_path)
         client.publish_version(fid, version)
     except Exception as e:
         print(f"[error] {e}")
