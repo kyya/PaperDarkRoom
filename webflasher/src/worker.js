@@ -13,12 +13,20 @@
  * to be hand-synced after every release, which is exactly the step that got
  * forgotten — a version would exist on GitHub and not on the flasher page.
  *
+ * Caching model: the Worker is the only GitHub client the page ever sees.
+ * /api/firmwares is stale-while-revalidate against a shared edge Cache API
+ * entry (plus an isolate last-good), so page loads read cache and a single
+ * background refresh per isolate spends the optional GITHUB_TOKEN. /fw is
+ * immutable at the edge; the flash path never touches the API at all.
+ *
  * Only `*-merged.bin` is exposed. `*-launcher.bin` is an app-slot image meant to
  * be handed to the on-device Launcher; writing it at 0x0 over USB would brick the
  * boot chain, so it must never show up as a flashable option.
  */
 
 const REPO = "kyya/PaperDarkRoom";
+// per_page=100 is the API maximum; fetchAllReleases() follows Link: rel="next"
+// until every page is in, so a repo past 100 releases still lists every asset.
 const RELEASES_API = `https://api.github.com/repos/${REPO}/releases?per_page=100`;
 
 // Tags are `v<semver>` and assets keep their file name, so a firmware name is
@@ -44,14 +52,16 @@ const VERSION_RE =
 // stay fresh — a short window is enough to blunt refresh storms without hiding
 // a new release for long.
 const IMMUTABLE = "public, max-age=31536000, immutable";
+// Edge "fresh" window. After this the Cache API miss path still serves
+// last-good immediately and revalidates GitHub once in the background (SWR),
+// so page loads never each burn a token request.
 const LISTING_TTL = "public, max-age=300";
-// Served when GitHub could not be reached (see listFirmwares). Deliberately
-// shorter than the fresh listing so the page recovers on the next refresh
-// instead of pinning a stale answer in browser caches for the full window.
+// Browser TTL when we served last-good under SWR (or a true GitHub outage).
+// Short so the next page load can pick up a revalidated edge copy quickly.
 const STALE_TTL = "public, max-age=60";
-// The "last known good" copy behind that fallback. Long, because a week-old
-// listing is only wrong about releases published since — still far better than
-// an empty page.
+// The "last known good" copy behind SWR / outage fallback. Long, because a
+// week-old listing is only wrong about releases published since — still far
+// better than an empty page, and still downloadable entry-by-entry.
 const LAST_GOOD_TTL = "public, max-age=604800";
 // The manifest is derived purely from the file name, but it 404s on a missing
 // asset, so keep it short enough that deleting a release takes effect.
@@ -77,9 +87,10 @@ const notFound = () => new Response("Not found", { status: 404 });
  * other tenant may already have spent. This is not theoretical: the first
  * deploy of this file drew a flat `403 API rate limit exceeded for
  * 172.70.206.73` with `x-ratelimit-remaining: 0`, on a repo we had made zero
- * requests to. That is what the stale fallback in listFirmwares() exists for.
- * If it stops being enough, `wrangler secret put GITHUB_TOKEN` moves the limit
- * to 5000/h against the token instead of the IP, and this picks it up with no
+ * requests to. listFirmwares() therefore never puts GitHub on the page path
+ * once a last-good copy exists (SWR + single-flight refresh). Optional
+ * `wrangler secret put GITHUB_TOKEN` lifts the limit to 5000/h against the
+ * token for those rare cold/revalidate pulls, and this picks it up with no
  * other change.
  */
 const apiHeaders = (env) => {
@@ -161,23 +172,69 @@ const cacheKey = (request, name) =>
   new Request(`${new URL(request.url).origin}/__cache/${name}`);
 
 /**
- * Last successful listing, kept in the isolate.
+ * Last successful listing body (JSON string), kept in the isolate.
  *
- * The `last-good` cache entry is the copy that survives the isolate, and it
+ * The `last-good` Cache API entry is the copy that survives the isolate, and it
  * does work here (put/match verified against this worker on workers.dev). This
  * is just the cheaper first look: one variable, no await, and it still answers
  * in the contexts where the Cache API is documented as a no-op (dashboard
  * editor, playground previews).
+ *
+ * GitHub is never talked to on the page's critical path once either of these
+ * has a copy — see listFirmwares() SWR. The token (if set) is only spent by the
+ * single-flight background refresh, not by each visitor.
  */
 let lastGoodListing = null;
 
+/**
+ * In-flight listing refresh for this isolate. Concurrent /api/firmwares hits
+ * (cold start stampede, or many SWR revalidations) share one GitHub pull so a
+ * burst of page loads cannot multiply token spend.
+ */
+let listingRefresh = null;
+
+/**
+ * Parse the next page URL out of a GitHub Link header, or null if this is the
+ * last page. GitHub's form is:
+ *   <https://api.github.com/...&page=2>; rel="next", <...>; rel="last"
+ */
+const nextPageUrl = (linkHeader) => {
+  if (!linkHeader) return null;
+  for (const part of linkHeader.split(",")) {
+    const m = part.match(/<([^>]+)>\s*;\s*rel="next"/);
+    if (m) return m[1];
+  }
+  return null;
+};
+
+/**
+ * Every release page, in GitHub's order (newest first). Throws on any non-OK
+ * page so listFirmwares can fall back to the last-good copy rather than a
+ * partial listing that silently drops older firmwares.
+ */
+async function fetchAllReleases(env) {
+  const headers = apiHeaders(env);
+  const all = [];
+  let url = RELEASES_API;
+  while (url) {
+    const res = await fetch(url, { headers });
+    if (!res.ok) throw new Error(`GitHub releases API: HTTP ${res.status}`);
+    const page = await res.json();
+    all.push(...page);
+    url = nextPageUrl(res.headers.get("link"));
+  }
+  return all;
+}
+
 async function fetchListing(env) {
-  const res = await fetch(RELEASES_API, { headers: apiHeaders(env) });
-  if (!res.ok) throw new Error(`GitHub releases API: HTTP ${res.status}`);
-  const releases = await res.json();
+  const releases = await fetchAllReleases(env);
 
   const out = [];
   for (const release of releases) {
+    // A token with push access makes the releases endpoint return drafts too.
+    // Their assets show up in the listing, but download URLs (and HEAD) do not
+    // send that token, so every install would 404 — skip them entirely.
+    if (release.draft) continue;
     for (const asset of release.assets ?? []) {
       if (!asset.name.endsWith(MERGED_SUFFIX)) continue;
       const version = parseVersion(asset.name);
@@ -189,6 +246,11 @@ async function fetchListing(env) {
         // Assets are uploaded once and never rewritten, so these agree; prefer
         // updated_at so a re-uploaded asset reports when it actually landed.
         uploaded: asset.updated_at || asset.created_at,
+        // Release name (often "vX.Y.Z — 一句话") and the markdown body the
+        // flasher page renders as 更新日志. Empty string when the release has
+        // none — the page hides the notes block rather than showing a blank.
+        title: release.name || "",
+        notes: (release.body || "").trim(),
       });
     }
   }
@@ -201,6 +263,39 @@ async function fetchListing(env) {
   return JSON.stringify(out);
 }
 
+/**
+ * Pull GitHub once, write both cache tiers, update isolate memory. Shared via
+ * listingRefresh so concurrent callers await the same promise.
+ */
+function kickListingRefresh(env, cache, fresh, lastGood) {
+  if (!listingRefresh) {
+    listingRefresh = (async () => {
+      const body = await fetchListing(env);
+      lastGoodListing = body;
+      // Await puts so a concurrent cold caller that awaits kickListingRefresh
+      // sees the edge cache already warm for the next visitor in this colo.
+      await Promise.all([
+        cache.put(fresh, json(body, LISTING_TTL)),
+        cache.put(lastGood, json(body, LAST_GOOD_TTL)),
+      ]);
+      return body;
+    })().finally(() => {
+      listingRefresh = null;
+    });
+  }
+  return listingRefresh;
+}
+
+/**
+ * Serve the firmware list from the Worker's shared edge cache. GitHub (and the
+ * optional GITHUB_TOKEN) is a single upstream the Worker refreshes — page loads
+ * only ever read the cached copy.
+ *
+ * Flow:
+ *   1. fresh Cache API hit  → return it (no GitHub)
+ *   2. last-good present    → return it now, revalidate GitHub in waitUntil
+ *   3. completely cold      → one single-flight GitHub pull, then cache + return
+ */
 async function listFirmwares(request, env, ctx) {
   const cache = caches.default;
   const fresh = cacheKey(request, "firmwares");
@@ -209,22 +304,35 @@ async function listFirmwares(request, env, ctx) {
   const hit = await cache.match(fresh);
   if (hit) return hit;
 
+  // Prefer any last-good over a synchronous GitHub round-trip. Concurrent users
+  // after the fresh window expires share one background refresh instead of each
+  // spending a token request on the critical path.
+  let stale = lastGoodListing;
+  if (stale == null) {
+    const cached = await cache.match(lastGood);
+    if (cached) {
+      stale = await cached.text();
+      lastGoodListing = stale;
+    }
+  }
+
+  if (stale != null) {
+    ctx.waitUntil(
+      kickListingRefresh(env, cache, fresh, lastGood).catch(() => {
+        // Leave last-good as-is; next SWR window will try again.
+      }),
+    );
+    return json(stale, STALE_TTL, { "x-firmwares-swr": "1" });
+  }
+
+  // Completely cold colo: must hit GitHub once. Single-flight so a burst of
+  // first visitors shares that one request (and one token spend).
   try {
-    const body = await fetchListing(env);
-    lastGoodListing = body;
-    ctx.waitUntil(cache.put(fresh, json(body, LISTING_TTL)));
-    ctx.waitUntil(cache.put(lastGood, json(body, LAST_GOOD_TTL)));
+    const body = await kickListingRefresh(env, cache, fresh, lastGood);
     return json(body, LISTING_TTL);
   } catch (err) {
-    // Rate limit, GitHub 5xx, network blip: serve the last good listing rather
-    // than an error page. A slightly old list of firmwares still flashes fine —
-    // every entry in it is still downloadable.
-    const stale =
-      lastGoodListing ?? (await cache.match(lastGood).then((r) => r?.text()));
-    if (stale) return json(stale, STALE_TTL, { "x-firmwares-stale": "1" });
-    // Nothing to fall back on: a cold isolate that has never seen a good
-    // listing. Say so rather than serve an empty list, which the page would
-    // render as "暂无可刷入的固件".
+    // Nothing to fall back on. Say so rather than serve an empty list, which
+    // the page would render as "暂无可刷入的固件".
     return new Response(JSON.stringify({ error: String(err) }), {
       status: 502,
       headers: {
@@ -293,6 +401,11 @@ async function serveFirmware(request, ctx, key) {
  * Does this exact asset exist on its release? One HEAD, briefly remembered —
  * ESP Web Tools fetches the manifest on every install click, and the answer
  * only changes when a release is published or pulled.
+ *
+ * Returns true / false for an authoritative answer, or null when GitHub
+ * flaked (403 / 429 / 5xx / network). Only 200 and 404 are cached: a transient
+ * failure must not be remembered as "missing" for the full EXISTS_TTL, or the
+ * whole colo stops installs for five minutes on a rate-limit blip.
  */
 async function firmwareExists(request, ctx, version, key) {
   const cache = caches.default;
@@ -301,19 +414,30 @@ async function firmwareExists(request, ctx, version, key) {
   const hit = await cache.match(marker);
   if (hit) return (await hit.text()) === "1";
 
-  const head = await fetch(downloadUrl(version, key), {
-    method: "HEAD",
-    headers: { "user-agent": UA },
-  });
-  ctx.waitUntil(
-    cache.put(
-      marker,
-      new Response(head.ok ? "1" : "0", {
-        headers: { "cache-control": EXISTS_TTL },
-      }),
-    ),
-  );
-  return head.ok;
+  let head;
+  try {
+    head = await fetch(downloadUrl(version, key), {
+      method: "HEAD",
+      headers: { "user-agent": UA },
+    });
+  } catch {
+    return null;
+  }
+
+  if (head.ok || head.status === 404) {
+    ctx.waitUntil(
+      cache.put(
+        marker,
+        new Response(head.ok ? "1" : "0", {
+          headers: { "cache-control": EXISTS_TTL },
+        }),
+      ),
+    );
+    return head.ok;
+  }
+
+  // Rate limit, 5xx, unexpected status: do not cache, let the caller 502.
+  return null;
 }
 
 async function serveManifest(request, ctx, name) {
@@ -323,7 +447,11 @@ async function serveManifest(request, ctx, name) {
   if (!version) return notFound();
   if (key.includes("/")) return notFound();
 
-  if (!(await firmwareExists(request, ctx, version, key))) return notFound();
+  const exists = await firmwareExists(request, ctx, version, key);
+  if (exists === null) {
+    return new Response("Upstream error", { status: 502 });
+  }
+  if (!exists) return notFound();
 
   return json(
     {
