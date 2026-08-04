@@ -12,3 +12,7 @@ __pycache__/
 *.log
 *.tmp
 dist/
+
+# Private vendored dependency, not distributed with this repo — see the
+# note at the top of platformio.ini.
+lib/msg/
