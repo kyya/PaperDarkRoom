@@ -205,18 +205,34 @@
         border-left-color: var(--hot);
         background: color-mix(in srgb, var(--fg) 6%, transparent);
       }
+      /* Newest release: always lit, inverted 「最新」chip — the one marker the
+         list needs to read at a glance, same hard-edge ink as fieldset frames. */
+      .fw-item.is-latest {
+        color: var(--hot);
+      }
+      .fw-item.is-latest:not(.is-selected) {
+        border-left-color: var(--dim);
+      }
       .fw-item .ver {
         display: block;
         letter-spacing: 0.04em;
       }
-      .fw-item .tag {
-        display: inline-block;
-        margin-left: 6px;
-        color: var(--dim);
-        font-size: 11px;
-        letter-spacing: 0.12em;
+      .fw-item.is-latest .ver {
+        font-size: 15px;
+        letter-spacing: 0.06em;
       }
-      .fw-item.is-selected .tag { color: var(--hot); opacity: 0.7; }
+      .tag-latest {
+        display: inline-block;
+        margin-left: 8px;
+        padding: 0 6px;
+        font-size: 11px;
+        line-height: 1.55;
+        letter-spacing: 0.18em;
+        color: var(--bg);
+        background: var(--hot);
+        border: 1px solid var(--hot);
+        vertical-align: 1px;
+      }
       .fw-item .blurb {
         display: block;
         margin-top: 2px;
@@ -227,7 +243,8 @@
         overflow: hidden;
         text-overflow: ellipsis;
       }
-      .fw-item.is-selected .blurb { color: var(--fg); opacity: 0.85; }
+      .fw-item.is-selected .blurb,
+      .fw-item.is-latest .blurb { color: var(--fg); opacity: 0.9; }
 
       .fw-detail {
         display: flex;
@@ -249,6 +266,10 @@
         font-size: 15px;
         letter-spacing: 0.08em;
       }
+      .fw-detail-head.is-latest .ver {
+        font-size: 17px;
+        letter-spacing: 0.1em;
+      }
       .fw-detail-head .title {
         display: block;
         margin-top: 2px;
@@ -260,6 +281,11 @@
         margin-top: 4px;
         color: var(--dim);
         font-size: 12px;
+      }
+      .fw-detail-head .meta .tag-latest {
+        margin-left: 0;
+        margin-right: 8px;
+        vertical-align: baseline;
       }
       .fw-detail-head .act { margin-left: auto; align-self: center; }
       button.flash {
@@ -744,7 +770,7 @@
 
       function paintDetail(panel, fw, index) {
         const head = document.createElement("div");
-        head.className = "fw-detail-head";
+        head.className = "fw-detail-head" + (index === 0 ? " is-latest" : "");
 
         const info = document.createElement("div");
         info.className = "info";
@@ -752,6 +778,12 @@
         const ver = document.createElement("span");
         ver.className = "ver";
         ver.textContent = "v" + fw.version;
+        if (index === 0) {
+          const tag = document.createElement("span");
+          tag.className = "tag-latest";
+          tag.textContent = "最新";
+          ver.append(tag);
+        }
         info.append(ver);
 
         const subtitle = shortTitle(fw.title, fw.version);
@@ -765,10 +797,7 @@
         const meta = document.createElement("span");
         meta.className = "meta";
         meta.textContent =
-          fmtSize(fw.size) +
-          " · " +
-          fw.uploaded.slice(0, 10) +
-          (index === 0 ? " · 最新" : "");
+          fmtSize(fw.size) + " · " + fw.uploaded.slice(0, 10);
         info.append(meta);
 
         head.append(info, buildFlashAction(fw));
@@ -806,7 +835,7 @@
         const items = firmwares.map((fw, i) => {
           const item = document.createElement("button");
           item.type = "button";
-          item.className = "fw-item";
+          item.className = "fw-item" + (i === 0 ? " is-latest" : "");
           item.setAttribute("role", "option");
           item.setAttribute("aria-selected", "false");
           item.dataset.index = String(i);
@@ -816,7 +845,7 @@
           ver.textContent = "v" + fw.version;
           if (i === 0) {
             const tag = document.createElement("span");
-            tag.className = "tag";
+            tag.className = "tag-latest";
             tag.textContent = "最新";
             ver.append(tag);
           }
