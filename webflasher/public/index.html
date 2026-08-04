@@ -60,6 +60,45 @@
         :root:not([data-theme]) { color-scheme: light; }
       }
       html, body { margin: 0; background: var(--bg); color: var(--fg); }
+
+      /*
+       * Scrollbars in A Dark Room's voice: thin, square, no chrome, no arrows.
+       * Firefox: scrollbar-width / scrollbar-color. Chromium/WebKit: the
+       * ::-webkit-scrollbar pseudo suite. Both read the same CSS vars so dark
+       * and e-ink themes stay aligned with the page ink.
+       */
+      * {
+        scrollbar-width: thin;
+        scrollbar-color: var(--dim) var(--bg);
+      }
+      *::-webkit-scrollbar {
+        width: 5px;
+        height: 5px;
+        background: transparent;
+      }
+      *::-webkit-scrollbar-track {
+        background: transparent;
+      }
+      *::-webkit-scrollbar-thumb {
+        /* Solid ink bar, hard corners — same vocabulary as fieldset borders. */
+        background: var(--dim);
+        border: 0;
+        border-radius: 0;
+      }
+      *::-webkit-scrollbar-thumb:hover {
+        background: var(--fg);
+      }
+      *::-webkit-scrollbar-thumb:active {
+        background: var(--hot);
+      }
+      *::-webkit-scrollbar-corner {
+        background: transparent;
+      }
+      *::-webkit-scrollbar-button {
+        display: none;
+        width: 0;
+        height: 0;
+      }
       body {
         font-family: "SFMono-Regular", Menlo, Consolas, "DejaVu Sans Mono",
           "Noto Sans Mono CJK SC", "Microsoft YaHei", monospace;
