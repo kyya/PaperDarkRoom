@@ -298,8 +298,10 @@ function kickListingRefresh(env, cache, fresh, lastGood) {
  */
 async function listFirmwares(request, env, ctx) {
   const cache = caches.default;
-  const fresh = cacheKey(request, "firmwares");
-  const lastGood = cacheKey(request, "firmwares-last-good");
+  // v2: listing payload gained title/notes; old last-good entries lack them and
+  // would keep serving empty changelogs for LAST_GOOD_TTL after a deploy.
+  const fresh = cacheKey(request, "firmwares-v2");
+  const lastGood = cacheKey(request, "firmwares-v2-last-good");
 
   const hit = await cache.match(fresh);
   if (hit) return hit;
