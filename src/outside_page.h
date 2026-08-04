@@ -46,7 +46,7 @@ public:
     bool available() const override;   // outsideUnlocked (see outside_page.cpp)
     const pages::Region* regions(int* n) const override;
     void onLocalAction(uint8_t param, int x, int y) override;  // action row: x picks the verb column; or a 库存 box tap (next batch)
-    pages::Rect pressRect(const pages::Region& rg, int x, int y) const override;  // exact verb cell, or the whole 库存 box
+    pages::Rect pressRect(const pages::Region& rg, int x, int y) const override;  // exact verb cell; empty (no flash) for the 库存 box
     void tick(uint32_t nowMs) override;
     // wantsAwake stays false: the economy accrues offline via settle() on wake.
 

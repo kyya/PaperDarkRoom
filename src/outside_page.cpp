@@ -545,6 +545,18 @@ void drawInventory(m5gfx::M5Canvas& c, const Layout& L, int page) {
     }
 }
 
+// Everything drawInventory paints, as one rect: the fieldset frame PLUS the
+// legend straddling its top border (drawn GLYPH/2 above invBoxY0), with a 2px
+// bleed all round. The clear-and-repaint target for a page turn (onLocalAction)
+// — safe to fill white because nothing else lives in this band: the box above
+// ends FS_BOX_GAP=12px higher (the bleed spends 2 of those) and the action grid
+// starts >=26px lower (the exhaustive clearance in the budget note above).
+pages::Rect invBoxRect(const Layout& L) {
+    int top = L.invBoxY0 - GLYPH / 2 - 2;
+    return pages::Rect{ FS_BOX_X0 - 2, top,
+                        (FS_BOX_X1 - FS_BOX_X0) + 5, (L.invBoxY1 - top) + 3 };
+}
+
 // Fill the packed cell list + one CellView per cell, and the region table (one
 // y-band per ROW — the pager hit-tests y only, so onLocalAction resolves the
 // COLUMN from the press x, exactly the model RoomPage's two-column grid uses).
@@ -724,15 +736,16 @@ const pages::Region* OutsidePage::regions(int* n) const {
 // (the odd trailing half when the cell count is odd) returns w=0, so the empty
 // half never flashes black. There is no per-cell gating left to mirror here:
 // gated-off cells are absent from the packing entirely rather than drawn blank.
-// The 库存 box's own region (param==INV_REGION_PARAM) flashes its WHOLE drawn
-// frame — x/y don't pick a sub-cell there, the tap target is the entire
-// fieldset — using the region's own y0/y1 (== L.invBoxY0/Y1 the draw used) and
-// the shared fieldset x-span (FS_BOX_X0..FS_BOX_X1), so this never has to
-// recompute the layout just to know its own rect.
+// The 库存 box's own region (param==INV_REGION_PARAM) never flashes: w=0, the
+// same "don't flash" signal world_page uses for a map step. It used to invert
+// its WHOLE frame, and a reverse-video blink across a box that big read as the
+// entire region reloading rather than as a button press (user, 真机验收 of the
+// 库存分页 pass: "点击后整个区域反色重刷,不友好"). The press still beeps and the
+// batch swap repaints the box a few ms later, which is feedback enough.
 pages::Rect OutsidePage::pressRect(const pages::Region& rg, int x, int y) const {
     (void)y;
     if (rg.param == INV_REGION_PARAM)
-        return pages::Rect{ FS_BOX_X0, rg.y0, FS_BOX_X1 - FS_BOX_X0, rg.y1 - rg.y0 };
+        return pages::Rect{ FS_BOX_X0, rg.y0, 0, 0 };
     int slot = (int)rg.param * ACT_COLS + (x < ACT_DIV ? 0 : 1);
     if (slot < 0 || slot >= m_slotCount) return pages::Rect{ 0, rg.y0, 0, 0 };
     return actCellRect(slot, m_areaTop);
@@ -778,15 +791,32 @@ bool OutsidePage::draw(m5gfx::M5Canvas& c) {
 // 科技树/分工/尘土之路 latch their sub-page and jump to it by name. A success
 // high-beeps + persists + repaints; a rejected press or an empty trailing half
 // low-beeps. A press on the 库存 box itself (param==INV_REGION_PARAM) advances
-// to the next batch — same beep + showPage + re-baseline shape as a successful
-// action below, mirroring Trade's "更多" band (trade_page.cpp).
+// to the next batch — same beep and same tick re-baseline as a successful action
+// below, but it repaints the BOX ONLY instead of the page.
 void OutsidePage::onLocalAction(uint8_t param, int x, int y) {
     (void)y;
     if (param == INV_REGION_PARAM) {
         m_invPage++;                   // drawInventory() wraps this to the live batch count
         M5.Speaker.tone(1800, 80);
-        pager::showPage(pager::currentRingIndex(), false);
-        m_lastSig = contentSig(m_invPage);   // no second full redraw next tick
+        // Local repaint (真机验收: a whole-page redraw for a page turn read as
+        // "the whole screen reloaded"). Turning the batch cannot move a pixel
+        // outside this box: every other block is UPSTREAM of it in the flow, and
+        // the box's own geometry follows the entry COUNT (invNonZeroCount), which
+        // a page turn doesn't touch — so its y0/y1, and the region table built
+        // from them, stay exactly as drawn. Clear the band, repaint just this
+        // fieldset into the canvas, push that rect FASTEST — the same shape
+        // world_page uses per step and tick() uses for a draining cooldown. The
+        // ghost that FASTEST leaves is charged to the debt pager::payGhostDebtIfDue
+        // settles at sleep entry (partialRefresh bumps the same counter a page
+        // push would have), so this trades no ghosting policy for the quieter
+        // update. pressRect returns w=0 for this region, so there is no press
+        // flash to rebound either.
+        Layout L = computeLayout();
+        pages::Rect box = invBoxRect(L);
+        canvas.fillRect(box.x, box.y, box.w, box.h, TFT_WHITE);
+        drawInventory(canvas, L, m_invPage);
+        pager::partialRefresh(box, pages::RefreshMode::FASTEST);
+        m_lastSig = contentSig(m_invPage);   // no full redraw next tick
         return;
     }
     int slot = (int)param * ACT_COLS + (x < ACT_DIV ? 0 : 1);
