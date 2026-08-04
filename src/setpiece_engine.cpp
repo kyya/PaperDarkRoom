@@ -43,6 +43,10 @@ void applyEffect(uint8_t effect) {
         case SPE_CLEAR_SULPHUR: s_w->clearMine(s_w->ex.x, s_w->ex.y, T_SULPHUR_MINE); break;
         case SPE_CLEAR_SHIP:    s_w->clearMine(s_w->ex.x, s_w->ex.y, T_SHIP); break;
         case SPE_GRANT_GASTRONOME: s_w->spGrantGastronome(*s_gs); break;
+        // executioner.js:1349 calls World.applyMap() three times in one onChoose.
+        case SPE_REVEAL_MAP3:
+            for (int i = 0; i < 3; i++) s_w->spApplyMap();
+            break;
         default: break;
     }
 }
@@ -78,13 +82,20 @@ void bind(WorldState* world, GameState* gs) {
     s_def = nullptr; s_spId = SP_NONE;
 }
 
-bool begin(uint8_t setpieceId) {
+bool beginTable(const SpDef* def) {
     if (!s_w || !s_gs) return false;
-    if (!setpieceExists(setpieceId)) return false;
-    s_spId = setpieceId;
-    s_def  = &SETPIECES[setpieceId];
+    if (!def || !def->scenes || def->sceneN == 0) return false;
+    s_spId = SP_NONE;                 // a raw table has no SetpieceId identity
+    s_def  = def;
     s_active = true;
     loadScene(0);
+    return true;
+}
+
+bool begin(uint8_t setpieceId) {
+    if (!setpieceExists(setpieceId)) return false;
+    if (!beginTable(&SETPIECES[setpieceId])) return false;
+    s_spId = setpieceId;
     return true;
 }
 
@@ -132,7 +143,12 @@ bool btnAvailable(int localBtn) {
     const SpScene* sc = cur();
     if (!sc || localBtn < 0 || localBtn >= sc->btnCount) return false;
     const SpButton& b = s_def->btns[sc->btnStart + localBtn];
-    if (b.costSlot == SP_NO_COST) return true;
+    if (b.costSlot == SP_NO_COST)    return true;
+    if (b.costSlot == SP_COST_WATER) return s_w->ex.water >= b.costAmt;
+    // Strictly greater, not >=: an HP price may never be the thing that kills you.
+    // (Whether a 0-HP-margin player is then SOFT-LOCKED in a wing with no other
+    // exit is a content question for 3c-2, once the real scene graph exists.)
+    if (b.costSlot == SP_COST_HP)    return s_w->ex.hp > b.costAmt;
     return b.costIsItem ? s_w->ex.outfitItem[b.costSlot] > 0
                         : s_w->ex.outfitRes[b.costSlot] > 0;
 }
@@ -174,8 +190,15 @@ Result choose(int localBtn) {
     if (localBtn < 0 || localBtn >= sc->btnCount) return RC_ERR_INVALID;
     const SpButton& b = s_def->btns[sc->btnStart + localBtn];
 
-    // Pay the cost (single unit, from the bag).
-    if (b.costSlot != SP_NO_COST) {
+    // Pay the cost: a single unit from the bag, or (Executioner) an amount of the
+    // expedition's own water / blood. Same affordability rule as btnAvailable.
+    if (b.costSlot == SP_COST_WATER) {
+        if (s_w->ex.water < b.costAmt) return RC_ERR_COST;
+        s_w->ex.water -= b.costAmt;
+    } else if (b.costSlot == SP_COST_HP) {
+        if (s_w->ex.hp <= b.costAmt) return RC_ERR_COST;
+        s_w->ex.hp -= b.costAmt;
+    } else if (b.costSlot != SP_NO_COST) {
         if (b.costIsItem) {
             if (s_w->ex.outfitItem[b.costSlot] <= 0) return RC_ERR_COST;
             s_w->ex.outfitItem[b.costSlot]--;
@@ -187,6 +210,14 @@ Result choose(int localBtn) {
 
     uint8_t nxt = b.next;
     if (nxt == SP_SCENE_END) { end(); return RC_OK; }
+    // events.js switchEvent: tear this setpiece down and open the target one. The
+    // World/expedition state is deliberately untouched — the front hall and its
+    // four wings are one continuous trip through the same ship.
+    if (nxt == SP_SCENE_EVENT) {
+        uint8_t target = b.probStart;
+        end();
+        return begin(target) ? RC_OK : RC_ERR_INVALID;
+    }
     if (nxt == SP_SCENE_PROB) {
         int r = s_w->spRand1000();
         nxt = s_def->probs[b.probStart + b.probCount - 1].scene;   // fallback: last

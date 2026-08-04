@@ -18,20 +18,22 @@
 //    world_data.h's permille model, so combat reproduces bit-for-bit on host and
 //    device (no cross-platform float drift).
 //  * The upstream real-time loop (enemy setInterval(attackDelay*1000), per-weapon
-//    cooldown seconds) is discretised to a 1s tick (fight_modal drives it). ALL
-//    §4 values are already whole seconds — there are NO sub-second gameplay
-//    numbers to round: _FIGHT_SPEED (100ms) is animation-only and is dropped in
-//    the discrete model; STUN_DURATION (4000ms) is exactly 4s. So the discrete
-//    port reproduces the second-scale numbers verbatim.
+//    cooldown seconds) is discretised to a 1s tick (fight_modal drives it). Every
+//    Phase-2 §4 value is already a whole second, so those are verbatim:
+//    _FIGHT_SPEED (100ms) is animation-only and is dropped in the discrete model;
+//    STUN_DURATION (4000ms) is exactly 4s. The Phase-3 Executioner is the first
+//    content with SUB-second numbers (attackDelay 0.25 / 0.5 / 2.5s), and those
+//    fold to a DPS-equivalent whole-second pair — see foldAttack below.
 //  * Loot count draw (events.js drawLoot): on a chance hit, num =
 //    floor(rand01*(max-min)) + min — range [min, max-1] when max>min, exactly min
 //    when max==min (upstream still consumes one random even then; we mirror that,
 //    see world_state.cpp rollLoot). This is why e.g. "bullets 1-5" yields 1..4.
-//  * Phase 2 scope: random encounters only (§4.8 — these have NO upstream flee;
-//    fight_modal adds a "leave" affordance for the slow e-ink panel, see the
-//    fightFlee note in world_state). Setpiece combat (2.4) and the Phase-3
-//    weapons (plasma rifle / energy blade / disruptor) / heals (hypo / boost /
-//    shield) are out of scope and omitted here.
+//  * Random encounters have NO upstream flee (§4.8); fight_modal adds a "leave"
+//    affordance for the slow e-ink panel — see the fightFlee note in world_state.
+//  * Phase 3c (docs/research-phase3.md §3.3 / §10.4) adds the Executioner status
+//    system on top: six statuses, periodic scene `specials`, an `atHealth` blood
+//    line, death `explosion`, the three late weapons, and the hypo/stim/shield
+//    player actions. All of it is appended — nothing above it changed value.
 #pragma once
 #include <stdint.h>
 #include "game_data.h"    // Res/Item enums, RES_KEY/ITEM_KEY, R_*/I_*
@@ -45,6 +47,82 @@ namespace adr {
 constexpr int FIGHT_EAT_COOLDOWN_S  = 5;   // events.js _EAT_COOLDOWN
 constexpr int FIGHT_MEDS_COOLDOWN_S = 7;   // events.js _MEDS_COOLDOWN
 constexpr int FIGHT_STUN_S          = 4;   // events.js STUN_DURATION 4000ms -> 4s
+
+// ---- Phase 3c: the Executioner status system (events.js:15-22) -------------
+// Every upstream millisecond duration divides evenly by the port's 1s tick
+// (docs/research-phase3.md §10.4), so these are exact, not rounded.
+constexpr int FIGHT_HYPO_COOLDOWN_S   = 7;    // events.js _HYPO_COOLDOWN
+constexpr int FIGHT_STIM_COOLDOWN_S   = 10;   // events.js _STIM_COOLDOWN
+constexpr int FIGHT_SHIELD_COOLDOWN_S = 10;   // events.js _SHIELD_COOLDOWN
+constexpr int ENRAGE_TICKS    = 4;    // ENRAGE_DURATION   4000ms
+constexpr int MEDITATE_TICKS  = 5;    // MEDITATE_DURATION 5000ms
+constexpr int BOOST_TICKS     = 3;    // BOOST_DURATION    3000ms
+constexpr int EXPLOSION_TICKS = 3;    // EXPLOSION_DURATION 3000ms (self-destruct wind-up)
+constexpr int ENERGISE_MULT   = 4;    // ENERGISE_MULTIPLIER
+constexpr int BOOST_DAMAGE    = 10;   // BOOST_DAMAGE — the stim's self-harm
+// PORT DECISION (docs/research-phase3.md §12 Q7): upstream's `boost` sets a status
+// and the self-harm but never reads it back in damage() — the `boosted:` callback
+// is Button-layer visuals only, so the stim has NO upstream gameplay payoff to
+// port. We define one: weapon damage x2 for BOOST_TICKS. (The same ruling also
+// makes useStim SPEND a stim, which upstream forgets to do.)
+constexpr int BOOST_MULT      = 2;
+// ENRAGE forces attackDelay to 0.5s upstream; the 1s tick floors that at 1 (§10.4).
+constexpr int ENRAGED_DELAY_S = 1;
+// A status/DoT with no upstream timer: it runs until something clears it (shield
+// breaks on the next hit, energised is spent on the next hit, venomous rides the
+// attacker for the whole fight). Distinct from a 0 counter, which means "expired".
+constexpr uint8_t STATUS_FOREVER = 0xFF;
+
+// The six statuses (events.js setStatus). A fighter carries at most one.
+enum CombatStatus : uint8_t {
+    ST_NONE = 0,
+    ST_SHIELD,       // next incoming hit HEALS instead of hurting, then breaks
+    ST_ENRAGED,      // enemy only: attack interval forced to ENRAGED_DELAY_S
+    ST_ENERGISED,    // next outgoing hit deals ENERGISE_MULT x damage, then clears
+    ST_VENOMOUS,     // landed hits hang a damage-over-time on the target
+    ST_MEDITATION,   // absorbs all damage into meditateAccum, reflects it in one go
+    ST_BOOST,        // player only: BOOST_MULT weapon damage (see BOOST_MULT above)
+};
+
+// What a scene's `specials` entry inflicts (events.js:161-171 — a periodic
+// `{delay, action}` that re-fires for the whole fight, not a one-shot).
+enum SpecialKind : uint8_t {
+    SK_NONE = 0, SK_SHIELD, SK_ENRAGED, SK_ENERGISED, SK_MEDITATION,
+    SK_RANDOM3,      // command-deck boss: one of shield/enraged/meditation, never
+                     // the same one twice in a row (upstream's lastSpecial memory)
+};
+
+// ---- sub-second attackDelay folding (docs/research-phase3.md §10.4) --------
+// The Executioner ships enemies with `attackDelay` below the port's 1s tick
+// (chitinous horror/queen at 0.25s, and `enraged` at 0.5s), which a discrete
+// 1s loop cannot express. Fold them to the DPS-equivalent whole-second pair:
+//   delayS  = max(1, round(delayCS/100))
+//   damage  = round(dmg * delayS * 100 / delayCS)
+// so `1 dmg every 0.25s` becomes `4 dmg every 1s` — same expected DPS, higher
+// variance (the accepted cost, §12 Q15). Data rows keep the UPSTREAM numbers in
+// attackDelayCS + damage and the engine folds at arm time, so the tables stay
+// diffable against upstream. Invariant on a data row: attackDelayCS != 0
+// (sub-second form) <=> attackDelayS == 0.
+struct AttackFold { int16_t damage, delayS; };
+inline AttackFold foldAttack(int dmg, int delayCS) {
+    if (delayCS <= 0) return { (int16_t)dmg, (int16_t)1 };
+    int delayS = (delayCS + 50) / 100;               // round to whole seconds
+    if (delayS < 1) delayS = 1;                      // never faster than one tick
+    int damage = (dmg * delayS * 100 + delayCS / 2) / delayCS;
+    return { (int16_t)damage, (int16_t)delayS };
+}
+
+// Double-entry fold table: the three cases §10.4 works out by hand, transcribed a
+// SECOND time so tools/mechanics_test.cpp can diff foldAttack against them (the
+// same guard-rail layer-1 already puts on the weapon/enemy tables).
+struct SubsecondFold { int16_t dmg, delayCS, expDamage, expDelayS; const char* who; };
+static const SubsecondFold SUBSECOND_FOLDS[] = {
+    {  1,  25,  4, 1, "chitinous horror / queen (executioner-intro 3-1 / 4-1)" },
+    { 10, 250, 12, 3, "automated turret (executioner-intro 6)" },
+    {  6,  50, 12, 1, "enraged: attackDelay 0.5 -> damage x2 on a 1s tick" },
+};
+constexpr int SUBSECOND_FOLD_ROWS =
+    (int)(sizeof(SUBSECOND_FOLDS) / sizeof(SUBSECOND_FOLDS[0]));
 
 // Distance tiers (encounters.js isAvailable, Manhattan getDistance): T1 d<=10,
 // T2 10<d<=20, T3 d>20. No module-level constant upstream — hardcoded per
@@ -75,6 +153,10 @@ struct WeaponDef {
 enum WeaponId : uint8_t {
     WEAPON_FISTS = 0, WEAPON_BONE_SPEAR, WEAPON_IRON_SWORD, WEAPON_STEEL_SWORD,
     WEAPON_BAYONET, WEAPON_RIFLE, WEAPON_LASER_RIFLE, WEAPON_GRENADE, WEAPON_BOLAS,
+    // -- Phase 3c (world.js World.Weapons tail; §4.3). The disruptor is a bolas
+    // that does NOT spend itself — a strictly better stun, which is the point of
+    // it being a Fabricator/Executioner reward.
+    WEAPON_PLASMA_RIFLE, WEAPON_ENERGY_BLADE, WEAPON_DISRUPTOR,
     WEAPON_COUNT
 };
 static const WeaponDef WEAPONS[WEAPON_COUNT] = {
@@ -87,6 +169,9 @@ static const WeaponDef WEAPONS[WEAPON_COUNT] = {
     { "laser rifle", "blast",   8,  1, I_LASER_RIFLE, R_ENERGY_CELL, false },
     { "grenade",     "lob",    15,  5, I_GRENADE,     RES_NONE,      true  },
     { "bolas",       "tangle", DMG_STUN, 15, I_BOLAS,  RES_NONE,     true  },
+    { "plasma rifle","disintegrate", 12, 1, I_PLASMA_RIFLE, R_ENERGY_CELL, false },
+    { "energy blade","slice",  10,  2, I_ENERGY_BLADE, RES_NONE,     false },
+    { "disruptor",   "stun",   DMG_STUN, 15, I_DISRUPTOR, RES_NONE,  false },
 };
 
 // ---- Loot (encounters.js loot tables, drawLoot) ---------------------------
@@ -137,6 +222,18 @@ struct SetpieceEnemy {
     bool        ranged;
     LootDrop    loot[SP_ENEMY_LOOT_MAX];   // banked on victory (rollLoot)
     int         lootN;
+    // ---- Phase 3c scene mechanics (all APPENDED, all zero == "absent"), so the
+    // Phase-2 rows above stay byte-for-byte unedited and aggregate-init the new
+    // fields to the inert value. -------------------------------------------------
+    int16_t     attackDelayCS; // upstream sub-second attackDelay, centiseconds. 0 =
+                               // use attackDelayS verbatim. Non-zero REQUIRES
+                               // attackDelayS == 0 (foldAttack owns the conversion).
+    uint8_t     specialKind;   // SpecialKind periodically inflicted on this enemy
+    int16_t     specialDelayS; // its period, in ticks (events.js specials[].delay)
+    int16_t     atHealthThreshold;  // events.js atHealth key; 0 = no blood-line trigger
+    uint8_t     atHealthStatus;     // CombatStatus applied when a hit crosses it
+    int16_t     explosionDamage;    // events.js explosion: EXPLOSION_TICKS of wind-up
+                                    // on death, then this much damage. 0 = dies clean.
 };
 
 // Stable ids (tests + STEP_FIGHT scene payload). Order = tier 1, 2, 3.

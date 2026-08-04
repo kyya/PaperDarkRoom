@@ -1152,6 +1152,743 @@ static void layer5_space_save() {
 }
 
 // ===========================================================================
+// Layer 6 — the Executioner combat mechanics (Phase 3c-1)
+//
+// docs/research-phase3.md §3.3 lists six statuses, a periodic scene `specials`
+// hook, an `atHealth` blood line and a death `explosion`; §10.4 pins how each maps
+// onto the port's 1s tick. Every mechanic below gets the same three shapes the 3c-1
+// brief asks for — it TRIGGERS, it CLEARS, and its BOUNDARY behaves — driven off a
+// throwaway SetpieceEnemy rather than any shipped table, so none of this depends on
+// the Executioner data landing (3c-2).
+// ===========================================================================
+
+// A bare battlefield: a live expedition parked on plain terrain with a known rng,
+// so combat rolls are reproducible. Mirrors world_smoke's `plant`.
+static void plantEx(WorldState& w, GameState& gs, int hp, uint32_t rng) {
+    gs.init();
+    w.init();
+    w.generateMap(0x3C1A11);
+    gs.stores[R_CURED_MEAT] = 5 * FP;
+    int16_t out[RES_COUNT] = { 0 }; out[R_CURED_MEAT] = 5;
+    w.embark(gs, out, nullptr, rng);
+    w.ex.maxHp = (int16_t)hp; w.ex.hp = (int16_t)hp;
+}
+
+// A setpiece enemy that never lands a blow on its own (hitPM 0, delay huge), so a
+// test only sees the mechanic it is actually exercising. Callers overwrite the
+// mechanic fields they care about.
+static SetpieceEnemy inertEnemy(int health, int damage) {
+    SetpieceEnemy e{};
+    e.chara = 'Z'; e.notif = "a test construct";
+    e.health = (int16_t)health; e.damage = (int16_t)damage;
+    e.hitPM = 1000; e.attackDelayS = 999; e.ranged = false;
+    e.lootN = 0;
+    return e;
+}
+
+// Swing weapon slot 0 until one CONNECTS, ignoring the cooldown. Both the cooldown
+// and the 0.8 base hit chance are already covered by their own tests; retrying here
+// is what makes "one landed hit does exactly X" assertable without pinning an rng
+// stream. Returns the status of the landing swing (or the rejection that stopped it).
+static uint8_t swing(WorldState& w, GameState& gs) {
+    uint8_t st = FIGHT_NOOP;
+    for (int guard = 0; guard < 200; guard++) {
+        w.cx.weaponCool[0] = 0;
+        st = w.fightAttack(gs, 0);
+        if (st == FIGHT_NOOP || !w.cx.lastMiss) break;
+    }
+    return st;
+}
+
+static void layer6_fold() {
+    printf("== [L6] sub-second attackDelay folds to a DPS-equivalent tick ==\n");
+    for (int i = 0; i < SUBSECOND_FOLD_ROWS; i++) {
+        const SubsecondFold& f = SUBSECOND_FOLDS[i];
+        AttackFold got = foldAttack(f.dmg, f.delayCS);
+        char msg[160];
+        snprintf(msg, sizeof msg, "fold(%d dmg / %d cs) = %d dmg / %d s — %s",
+                 f.dmg, f.delayCS, (int)got.damage, (int)got.delayS, f.who);
+        CHECK(got.damage == f.expDamage && got.delayS == f.expDelayS, msg);
+    }
+    // The general 0.5s rule the enraged status rides on: damage doubles, delay 1.
+    bool halfSecOk = true;
+    for (int d = 1; d <= 20; d++) {
+        AttackFold f = foldAttack(d, 50);
+        if (f.delayS != 1 || f.damage != 2 * d) halfSecOk = false;
+    }
+    CHECK(halfSecOk, "attackDelay 0.5s folds to (2 x damage, 1 tick) for every damage");
+    // A whole-second delay is a no-op fold (the invariant that lets a data row
+    // express EITHER form without the engine double-converting).
+    CHECK(foldAttack(7, 100).damage == 7 && foldAttack(7, 100).delayS == 1,
+          "a 1.00s delay folds to itself");
+    CHECK(foldAttack(9, 0).delayS == 1, "a zero delay degrades to one tick, not a div-by-0");
+
+    // The engine arms the folded pair, and the data row keeps upstream's numbers.
+    GameState gs; WorldState w; plantEx(w, gs, 40, 0x5151);
+    SetpieceEnemy horror = inertEnemy(60, 1);      // chitinous horror: 1 dmg @ 0.25s
+    horror.attackDelayS = 0; horror.attackDelayCS = 25;
+    w.beginFightSetpiece(horror);
+    CHECK(w.cx.enemyDamage == 4 && w.cx.enemyDelayS == 1,
+          "beginFightSetpiece folds 1 dmg / 0.25s into 4 dmg / 1 tick");
+    CHECK(w.cx.enemyDelayLeft == 1, "the first swing is scheduled on the folded delay");
+}
+
+static void layer6_shield() {
+    printf("== [L6] shield: damage becomes healing, and one hit breaks it ==\n");
+    // -- on the ENEMY (a scene special / boss roll) --
+    {
+        GameState gs; WorldState w; plantEx(w, gs, 40, 0x1111);
+        w.beginFightSetpiece(inertEnemy(30, 3));
+        w.cx.enemyHp = 20;                            // wounded, so healing is visible
+        w.cx.enemyStatus = ST_SHIELD; w.cx.enemyStatusLeft = STATUS_FOREVER;
+        swing(w, gs);                                 // fists, 1 damage
+        CHECK(w.cx.enemyHp == 21, "a shielded enemy HEALS by the blocked damage");
+        CHECK(w.cx.enemyStatus == ST_NONE, "and the shield breaks on that one hit");
+        int before = w.cx.enemyHp;
+        swing(w, gs);
+        CHECK(w.cx.enemyHp == before - 1, "the next hit lands normally");
+        // boundary: healing never exceeds max HP
+        w.cx.enemyHp = w.cx.enemyMaxHp;
+        w.cx.enemyStatus = ST_SHIELD; w.cx.enemyStatusLeft = STATUS_FOREVER;
+        swing(w, gs);
+        CHECK(w.cx.enemyHp == w.cx.enemyMaxHp, "shield healing is capped at max HP");
+    }
+    // -- on the PLAYER (the kinetic-armour button) --
+    {
+        GameState gs; WorldState w; plantEx(w, gs, 40, 0x2222);
+        gs.items[I_KINETIC_ARMOUR] = 1;
+        SetpieceEnemy e = inertEnemy(30, 6);
+        e.attackDelayS = 1;                           // swings every tick
+        w.beginFightSetpiece(e);
+        w.ex.hp = 20;
+        CHECK(w.fightShield() == FIGHT_ONGOING, "shield button accepted");
+        CHECK(w.cx.playerStatus == ST_SHIELD, "player carries the shield status");
+        CHECK(w.cx.shieldCool == FIGHT_SHIELD_COOLDOWN_S, "shield starts its 10s cooldown");
+        CHECK(w.fightShield() == FIGHT_NOOP, "shielding again while cooling is a no-op");
+        w.fightTick(gs);                              // the enemy's swing is blocked
+        CHECK(w.ex.hp == 26, "the blocked 6-damage blow HEALS the wanderer instead");
+        CHECK(w.cx.playerStatus == ST_NONE, "and the player's shield broke on it");
+        w.fightTick(gs);
+        CHECK(w.ex.hp == 20, "the following swing hurts again (26 - 6)");
+    }
+}
+
+static void layer6_enraged() {
+    printf("== [L6] enraged: attack interval drops to 1 tick, restored after 4 ==\n");
+    GameState gs; WorldState w; plantEx(w, gs, 60, 0x3333);
+    SetpieceEnemy e = inertEnemy(40, 5);
+    e.attackDelayS = 5;                               // a slow enemy, so the drop shows
+    e.specialKind = SK_ENRAGED; e.specialDelayS = 2;
+    w.beginFightSetpiece(e);
+    CHECK(w.cx.enemyDelayS == 5 && w.cx.enemyDelayBaseS == 5, "armed at its own 5s interval");
+    CHECK(w.cx.specialDelay == 2 && w.cx.specialLeft == 2, "the specials clock is armed");
+
+    w.fightTick(gs);
+    CHECK(w.cx.enemyStatus == ST_NONE, "no special before its delay elapses");
+    w.fightTick(gs);                                   // specials fire on tick 2
+    CHECK(w.cx.enemyStatus == ST_ENRAGED, "the special inflicts enraged");
+    CHECK(w.cx.enemyStatusLeft == ENRAGE_TICKS, "enrage runs for 4 ticks");
+    CHECK(w.cx.enemyDelayS == ENRAGED_DELAY_S, "the attack interval is forced to 1 tick");
+    CHECK(w.cx.enemyDelayLeft <= 1, "and the pending swing is pulled in to match");
+
+    // Boundary: it expires exactly on the 4th tick and restores the ARMED interval.
+    // The specials clock is silenced first — it is PERIODIC, so left running it would
+    // re-inflict enrage every 2 ticks and the expiry could never be observed (which
+    // is itself the correct upstream behaviour, just not what this case is about).
+    w.cx.specialDelay = 0; w.cx.specialLeft = 0;
+    for (int i = 0; i < 3; i++) w.fightTick(gs);
+    CHECK(w.cx.enemyStatus == ST_ENRAGED, "still enraged after 3 of its 4 ticks");
+    w.fightTick(gs);
+    CHECK(w.cx.enemyStatus == ST_NONE, "enrage clears on the 4th tick");
+    CHECK(w.cx.enemyDelayS == 5, "and the original 5s interval is restored, not lost");
+}
+
+static void layer6_energised() {
+    printf("== [L6] energised: the next enemy hit is x4, then it clears ==\n");
+    GameState gs; WorldState w; plantEx(w, gs, 60, 0x4444);
+    SetpieceEnemy e = inertEnemy(40, 5);
+    e.attackDelayS = 1;
+    e.specialKind = SK_ENERGISED; e.specialDelayS = 1;
+    w.beginFightSetpiece(e);
+    CHECK(w.cx.enemyStatus == ST_NONE, "no status at the start of the fight");
+    int hp0 = w.ex.hp;
+    w.fightTick(gs);            // special fires (tick 1), then the swing lands x4
+    CHECK(w.ex.hp == hp0 - 5 * ENERGISE_MULT, "the energised swing deals 4x damage (20)");
+    CHECK(w.cx.enemyStatus == ST_NONE, "energised is spent on that one hit");
+    // Boundary: energised never lingers into a second swing (the special re-arms on
+    // its own clock, so what is asserted here is the SPENDING, not the absence).
+    w.cx.specialDelay = 0; w.cx.specialLeft = 0;       // stop re-arming
+    int hp1 = w.ex.hp;
+    w.fightTick(gs);
+    CHECK(w.ex.hp == hp1 - 5, "the following swing is back to base damage");
+}
+
+static void layer6_venomous() {
+    printf("== [L6] venomous: a landed hit hangs floor(dmg/2) per tick ==\n");
+    GameState gs; WorldState w; plantEx(w, gs, 60, 0x5555);
+    SetpieceEnemy e = inertEnemy(40, 7);               // floor(7/2) = 3 per tick
+    e.attackDelayS = 1;
+    e.atHealthThreshold = 20; e.atHealthStatus = ST_VENOMOUS;
+    w.beginFightSetpiece(e);
+    CHECK(w.cx.atHealthThreshold == 20 && w.cx.atHealthStatus == ST_VENOMOUS,
+          "the medic's atHealth blood line is armed off the data row");
+
+    // atHealth triggers only on the hit that CROSSES the line.
+    w.cx.enemyHp = 22;
+    swing(w, gs);                                      // 22 -> 21, still above
+    CHECK(w.cx.enemyStatus == ST_NONE, "a hit that stays above the line does nothing");
+    swing(w, gs);                                      // 21 -> 20, crosses
+    CHECK(w.cx.enemyStatus == ST_VENOMOUS, "the crossing hit turns the medic venomous");
+    swing(w, gs);                                      // 20 -> 19, already below
+    CHECK(w.cx.enemyStatus == ST_VENOMOUS, "and it does not re-fire below the line");
+
+    int hp0 = w.ex.hp;
+    w.fightTick(gs);                                   // the venomous swing lands
+    CHECK(w.ex.hp == hp0 - 7, "the swing itself deals its normal 7");
+    CHECK(w.cx.dotDamage == 3 && w.cx.dotTicksLeft == STATUS_FOREVER,
+          "and hangs floor(7/2)=3 damage per tick, for the rest of the fight");
+    w.cx.enemyDelayS = 999; w.cx.enemyDelayLeft = 999;  // silence the swings
+    int hp1 = w.ex.hp;
+    w.fightTick(gs);
+    CHECK(w.ex.hp == hp1 - 3, "the DoT bites once per tick");
+    w.fightTick(gs);
+    CHECK(w.ex.hp == hp1 - 6, "and keeps biting");
+    // Boundary: a shielded hit hangs NO venom (upstream: blocked -> no DoT).
+    {
+        GameState g2; WorldState w2; plantEx(w2, g2, 60, 0x5656);
+        g2.items[I_KINETIC_ARMOUR] = 1;
+        SetpieceEnemy v = inertEnemy(40, 7);
+        v.attackDelayS = 1;
+        w2.beginFightSetpiece(v);
+        w2.cx.enemyStatus = ST_VENOMOUS; w2.cx.enemyStatusLeft = STATUS_FOREVER;
+        w2.fightShield();
+        w2.fightTick(g2);
+        CHECK(w2.cx.dotDamage == 0, "a shield-blocked venomous hit hangs no DoT");
+    }
+}
+
+static void layer6_meditation() {
+    printf("== [L6] meditation: 5 ticks of absorption, then one reflected blow ==\n");
+    GameState gs; WorldState w; plantEx(w, gs, 60, 0x6666);
+    SetpieceEnemy e = inertEnemy(40, 5);
+    e.attackDelayS = 1;
+    w.beginFightSetpiece(e);
+    w.cx.enemyHp = 30;
+    w.cx.enemyStatus = ST_MEDITATION; w.cx.enemyStatusLeft = MEDITATE_TICKS;
+    w.cx.meditateAccum = 0;
+
+    swing(w, gs); swing(w, gs); swing(w, gs);           // three fists, 1 damage each
+    CHECK(w.cx.enemyHp == 30, "a meditating enemy takes no HP damage");
+    CHECK(w.cx.meditateAccum == 3, "the damage is banked into meditateAccum");
+
+    int hp0 = w.ex.hp;
+    for (int i = 0; i < MEDITATE_TICKS - 1; i++) w.fightTick(gs);
+    CHECK(w.cx.enemyStatus == ST_MEDITATION, "still meditating after 4 of its 5 ticks");
+    CHECK(w.ex.hp == hp0, "and it does not swing while meditating");
+    w.fightTick(gs);                                   // the 5th tick ends it AND swings
+    CHECK(w.cx.enemyStatus == ST_NONE, "meditation clears on the 5th tick");
+    CHECK(w.ex.hp == hp0 - 3, "the banked 3 damage comes back in one unavoidable blow");
+    CHECK(w.cx.meditateAccum == 0, "and the accumulator is emptied");
+    // Boundary: with nothing banked, the swing is an ordinary attack.
+    int hp1 = w.ex.hp;
+    w.fightTick(gs);
+    CHECK(w.ex.hp == hp1 - 5, "with an empty accumulator it swings normally again");
+}
+
+static void layer6_boost() {
+    printf("== [L6] boost (stim): x2 weapon damage, 3 ticks, 10 self-harm, 1 stim ==\n");
+    GameState gs; WorldState w; plantEx(w, gs, 60, 0x7777);
+    w.beginFightSetpiece(inertEnemy(80, 5));
+    w.ex.outfitRes[R_STIM] = 2;
+    int hp0 = w.ex.hp;
+    CHECK(w.fightStim() == FIGHT_ONGOING, "stim accepted");
+    CHECK(w.ex.hp == hp0 - BOOST_DAMAGE, "the stim costs 10 HP (upstream's dotDamage)");
+    CHECK(w.ex.outfitRes[R_STIM] == 1, "and SPENDS a stim (the fixed upstream leak)");
+    CHECK(w.cx.playerStatus == ST_BOOST && w.cx.playerStatusLeft == BOOST_TICKS,
+          "boost armed for 3 ticks");
+    CHECK(w.fightStim() == FIGHT_NOOP, "a second stim while cooling is a no-op");
+
+    int e0 = w.cx.enemyHp;
+    swing(w, gs);
+    CHECK(w.cx.enemyHp == e0 - 1 * BOOST_MULT, "boosted fists deal double damage");
+    // Boundary: it lasts exactly BOOST_TICKS, and damage returns to base after.
+    w.cx.enemyDelayS = 999; w.cx.enemyDelayLeft = 999;
+    for (int i = 0; i < BOOST_TICKS - 1; i++) w.fightTick(gs);
+    CHECK(w.cx.playerStatus == ST_BOOST, "still boosted after 2 of its 3 ticks");
+    w.fightTick(gs);
+    CHECK(w.cx.playerStatus == ST_NONE, "boost clears on the 3rd tick");
+    int e1 = w.cx.enemyHp;
+    swing(w, gs);
+    CHECK(w.cx.enemyHp == e1 - 1, "and the next swing is back to base damage");
+    // Boundary: the self-harm is genuinely lethal at low HP (upstream has no floor).
+    {
+        GameState g2; WorldState w2; plantEx(w2, g2, 60, 0x7878);
+        w2.beginFightSetpiece(inertEnemy(80, 5));
+        w2.ex.outfitRes[R_STIM] = 1;
+        w2.ex.hp = BOOST_DAMAGE;
+        CHECK(w2.fightStim() == FIGHT_LOST, "a stim at exactly 10 HP kills the wanderer");
+        CHECK(w2.ex.dead && !w2.ex.active, "and routes through die()");
+    }
+}
+
+static void layer6_explosion() {
+    printf("== [L6] explosion: 3 ticks of wind-up, then the blast decides the fight ==\n");
+    // -- survived: the win lands on the blast tick, with the loot banked --
+    {
+        GameState gs; WorldState w; plantEx(w, gs, 60, 0x8888);
+        SetpieceEnemy e = inertEnemy(3, 5);
+        e.attackDelayS = 1;
+        e.explosionDamage = 30;
+        e.loot[0] = { false, R_ALIEN_ALLOY, 1, 1, 1000 }; e.lootN = 1;
+        w.beginFightSetpiece(e);
+        CHECK(w.cx.explosionDamage == 30, "the scene's explosion payload is armed");
+        uint8_t st = FIGHT_ONGOING;
+        for (int i = 0; i < 40 && w.cx.enemyHp > 0; i++) st = swing(w, gs);
+        CHECK(st == FIGHT_ONGOING && w.cx.enemyHp == 0,
+              "HP hits 0 WITHOUT winning — the corpse is winding up");
+        CHECK(w.cx.exploding && w.cx.explodeTicksLeft == EXPLOSION_TICKS,
+              "the 3-tick self-destruct countdown is running");
+        CHECK(w.fightAttack(gs, 0) == FIGHT_NOOP, "the exploding corpse cannot be hit");
+        int hp0 = w.ex.hp;
+        CHECK(w.fightTick(gs) == FIGHT_ONGOING && w.ex.hp == hp0,
+              "tick 1 of the wind-up: no swing, no blast");
+        CHECK(w.fightTick(gs) == FIGHT_ONGOING && w.ex.hp == hp0, "tick 2: still winding up");
+        uint8_t last = w.fightTick(gs);
+        CHECK(last == FIGHT_WON, "tick 3 detonates and the survived blast is the victory");
+        CHECK(w.ex.hp == hp0 - 30, "the blast deals its full 30 (no hit roll)");
+        CHECK(w.cx.enemyChara == '*', "and the glyph swaps to '*' like upstream");
+        CHECK(w.ex.outfitRes[R_ALIEN_ALLOY] == 1, "loot banks on the deferred victory");
+    }
+    // -- boundary: a blast that kills is a LOSS, not a win --
+    {
+        GameState gs; WorldState w; plantEx(w, gs, 60, 0x8989);
+        SetpieceEnemy e = inertEnemy(3, 5);
+        e.attackDelayS = 999;
+        e.explosionDamage = 30;
+        w.beginFightSetpiece(e);
+        for (int i = 0; i < 40 && w.cx.enemyHp > 0; i++) swing(w, gs);
+        w.ex.hp = 30;                                  // exactly lethal
+        w.fightTick(gs); w.fightTick(gs);
+        CHECK(w.fightTick(gs) == FIGHT_LOST, "a blast that empties the HP bar loses the fight");
+        CHECK(w.ex.dead && !w.ex.active, "and routes through die()");
+    }
+    // -- no explosion armed: the kill is the win, immediately (Phase-2 behaviour) --
+    {
+        GameState gs; WorldState w; plantEx(w, gs, 60, 0x8a8a);
+        w.beginFightSetpiece(inertEnemy(3, 5));
+        uint8_t st = FIGHT_ONGOING;
+        for (int i = 0; i < 40 && !w.cx.won; i++) st = swing(w, gs);
+        CHECK(st == FIGHT_WON && !w.cx.exploding,
+              "an enemy with no explosion still wins on the killing blow");
+    }
+}
+
+static void layer6_specials_random3() {
+    printf("== [L6] SK_RANDOM3: rolls the boss trio, never twice in a row ==\n");
+    GameState gs; WorldState w; plantEx(w, gs, 200, 0x9999);
+    SetpieceEnemy e = inertEnemy(500, 1);
+    e.attackDelayS = 999;
+    e.specialKind = SK_RANDOM3; e.specialDelayS = 1;
+    w.beginFightSetpiece(e);
+    bool inPool = true, neverRepeats = true;
+    uint8_t prev = ST_NONE;
+    int seen[8] = { 0 };
+    for (int i = 0; i < 60; i++) {
+        w.cx.enemyStatus = ST_NONE; w.cx.enemyStatusLeft = 0;   // clear the last roll
+        w.fightTick(gs);
+        uint8_t st = w.cx.enemyStatus;
+        if (st != ST_SHIELD && st != ST_ENRAGED && st != ST_MEDITATION) inPool = false;
+        if (st == prev) neverRepeats = false;
+        if (st < 8) seen[st]++;
+        prev = st;
+    }
+    CHECK(inPool, "every roll is one of shield / enraged / meditation");
+    CHECK(neverRepeats, "and never the same status twice in a row (lastSpecial memory)");
+    CHECK(seen[ST_SHIELD] > 0 && seen[ST_ENRAGED] > 0 && seen[ST_MEDITATION] > 0,
+          "all three appear over 60 rolls");
+}
+
+static void layer6_new_gear() {
+    printf("== [L6] the three Phase-3c weapons + kinetic armour ==\n");
+    // Double-entry against docs/research-phase3.md §4.3.
+    struct WRow { uint8_t id; const char* key; const char* verb; int16_t dmg, cd;
+                  uint8_t slot, ammo; bool self; };
+    static const WRow EXPECT[] = {
+        { WEAPON_PLASMA_RIFLE, "plasma rifle", "disintegrate", 12, 1,
+          I_PLASMA_RIFLE, R_ENERGY_CELL, false },
+        { WEAPON_ENERGY_BLADE, "energy blade", "slice",        10, 2,
+          I_ENERGY_BLADE, RES_NONE,      false },
+        { WEAPON_DISRUPTOR,    "disruptor",    "stun",   DMG_STUN, 15,
+          I_DISRUPTOR,    RES_NONE,      false },
+    };
+    for (const WRow& r : EXPECT) {
+        const WeaponDef& w = WEAPONS[r.id];
+        char msg[96]; snprintf(msg, sizeof msg, "%s: %d dmg / %d s, matches §4.3",
+                               r.key, (int)r.dmg, (int)r.cd);
+        CHECK(strcmp(w.key, r.key) == 0 && strcmp(w.verb, r.verb) == 0 &&
+              w.damage == r.dmg && w.cooldownS == r.cd && w.itemSlot == r.slot &&
+              w.ammoRes == r.ammo && w.selfAmmo == r.self, msg);
+    }
+    CHECK(weightCenti("plasma rifle") == 500, "plasma rifle weighs 5 (Path.Weight)");
+    CHECK(weightCenti("energy blade") == DEFAULT_WEIGHT_CENTI &&
+          weightCenti("disruptor") == DEFAULT_WEIGHT_CENTI,
+          "energy blade / disruptor are absent from Path.Weight -> weigh 1");
+
+    // The disruptor stuns without spending itself — the bolas' whole drawback gone.
+    {
+        GameState gs; WorldState w; plantEx(w, gs, 40, 0xaaaa);
+        w.ex.outfitItem[I_DISRUPTOR] = 1;
+        w.beginFightSetpiece(inertEnemy(40, 5));
+        CHECK(w.fightWeaponCount() == 1 &&
+              w.fightWeaponId(0) == WEAPON_DISRUPTOR, "the disruptor arms as a weapon");
+        int hp = w.cx.enemyHp;
+        swing(w, gs);
+        CHECK(w.cx.enemyHp == hp && w.cx.enemyStunLeft == FIGHT_STUN_S,
+              "it stuns for 4s and deals no HP damage");
+        CHECK(w.ex.outfitItem[I_DISRUPTOR] == 1, "and does NOT consume itself (unlike bolas)");
+    }
+    // The plasma rifle spends an energy cell per shot.
+    {
+        GameState gs; WorldState w; plantEx(w, gs, 40, 0xabab);
+        w.ex.outfitItem[I_PLASMA_RIFLE] = 1;
+        w.ex.outfitRes[R_ENERGY_CELL] = 1;
+        w.beginFightSetpiece(inertEnemy(40, 5));
+        w.cx.weaponCool[0] = 0;
+        w.fightAttack(gs, 0);        // ammo is spent on the SWING, hit or miss
+        CHECK(w.ex.outfitRes[R_ENERGY_CELL] == 0, "a plasma shot spends one energy cell");
+        CHECK(!w.fightWeaponEnabled(0), "and reads disabled once the cells run out");
+    }
+    // kinetic armour raises the HP ceiling above steel (world.js getMaxHealth).
+    {
+        GameState gs; gs.init();
+        CHECK(WorldState::maxHealth(gs) == HEALTH_BASE, "no armour -> 10 HP");
+        gs.items[I_S_ARMOUR] = 1;
+        CHECK(WorldState::maxHealth(gs) == HEALTH_S_ARMOUR, "steel armour -> 45 HP");
+        gs.items[I_KINETIC_ARMOUR] = 1;
+        CHECK(WorldState::maxHealth(gs) == HEALTH_KINETIC,
+              "kinetic armour wins the tier ladder -> 85 HP");
+    }
+    // hypo heals 30, on its own 7s cooldown, and both consumables stay in the bag.
+    {
+        GameState gs; WorldState w; plantEx(w, gs, 60, 0xacac);
+        w.beginFightSetpiece(inertEnemy(40, 5));
+        w.ex.hp = 10; w.ex.outfitRes[R_HYPO] = 2;
+        CHECK(w.fightHypo() == FIGHT_ONGOING, "hypo accepted");
+        CHECK(w.ex.hp == 40 && w.ex.outfitRes[R_HYPO] == 1, "hypo heals 30, spends one");
+        CHECK(w.cx.hypoCool == FIGHT_HYPO_COOLDOWN_S, "hypo starts its 7s cooldown");
+        CHECK(w.fightHypo() == FIGHT_NOOP, "a second hypo while cooling is a no-op");
+        w.cx.hypoCool = 0; w.ex.hp = w.ex.maxHp;
+        CHECK(w.fightHypo() == FIGHT_NOOP, "and no hypo at full HP");
+    }
+}
+
+static void layer6_leave_at_home() {
+    printf("== [L6] hypo / stim / the new weapons ride home in the bag ==\n");
+    GameState gs; gs.init();
+    WorldState w; w.init(); w.generateMap(0xADADAD);
+    gs.stores[R_CURED_MEAT] = 5 * FP;
+    gs.stores[R_HYPO] = 2 * FP; gs.stores[R_STIM] = 2 * FP;
+    gs.stores[R_ALIEN_ALLOY] = 3 * FP;
+    gs.items[I_ENERGY_BLADE] = 1;
+    gs.items[I_WAGON] = 1;
+    int16_t out[RES_COUNT] = { 0 };
+    out[R_CURED_MEAT] = 5; out[R_HYPO] = 2; out[R_STIM] = 2; out[R_ALIEN_ALLOY] = 3;
+    int16_t outi[ITEM_COUNT] = { 0 }; outi[I_ENERGY_BLADE] = 1;
+    CHECK(w.embark(gs, out, outi, 0x4242), "embark with hypo/stim/alloy/energy blade");
+    w.goHome(gs);
+    CHECK(gs.savedOutfitRes[R_HYPO] == 2 && gs.savedOutfitRes[R_STIM] == 2,
+          "hypo + stim stay packed for the next trip (world.js leaveItAtHome)");
+    CHECK(gs.savedOutfitRes[R_ALIEN_ALLOY] == 0,
+          "alien alloy is left at home for the ship / fabricator to spend");
+    CHECK(gs.savedOutfitItem[I_ENERGY_BLADE] == 1, "a World weapon stays packed");
+    CHECK(gs.whole(R_HYPO) == 2 && gs.whole(R_STIM) == 2,
+          "and everything is still banked into the village stores");
+}
+
+// The fight grid's arithmetic, transcribed a SECOND time from fight_modal.cpp's
+// layout constants (they live in an anonymous namespace inside an Arduino
+// translation unit, so this is the only way to bind them to a test). §11's 3c-1
+// acceptance is "the worst case must not overflow, must not overlap, and every band
+// stays >= 80px" — with 12 weapons and 6 fixed actions that is 18 candidate cells,
+// which is exactly why §12 Q13's answer had to be pagination.
+static void layer6_fight_layout() {
+    printf("== [L6] fight_modal grid: the 18-button worst case fits by paging ==\n");
+    const int BTN_H = 80, BTN_GAP = 10, BTN_BOTTOM = 912;
+    const int SUP_Y = 308, GLYPH = 24;         // last line of the player block
+    const int GRID_MAX_CELLS = 12, GRID_MAX_ROWS = GRID_MAX_CELLS / 2;
+    const int MAX_FIXED = 6;                   // eat/meds/hypo/stim/shield/run
+
+    CHECK(BTN_H >= 80, "every band keeps the 80px long-press floor (§9.3)");
+    int rows = GRID_MAX_ROWS;
+    int top  = BTN_BOTTOM - (rows * BTN_H + (rows - 1) * BTN_GAP);
+    CHECK(top == 382, "a full 6-row grid starts at y=382");
+    CHECK(top > SUP_Y + GLYPH,
+          "which clears the player supply line at 332 — no overlap in the worst case");
+
+    // Worst case: every weapon in the game packed at once, with all six actions.
+    const int totalWeapons = WEAPON_COUNT;     // 12 as of Phase 3c
+    CHECK(totalWeapons == 12, "WEAPON_COUNT is 12 (9 Phase-2 + the three new)");
+    CHECK(totalWeapons + MAX_FIXED > GRID_MAX_CELLS,
+          "18 candidate cells genuinely exceed the 12-cell grid — paging is required");
+
+    int maxWpn  = GRID_MAX_CELLS - MAX_FIXED;
+    int perPage = maxWpn - 1;                  // one cell buys the 更多 band
+    int numPages = (totalWeapons + perPage - 1) / perPage;
+    CHECK(maxWpn == 6 && perPage == 5 && numPages == 3,
+          "12 weapons split into 3 pages of 5 behind a 更多 cell");
+    // Every page's cell count, and every weapon's reachability.
+    bool fits = true, covered = true;
+    int seenW = 0;
+    for (int pg = 0; pg < numPages; pg++) {
+        int start = pg * perPage;
+        int take = totalWeapons - start; if (take > perPage) take = perPage;
+        int cells = take + 1 /*更多*/ + MAX_FIXED;
+        if (cells > GRID_MAX_CELLS) fits = false;
+        if ((cells + 1) / 2 > GRID_MAX_ROWS) fits = false;
+        seenW += take;
+    }
+    if (seenW != totalWeapons) covered = false;
+    CHECK(fits, "no page overflows 12 cells / 6 rows");
+    CHECK(covered, "and the three pages between them reach all 12 weapons");
+
+    // The no-paging path: the common case must NOT spend a cell on 更多.
+    CHECK(GRID_MAX_CELLS - MAX_FIXED >= 6,
+          "up to 6 weapons still fit alongside all six actions with no 更多 cell");
+}
+
+// ---- a throwaway setpiece table, built to exercise the engine seams ---------
+// research-phase3.md §11 explicitly allows this for 3c-1: the graph lives here, not
+// in setpieces_data.h, so nothing ships that the Executioner data (3c-2) will own.
+static const SpButton tp_btns[] = {
+    /* 0 start.drink   */ { "drink",   SP_COST_WATER, false, 1, 0, 0, 5 },
+    /* 1 start.bleed   */ { "bleed",   SP_COST_HP,    false, 2, 0, 0, 10 },
+    /* 2 start.jump    */ { "jump",    SP_NO_COST,    false, SP_SCENE_EVENT,
+                            SP_OUTPOST, 0, 0 },
+    /* 3 start.maps    */ { "maps",    SP_NO_COST,    false, 3, 0, 0, 0 },
+    /* 4 paid.leave    */ { "leave",   SP_NO_COST,    false, SP_SCENE_END, 0, 0, 0 },
+};
+static const SpScene tp_scenes[] = {
+    /* 0 start */ { { "a test chamber.", nullptr, nullptr, nullptr }, nullptr,
+                    SPE_NONE, false, 0,
+                    { {false,0,0,0,0},{false,0,0,0,0},{false,0,0,0,0},{false,0,0,0,0},
+                      {false,0,0,0,0},{false,0,0,0,0},{false,0,0,0,0},{false,0,0,0,0} }, 0,
+                    0, 4, 3 },
+    /* 1 drank */ { { "drank.", nullptr, nullptr, nullptr }, nullptr, SPE_NONE, false, 0,
+                    { {false,0,0,0,0},{false,0,0,0,0},{false,0,0,0,0},{false,0,0,0,0},
+                      {false,0,0,0,0},{false,0,0,0,0},{false,0,0,0,0},{false,0,0,0,0} }, 0,
+                    4, 1, 0 },
+    /* 2 bled  */ { { "bled.", nullptr, nullptr, nullptr }, nullptr, SPE_NONE, false, 0,
+                    { {false,0,0,0,0},{false,0,0,0,0},{false,0,0,0,0},{false,0,0,0,0},
+                      {false,0,0,0,0},{false,0,0,0,0},{false,0,0,0,0},{false,0,0,0,0} }, 0,
+                    4, 1, 0 },
+    /* 3 maps  */ { { "scavenged maps.", nullptr, nullptr, nullptr }, nullptr,
+                    SPE_REVEAL_MAP3, false, 0,
+                    { {false,0,0,0,0},{false,0,0,0,0},{false,0,0,0,0},{false,0,0,0,0},
+                      {false,0,0,0,0},{false,0,0,0,0},{false,0,0,0,0},{false,0,0,0,0} }, 0,
+                    4, 1, 0 },
+};
+static const SpDef TEST_SP = { "A Test Chamber", tp_scenes,
+                               (uint8_t)(sizeof(tp_scenes) / sizeof(tp_scenes[0])),
+                               tp_btns, nullptr, nullptr };
+
+static int revealedCount(const uint8_t* mask) {
+    int n = 0;
+    for (int i = 0; i < WORLD_CELLS; i++)
+        if (mask[i >> 3] & (uint8_t)(1 << (i & 7))) n++;
+    return n;
+}
+
+static void layer6_setpiece_seams() {
+    printf("== [L6] setpiece seams: water/hp costs, nextEvent, applyMap ==\n");
+    // -- water cost --
+    {
+        GameState gs; WorldState w; plantEx(w, gs, 40, 0xb1b1);
+        setpiece::bind(&w, &gs);
+        w.ex.water = 4;
+        CHECK(setpiece::beginTable(&TEST_SP), "beginTable starts the throwaway setpiece");
+        CHECK(!setpiece::btnAvailable(0), "5 water is unaffordable at 4");
+        CHECK(setpiece::choose(0) == RC_ERR_COST, "and choosing it is refused");
+        w.ex.water = 5;
+        CHECK(setpiece::btnAvailable(0), "exactly 5 water affords a 5-water price");
+        CHECK(setpiece::choose(0) == RC_OK, "the drink is paid for");
+        CHECK(w.ex.water == 0, "and 5 water is deducted");
+        setpiece::end();
+    }
+    // -- hp cost: strictly greater, so paying can never be the killing blow --
+    {
+        GameState gs; WorldState w; plantEx(w, gs, 40, 0xb2b2);
+        setpiece::bind(&w, &gs);
+        setpiece::beginTable(&TEST_SP);
+        w.ex.hp = 10;
+        CHECK(!setpiece::btnAvailable(1), "a 10-HP price at exactly 10 HP is refused");
+        CHECK(setpiece::choose(1) == RC_ERR_COST, "paying it would be lethal, so it is blocked");
+        w.ex.hp = 11;
+        CHECK(setpiece::btnAvailable(1), "11 HP affords it");
+        CHECK(setpiece::choose(1) == RC_OK && w.ex.hp == 1, "and leaves the wanderer on 1 HP");
+        setpiece::end();
+    }
+    // -- nextEvent: hop to another setpiece, keeping the expedition --
+    {
+        GameState gs; WorldState w; plantEx(w, gs, 40, 0xb3b3);
+        setpiece::bind(&w, &gs);
+        setpiece::beginTable(&TEST_SP);
+        w.ex.water = 0;
+        int bagBefore = w.ex.outfitRes[R_CURED_MEAT];
+        CHECK(strcmp(setpiece::titleKey(), "A Test Chamber") == 0, "the test table is running");
+        CHECK(setpiece::choose(2) == RC_OK, "the nextEvent button resolves");
+        CHECK(setpiece::active(), "the engine is still running a setpiece");
+        CHECK(strcmp(setpiece::titleKey(), "An Outpost") == 0,
+              "and it is now the TARGET setpiece, not the source");
+        CHECK(w.ex.active && w.ex.outfitRes[R_CURED_MEAT] >= bagBefore,
+              "the expedition and its bag survive the hop (World state untouched)");
+        setpiece::end();
+    }
+    // -- applyMap x3, on the WORKING fog, surviving goHome and lost to die() --
+    {
+        GameState gs; WorldState w; plantEx(w, gs, 40, 0xb4b4);
+        setpiece::bind(&w, &gs);
+        setpiece::beginTable(&TEST_SP);
+        int before   = revealedCount(w.ex.revealed);
+        int committed = revealedCount(w.revealed);
+        CHECK(setpiece::choose(3) == RC_OK, "the scavenge-maps button resolves");
+        int after = revealedCount(w.ex.revealed);
+        CHECK(after > before, "applyMap x3 uncovers new cells on the WORKING fog");
+        CHECK(revealedCount(w.revealed) == committed,
+              "and does NOT touch the committed layer mid-trip (the §3.7 bug fixed)");
+        setpiece::end();
+        w.goHome(gs);
+        CHECK(revealedCount(w.revealed) == after,
+              "goHome commits the scavenged map — it is kept for good");
+    }
+    {
+        GameState gs; WorldState w; plantEx(w, gs, 40, 0xb5b5);
+        setpiece::bind(&w, &gs);
+        int committed = revealedCount(w.revealed);
+        setpiece::beginTable(&TEST_SP);
+        setpiece::choose(3);
+        CHECK(revealedCount(w.ex.revealed) > committed, "the reveal landed this trip");
+        setpiece::end();
+        w.die();
+        CHECK(revealedCount(w.revealed) == committed,
+              "dying on the way home forfeits the scavenged map (working layer dropped)");
+    }
+    setpiece::bind(nullptr, nullptr);        // leave the engine unbound for later layers
+}
+
+static void layer6_trek_v2() {
+    printf("== [L6] trek.bin v1 -> v2 migration (the Res/Item growth) ==\n");
+    // Produce a real v2 file, then hand-fold it back into the v1 layout (the old
+    // 19 Res / 18 Item array widths) and prove the migration reads it losslessly.
+    GameState gs; gs.init();
+    WorldState w; w.init(); w.generateMap(0xC0DEC0);
+    gs.stores[R_CURED_MEAT] = 8 * FP; gs.stores[R_MEDICINE] = 2 * FP;
+    gs.items[I_RIFLE] = 1;
+    int16_t out[RES_COUNT] = { 0 }; out[R_CURED_MEAT] = 8; out[R_MEDICINE] = 2;
+    int16_t outi[ITEM_COUNT] = { 0 }; outi[I_RIFLE] = 1;
+    w.embark(gs, out, outi, 0xC0DE);
+    w.move(gs, DIR_EAST); w.move(gs, DIR_EAST);
+
+    const size_t HDR   = 68;
+    const size_t V2SZ  = HDR + RES_COUNT * 2 + ITEM_COUNT * 2 +
+                         WORLD_CELLS + 2 * WORLD_MASK_BYTES;
+    const size_t V1SZ  = HDR + 19 * 2 + 18 * 2 + WORLD_CELLS + 2 * WORLD_MASK_BYTES;
+    uint8_t* v2 = (uint8_t*)malloc(V2SZ);
+    FILE* f = fopen(ADR_TREK_PATH, "rb");
+    CHECK(f != nullptr, "the freshly saved trek.bin is readable");
+    size_t got = f ? fread(v2, 1, V2SZ, f) : 0;
+    if (f) fclose(f);
+    CHECK(got == V2SZ, "and it is exactly the v2 size");
+    CHECK(v2[4] == 2, "written as TREK_VER 2");
+
+    uint8_t* v1 = (uint8_t*)malloc(V1SZ);
+    memcpy(v1, v2, HDR);
+    v1[4] = 1;                                        // relabel as v1
+    memcpy(v1 + HDR, v2 + HDR, 19 * 2);               // the old 19 Res slots
+    memcpy(v1 + HDR + 19 * 2, v2 + HDR + RES_COUNT * 2, 18 * 2);   // old 18 Items
+    memcpy(v1 + HDR + 19 * 2 + 18 * 2,
+           v2 + HDR + RES_COUNT * 2 + ITEM_COUNT * 2,
+           WORLD_CELLS + 2 * WORLD_MASK_BYTES);       // the map blob, unchanged
+    writeRaw(ADR_TREK_PATH, v1, V1SZ);
+
+    WorldState ld; ld.init();
+    CHECK(ld.loadTrek(), "a v1 trek.bin still loads under v2 firmware");
+    CHECK(ld.ex.active, "the interrupted expedition is NOT silently dropped");
+    CHECK(ld.ex.x == w.ex.x && ld.ex.y == w.ex.y, "position survives the migration");
+    CHECK(ld.ex.hp == w.ex.hp && ld.ex.water == w.ex.water && ld.ex.rng == w.ex.rng,
+          "hp / water / rng survive");
+    CHECK(ld.ex.outfitRes[R_CURED_MEAT] == w.ex.outfitRes[R_CURED_MEAT] &&
+          ld.ex.outfitRes[R_MEDICINE] == 2 && ld.ex.outfitItem[I_RIFLE] == 1,
+          "the whole v1-era bag survives");
+    CHECK(ld.ex.outfitRes[R_HYPO] == 0 && ld.ex.outfitRes[R_STIM] == 0 &&
+          ld.ex.outfitItem[I_PLASMA_RIFLE] == 0 &&
+          ld.ex.outfitItem[I_KINETIC_ARMOUR] == 0,
+          "and the slots v1 never had read as empty");
+    CHECK(memcmp(ld.ex.tiles, w.ex.tiles, WORLD_CELLS) == 0, "the working map survives");
+    free(v1); free(v2);
+
+    // A v1 file that is one byte short of even the v1 layout is still rejected.
+    {
+        uint8_t small[64] = { 0 };
+        size_t o = 0; rawU32(small, o, TREK_MAGIC); small[o] = 1;
+        writeRaw(ADR_TREK_PATH, small, sizeof small);
+        WorldState bad; bad.init();
+        CHECK(!bad.loadTrek(), "a truncated v1 trek.bin is still rejected");
+    }
+}
+
+// Shrink the JSON array introduced by `prefix` down to its first `keep` entries,
+// in place — the fixture for "a save written before the enum grew". Returns false
+// if the array isn't there or is already short.
+static bool truncJsonArray(char* json, const char* prefix, int keep) {
+    char* arr = strstr(json, prefix);
+    if (!arr) return false;
+    char* p = arr + strlen(prefix);
+    for (int n = 0; n < keep; n++) {
+        p = strchr(p, ',');
+        if (!p) return false;
+        p++;
+    }
+    char* close = strchr(p, ']');
+    if (!close) return false;
+    memmove(p - 1, close, strlen(close) + 1);   // drop the separating comma too
+    return true;
+}
+
+static void layer6_save_roundtrip() {
+    printf("== [L6] game.json: the new Res/Item slots round-trip, v5 saves still load ==\n");
+    GameState gs; gs.init();
+    gs.stores[R_HYPO] = 5 * FP; gs.stores[R_STIM] = 3 * FP;
+    gs.stores[R_WOOD] = 42 * FP;
+    gs.items[I_PLASMA_RIFLE] = 1; gs.items[I_ENERGY_BLADE] = 2;
+    gs.items[I_DISRUPTOR] = 1;    gs.items[I_KINETIC_ARMOUR] = 1;
+    gs.markSeen(R_HYPO); gs.markSeen(R_STIM);
+    static char buf[8192];
+    gs.toJson(buf, sizeof buf);
+    GameState r; r.init();
+    CHECK(r.fromJson(buf), "a save carrying the new slots parses");
+    CHECK(r.whole(R_HYPO) == 5 && r.whole(R_STIM) == 3, "hypo / stim round-trip");
+    CHECK(r.items[I_PLASMA_RIFLE] == 1 && r.items[I_ENERGY_BLADE] == 2 &&
+          r.items[I_DISRUPTOR] == 1 && r.items[I_KINETIC_ARMOUR] == 1,
+          "the four new items round-trip");
+    CHECK(r.hasSeen(R_HYPO) && r.hasSeen(R_STIM), "the seen bitset covers the new slots");
+
+    // The tail-append claim: a save written before the enums grew (19 stores / 18
+    // items in its positional arrays) must still load, with the new slots at 0 and
+    // NOTHING shifted. Rebuild those two arrays short, in place.
+    char old[8192];
+    strcpy(old, buf);
+    CHECK(truncJsonArray(old, "\"stores\":[", 19), "stores[] truncated to its v5 19 entries");
+    CHECK(truncJsonArray(old, "\"itm\":[", 18), "itm[] truncated to its v5 18 entries");
+    GameState o; o.init();
+    o.stores[R_HYPO] = 99 * FP; o.items[I_DISRUPTOR] = 9;   // dirty, must be overwritten
+    CHECK(o.fromJson(old), "a pre-growth save (19 stores / 18 items) still loads");
+    CHECK(o.whole(R_WOOD) == 42, "and the slots it DID carry are unshifted");
+    CHECK(o.whole(R_HYPO) == 0 && o.whole(R_STIM) == 0, "the new Res slots read as 0");
+    CHECK(o.items[I_PLASMA_RIFLE] == 0 && o.items[I_KINETIC_ARMOUR] == 0,
+          "and the new Item slots read as 0");
+}
+
+// ===========================================================================
 
 int main() {
     printf("############ Layer 1: static data-table validation ############\n");
@@ -1185,6 +1922,23 @@ int main() {
     layer5_space_state();
     layer5_space_score();
     layer5_space_save();
+
+    printf("\n######## Layer 6: Executioner combat mechanics (Phase 3c-1) ########\n");
+    layer6_fold();
+    layer6_shield();
+    layer6_enraged();
+    layer6_energised();
+    layer6_venomous();
+    layer6_meditation();
+    layer6_boost();
+    layer6_explosion();
+    layer6_specials_random3();
+    layer6_new_gear();
+    layer6_fight_layout();
+    layer6_leave_at_home();
+    layer6_setpiece_seams();
+    layer6_trek_v2();
+    layer6_save_roundtrip();
 
     printf("\n==== %d passed, %d failed ====\n", g_pass, g_fail);
     return g_fail ? 1 : 0;

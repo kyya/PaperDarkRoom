@@ -85,7 +85,7 @@ constexpr int CONTENT_W = 540 - 2 * PAD;     // 492px usable (§9.2)
 // only costs that once the compass is bought, by which point the player is deep
 // enough that 库存 has long been in tail-collapse anyway. Early on the grid is a
 // single row and 库存 gets the space back.
-// Max 库存 entries = RES_COUNT(19) + ITEM_COUNT(14) = 33, so any clamp below 11
+// Max 库存 entries = RES_COUNT(21) + ITEM_COUNT(22) = 43, so any clamp below 15
 // rows tail-collapses the last cell to "…" (the pre-existing mechanism, now
 // driven by remaining-space rows instead of a fixed INV_ROWS constant).
 // FS_MIN_ROWS=2 is deliberately NOT honoured in the 3-row worst case: the space

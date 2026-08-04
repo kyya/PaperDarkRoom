@@ -44,7 +44,12 @@ namespace adr {
 constexpr uint32_t WORLD_MAGIC = 0x314C5257;  // "WRL1" LE — world.bin
 constexpr uint32_t TREK_MAGIC  = 0x314B5254;  // "TRK1" LE — trek.bin
 constexpr uint8_t  WORLD_VER   = 2;   // v2 adds the used-outpost mask (v1 migrates)
-constexpr uint8_t  TREK_VER    = 1;
+// v2 = the Phase-3c Res/Item growth. trek.bin stores the outfit as two FIXED-LENGTH
+// arrays sized by RES_COUNT/ITEM_COUNT, so appending enum slots moves every byte
+// after them; without the bump an in-progress expedition would be silently dropped
+// across the OTA. loadTrek keeps a v1 branch that reads the old 19 Res / 18 Item
+// arrays and leaves the new slots at 0 — the rest of the layout is unchanged.
+constexpr uint8_t  TREK_VER    = 2;
 
 // What one move() resolved to. Landmark is a hook for 2.4 (the setpiece engine);
 // FIGHT is live as of 2.3 — the caller (World page) starts the fight overlay.
@@ -112,6 +117,29 @@ struct Combat {
     int16_t  eatCool, medsCool;
     LootLine loot[MAX_LOOT];
     int      lootN;
+
+    // ---- Phase 3c: the Executioner status system (research-phase3.md §10.4) --
+    // All zero == a plain Phase-2 fight, so nothing here changes an existing
+    // encounter's behaviour; a setpiece enemy arms the fields it declares.
+    uint8_t  playerStatus;      // ST_NONE / ST_SHIELD / ST_BOOST
+    uint8_t  playerStatusLeft;  // ticks left, or STATUS_FOREVER (shield: until broken)
+    uint8_t  enemyStatus;       // ST_NONE / SHIELD / ENRAGED / ENERGISED / VENOMOUS /
+                                // MEDITATION
+    uint8_t  enemyStatusLeft;   // ticks left, or STATUS_FOREVER
+    int16_t  enemyDelayBaseS;   // the armed attackDelayS, restored when enrage expires
+    int16_t  meditateAccum;     // damage the meditating enemy has swallowed
+    int16_t  dotDamage;         // venom damage per tick on the PLAYER; 0 = none
+    uint8_t  dotTicksLeft;      // STATUS_FOREVER for the rest of the fight (see below)
+    int16_t  specialDelay;      // scene `specials` period in ticks; 0 = no specials
+    int16_t  specialLeft;       // ticks to the next special
+    uint8_t  specialKind;       // SpecialKind (SK_RANDOM3 = command-deck boss)
+    uint8_t  lastSpecial;       // SK_RANDOM3's "never twice in a row" memory
+    int16_t  atHealthThreshold; // enemy HP blood line; 0 = none
+    uint8_t  atHealthStatus;    // CombatStatus applied when a hit crosses it
+    int16_t  explosionDamage;   // death self-destruct payload; 0 = dies clean
+    uint8_t  explodeTicksLeft;  // wind-up countdown once HP hit 0 (exploding == >0)
+    bool     exploding;         // HP is 0 and the corpse is counting down
+    int16_t  hypoCool, stimCool, shieldCool;
 };
 
 // The volatile expedition (trek.bin). Holds its OWN working copy of the map so
@@ -215,17 +243,26 @@ public:
     // Same weapon-list rules as beginFight; cx.setpiece is set so fight_modal
     // hands the outcome back to setpiece_modal instead of running its own panel.
     void beginFightSetpiece(const SetpieceEnemy& e);
-    // Advance one second: drain player cooldowns; the enemy swings when its delay
-    // elapses (unless stunned). Returns FIGHT_LOST (-> die() already ran) or
-    // FIGHT_ONGOING.
-    uint8_t fightTick();
+    // Advance one second, in this fixed order (research-phase3.md §10.4 / the 3c-1
+    // brief): (1) player cooldowns, (2) player status expiry (boost), (3) enemy
+    // timed-status expiry, (4) scene `specials`, (5) venom DoT, (6) explosion
+    // countdown + payload, (7) the enemy's swing. Returns FIGHT_LOST (-> die()
+    // already ran), FIGHT_WON (an explosion the player survived — loot banked) or
+    // FIGHT_ONGOING. Needs gs for the explosion victory's loot capacity cap.
+    uint8_t fightTick(GameState& gs);
     // Player swings weapon slot `s` (0..fightWeaponCount-1): rejects on cooldown/
     // no-ammo (FIGHT_NOOP), else spends ammo, rolls hit, deals damage/stun, and
-    // may kill the enemy (FIGHT_WON -> rollLoot banked into the bag). Needs gs for
-    // the loot capacity cap.
+    // may kill the enemy (FIGHT_WON -> rollLoot banked into the bag; or the
+    // explosion wind-up, which defers the win to fightTick). Needs gs for the loot
+    // capacity cap.
     uint8_t fightAttack(GameState& gs, int s);
     uint8_t fightEat();                     // eat 1 cured meat, heal MEAT_HEAL
     uint8_t fightMeds();                    // use 1 medicine, heal MEDS_HEAL
+    uint8_t fightHypo();                    // use 1 hypo, heal HYPO_HEAL (P3)
+    uint8_t fightStim();                    // use 1 stim: BOOST_TICKS of BOOST_MULT
+                                            // weapon damage, at BOOST_DAMAGE self-harm
+    uint8_t fightShield();                  // kinetic armour: the next incoming hit
+                                            // heals instead of hurting (P3)
     void    fightFlee();                    // abandon (no loot, keep damage), saveTrek
     void    fightEndVictory();              // dismiss the victory panel, saveTrek
 
@@ -243,6 +280,17 @@ public:
     // the WORKING visited mask (goHome commits, die discards) — the same layering
     // as revealed/tiles. Called from the setpiece scenes upstream marks visited.
     void spMarkVisited();
+    // world.js applyMap (world.js:687-697) — pick a still-dark cell at random and
+    // uncover its Manhattan-radius-5 diamond (research-phase2.md §2.5). The
+    // martial wing's `scavenge maps` calls it three times.
+    //
+    // UPSTREAM BUG, DELIBERATELY FIXED (research-phase3.md §3.7 / §5.4 item 1):
+    // upstream writes the PERSISTENT `game.world.mask` while the trip renders and
+    // commits `World.state.mask`, so the reveal was invisible for the rest of the
+    // expedition and then overwritten by goHome. We write ex.revealed — the same
+    // working layer as lightMap — so goHome commits it and die() drops it, which
+    // is the layering every other trip mutation already obeys.
+    void spApplyMap();
     // Persist the trip after a setpiece scene mutates it (loot banked, water
     // filled, mine flagged): the World map changes commit at goHome, but the bag /
     // water / cleared flags must survive a power-off mid-setpiece like any step.
@@ -318,6 +366,13 @@ private:
     int      exBagUsedCenti() const;        // total carried weight (loot cap)
     void     armWeapons();                  // build the attack-button weapon list
     void     rollLoot(GameState& gs);       // events.js drawLoot -> bank into bag
+    // ---- Phase 3c status plumbing (events.js setStatus / damage / enemyAttack) --
+    void     armMechanics(const SetpieceEnemy& e);  // fold delay + arm the scene rules
+    void     setEnemyStatus(uint8_t st);    // apply + seed the status' own timer
+    void     enemyDamaged(int dmg);         // route a landed player hit through
+                                            // shield / meditation, else HP
+    // The enemy's HP hit 0: either wind up the self-destruct or win outright.
+    uint8_t  enemyDefeated(GameState& gs);
     bool     outpostUsed(int x, int y) const;
     void     markOutpostUsed(int x, int y);
 

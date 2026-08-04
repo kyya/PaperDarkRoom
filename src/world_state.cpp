@@ -63,6 +63,15 @@ constexpr size_t TREK_HDR = 8 + 2 + 18 + 2 + 4 + 1 + 1 + 32;      // 68
 constexpr size_t TREK_BIN_SIZE =
     TREK_HDR + RES_COUNT * 2 + ITEM_COUNT * 2 +
     WORLD_CELLS + 2 * WORLD_MASK_BYTES;
+// v1 = the pre-Phase-3c enum widths. The outfit arrays are FIXED LENGTH and sit
+// ahead of the map blob, so growing Res/Item shifts everything after them — hence
+// TREK_VER 2 and this migration read (world_state.h). Frozen literals on purpose:
+// they describe a file on disk, not the current enums.
+constexpr int    TREK_V1_RES  = 19;
+constexpr int    TREK_V1_ITEM = 18;
+constexpr size_t TREK_BIN_SIZE_V1 =
+    TREK_HDR + TREK_V1_RES * 2 + TREK_V1_ITEM * 2 +
+    WORLD_CELLS + 2 * WORLD_MASK_BYTES;
 
 // ===================== platform file I/O ==================================
 
@@ -234,6 +243,7 @@ int WorldState::maxWater(const GameState& gs) {
     return WATER_BASE;
 }
 int WorldState::maxHealth(const GameState& gs) {
+    if (gs.items[I_KINETIC_ARMOUR] > 0) return HEALTH_KINETIC;   // P3 Fabricator
     if (gs.items[I_S_ARMOUR] > 0) return HEALTH_S_ARMOUR;
     if (gs.items[I_I_ARMOUR] > 0) return HEALTH_I_ARMOUR;
     if (gs.items[I_L_ARMOUR] > 0) return HEALTH_L_ARMOUR;
@@ -508,14 +518,16 @@ StepResult WorldState::move(GameState& gs, uint8_t dir) {
 }
 
 // world.js World.leaveItAtHome for a Res slot: the consumable supplies stay
-// packed for the next trip (cured meat / bullets / energy cell / charm / medicine
-// — stim/hypo are P3, absent from Res); everything else (raw loot fur/iron/teeth/
-// scales/cloth/leather, alien alloy, compass) is banked to stores and dropped from
-// the outfit. Returns true == leave at home.
+// packed for the next trip — cured meat / bullets / energy cell / charm /
+// medicine, plus (Phase 3c) stim / hypo, which upstream names explicitly in the
+// same whitelist (world.js:1020-1024, research-phase3.md §4.4). Everything else
+// (raw loot fur/iron/teeth/scales/cloth/leather, alien alloy, compass) is banked
+// to stores and dropped from the outfit. Returns true == leave at home.
 static bool leaveResAtHome(int r) {
     switch (r) {
         case R_CURED_MEAT: case R_BULLETS: case R_ENERGY_CELL:
         case R_CHARM:      case R_MEDICINE:
+        case R_HYPO:       case R_STIM:
             return false;
         default:
             return true;
@@ -684,10 +696,27 @@ void WorldState::beginFight(uint8_t enemyId) {
     cx.enemyHp = cx.enemyMaxHp = e.health;
     cx.enemyDelayLeft = e.attackDelayS;
     cx.enemyDamage = e.damage; cx.enemyHitPM = e.hitPM; cx.enemyDelayS = e.attackDelayS;
+    cx.enemyDelayBaseS = e.attackDelayS;
     cx.enemyChara   = e.chara;
     cx.enemyNameKey = e.name; cx.enemyNotifKey = e.notif; cx.enemyDeathKey = e.death;
     cx.lootTbl = e.loot; cx.lootTblN = (int16_t)e.lootN;
     armWeapons();
+}
+
+// Arm the Phase-3c scene rules a SetpieceEnemy declares (all inert at zero, so a
+// Phase-2 row arms nothing). Also folds a sub-second attackDelay into the 1s tick
+// — the data row keeps upstream's number and this is the ONE place it converts.
+void WorldState::armMechanics(const SetpieceEnemy& e) {
+    if (e.attackDelayCS > 0) {
+        AttackFold f = foldAttack(e.damage, e.attackDelayCS);
+        cx.enemyDamage = f.damage;
+        cx.enemyDelayS = cx.enemyDelayBaseS = cx.enemyDelayLeft = f.delayS;
+    }
+    cx.specialKind  = e.specialKind;
+    cx.specialDelay = cx.specialLeft = (e.specialKind != SK_NONE) ? e.specialDelayS : 0;
+    cx.atHealthThreshold = e.atHealthThreshold;
+    cx.atHealthStatus    = e.atHealthStatus;
+    cx.explosionDamage   = e.explosionDamage;
 }
 
 // Arm combat against a setpiece's inline enemy. cx.setpiece flags the win/flee
@@ -701,9 +730,11 @@ void WorldState::beginFightSetpiece(const SetpieceEnemy& e) {
     cx.enemyHp = cx.enemyMaxHp = e.health;
     cx.enemyDelayLeft = e.attackDelayS;
     cx.enemyDamage = e.damage; cx.enemyHitPM = e.hitPM; cx.enemyDelayS = e.attackDelayS;
+    cx.enemyDelayBaseS = e.attackDelayS;
     cx.enemyChara   = e.chara;
     cx.enemyNameKey = nullptr; cx.enemyNotifKey = e.notif; cx.enemyDeathKey = nullptr;
     cx.lootTbl = e.loot; cx.lootTblN = (int16_t)e.lootN;
+    armMechanics(e);                          // P3c: fold + scene status rules
     armWeapons();
 }
 
@@ -773,12 +804,75 @@ void WorldState::rollLoot(GameState& gs) {
     cx.lootN = bankLootTable(gs, cx.lootTbl, cx.lootTblN, cx.loot, MAX_LOOT);
 }
 
+// events.js setStatus for the enemy side: apply the status AND seed the timer it
+// owns. Enraged/meditation are the only timed ones; shield / energised / venomous
+// have no upstream clock — they last until the hit that consumes them (or, for
+// venomous, the whole fight).
+void WorldState::setEnemyStatus(uint8_t st) {
+    cx.enemyStatus = st;
+    switch (st) {
+        case ST_ENRAGED:
+            cx.enemyStatusLeft = (uint8_t)ENRAGE_TICKS;
+            cx.enemyDelayS = ENRAGED_DELAY_S;         // startEnemyAttacks(0.5) floored
+            if (cx.enemyDelayLeft > cx.enemyDelayS) cx.enemyDelayLeft = cx.enemyDelayS;
+            break;
+        case ST_MEDITATION:
+            cx.enemyStatusLeft = (uint8_t)MEDITATE_TICKS;
+            cx.meditateAccum = 0;
+            break;
+        default:
+            cx.enemyStatusLeft = STATUS_FOREVER;
+            break;
+    }
+}
+
+// A landed player hit, routed the way events.js damage() routes it:
+//   * shield  -> the damage becomes healing (capped at max HP) and the shield
+//                breaks on this one hit;
+//   * meditation -> the damage is swallowed into meditateAccum, HP untouched;
+//   * otherwise it lands, and MAY cross the scene's atHealth blood line (upstream
+//     tests "landed below AND was above before", so a shield-heal that lifts the
+//     enemy back over the line can arm the trigger a second time — faithful).
+void WorldState::enemyDamaged(int dmg) {
+    if (cx.enemyStatus == ST_SHIELD) {
+        cx.enemyHp += (int16_t)dmg;
+        if (cx.enemyHp > cx.enemyMaxHp) cx.enemyHp = cx.enemyMaxHp;
+        cx.enemyStatus = ST_NONE; cx.enemyStatusLeft = 0;   // one hit and it's gone
+        return;
+    }
+    if (cx.enemyStatus == ST_MEDITATION) {
+        cx.meditateAccum += (int16_t)dmg;
+        return;
+    }
+    int before = cx.enemyHp;
+    cx.enemyHp -= (int16_t)dmg;
+    if (cx.atHealthThreshold > 0 && cx.atHealthStatus != ST_NONE &&
+        cx.enemyHp <= cx.atHealthThreshold && before > cx.atHealthThreshold)
+        setEnemyStatus(cx.atHealthStatus);
+}
+
+// The enemy is out of HP. A scene with an `explosion` doesn't end here: the corpse
+// winds up for EXPLOSION_TICKS and fightTick resolves the blast (which can still
+// kill the player). Without one, the kill is the win.
+uint8_t WorldState::enemyDefeated(GameState& gs) {
+    cx.enemyHp = 0;
+    if (cx.explosionDamage > 0) {
+        cx.exploding = true;
+        cx.explodeTicksLeft = (uint8_t)EXPLOSION_TICKS;
+        return FIGHT_ONGOING;
+    }
+    rollLoot(gs);                                // bank the drops
+    cx.won = true;
+    return FIGHT_WON;
+}
+
 uint8_t WorldState::fightAttack(GameState& gs, int s) {
-    if (!cx.active || cx.won) return FIGHT_NOOP;
+    if (!cx.active || cx.won || cx.exploding) return FIGHT_NOOP;
     if (s < 0 || s >= cx.weaponN) return FIGHT_NOOP;
     if (cx.weaponCool[s] > 0) return FIGHT_NOOP;
     const WeaponDef& w = WEAPONS[cx.weapons[s]];
-    // Spend ammo (grenade/bolas spend themselves; rifle/laser spend a Res).
+    // Spend ammo (grenade/bolas spend themselves; rifle/laser/plasma spend a Res;
+    // the disruptor is the one stun weapon that spends nothing — §4.3).
     if (w.selfAmmo) {
         if (ex.outfitItem[w.itemSlot] <= 0) return FIGHT_NOOP;
         ex.outfitItem[w.itemSlot]--;
@@ -791,39 +885,144 @@ uint8_t WorldState::fightAttack(GameState& gs, int s) {
     cx.lastMiss = !hit;
     if (!hit) return FIGHT_ONGOING;
     if (w.damage == DMG_STUN) { cx.enemyStunLeft = FIGHT_STUN_S; return FIGHT_ONGOING; }
-    cx.enemyHp -= w.damage;
-    if (cx.enemyHp <= 0) {
-        cx.enemyHp = 0;
-        rollLoot(gs);                                // bank the drops
-        cx.won = true;
-        return FIGHT_WON;
-    }
+    int dmg = w.damage;
+    if (cx.playerStatus == ST_BOOST) dmg *= BOOST_MULT;   // §12 Q7's defined payoff
+    enemyDamaged(dmg);
+    if (cx.enemyHp <= 0) return enemyDefeated(gs);
     return FIGHT_ONGOING;
 }
 
-uint8_t WorldState::fightTick() {
+uint8_t WorldState::fightTick(GameState& gs) {
     if (!cx.active || cx.won) return FIGHT_ONGOING;
+
+    // (1) player cooldowns
     for (int i = 0; i < cx.weaponN; i++)
         if (cx.weaponCool[i] > 0) cx.weaponCool[i]--;
-    if (cx.eatCool > 0)  cx.eatCool--;
-    if (cx.medsCool > 0) cx.medsCool--;
-    // Enemy swings on its interval; a stunned enemy's swing is SKIPPED (the clock
-    // still runs, matching upstream's interval + `if(stunned) return`).
+    if (cx.eatCool > 0)    cx.eatCool--;
+    if (cx.medsCool > 0)   cx.medsCool--;
+    if (cx.hypoCool > 0)   cx.hypoCool--;
+    if (cx.stimCool > 0)   cx.stimCool--;
+    if (cx.shieldCool > 0) cx.shieldCool--;
+
+    // (2) player status expiry — boost is the only timed one (the player's shield
+    // waits for a hit to break it, so it holds STATUS_FOREVER).
+    if (cx.playerStatus != ST_NONE && cx.playerStatusLeft != STATUS_FOREVER) {
+        if (cx.playerStatusLeft > 0) cx.playerStatusLeft--;
+        if (cx.playerStatusLeft == 0) cx.playerStatus = ST_NONE;
+    }
+
+    // (3) enemy timed-status expiry (enraged restores the armed attack interval).
+    if (cx.enemyStatus != ST_NONE && cx.enemyStatusLeft != STATUS_FOREVER) {
+        if (cx.enemyStatusLeft > 0) cx.enemyStatusLeft--;
+        if (cx.enemyStatusLeft == 0) {
+            if (cx.enemyStatus == ST_ENRAGED) cx.enemyDelayS = cx.enemyDelayBaseS;
+            cx.enemyStatus = ST_NONE;
+        }
+    }
+
+    // (4) scene `specials` — a PERIODIC re-arm, not a one-shot (events.js:161-171).
+    if (cx.specialDelay > 0 && !cx.exploding) {
+        if (cx.specialLeft > 0) cx.specialLeft--;
+        if (cx.specialLeft <= 0) {
+            cx.specialLeft = cx.specialDelay;
+            uint8_t st = ST_NONE;
+            if (cx.specialKind == SK_RANDOM3) {
+                // The command deck's boss rolls shield/enraged/meditation but never
+                // the same one twice running (upstream's lastSpecial memory).
+                static const uint8_t POOL[3] = { ST_SHIELD, ST_ENRAGED, ST_MEDITATION };
+                for (int guard = 0; guard < 8; guard++) {
+                    st = POOL[(int)(xorshift(ex.rng) % 3u)];
+                    if (st != cx.lastSpecial) break;
+                }
+                cx.lastSpecial = st;
+            } else {
+                switch (cx.specialKind) {
+                    case SK_SHIELD:     st = ST_SHIELD;     break;
+                    case SK_ENRAGED:    st = ST_ENRAGED;    break;
+                    case SK_ENERGISED:  st = ST_ENERGISED;  break;
+                    case SK_MEDITATION: st = ST_MEDITATION; break;
+                    default: break;
+                }
+            }
+            if (st != ST_NONE) setEnemyStatus(st);
+        }
+    }
+
+    // (5) venom damage-over-time. PORT DEVIATION (a coordinator ruling): upstream
+    // hangs a FRESH setInterval per landed venomous hit, so repeat hits STACK the
+    // tick rate; we keep one channel and RESET it, and it runs to the end of the
+    // fight (dotTicksLeft == STATUS_FOREVER) instead of leaking a timer past it.
+    if (cx.dotDamage > 0 && cx.dotTicksLeft > 0) {
+        if (cx.dotTicksLeft != STATUS_FOREVER) cx.dotTicksLeft--;
+        ex.hp -= cx.dotDamage;
+        if (ex.hp <= 0) {
+            ex.hp = 0; cx.active = false;
+            die();
+            return FIGHT_LOST;
+        }
+    }
+
+    // (6) self-destruct wind-up: the corpse is inert (no swings, no specials) until
+    // the blast lands. Surviving it is the victory the kill deferred.
+    if (cx.exploding) {
+        if (cx.explodeTicksLeft > 0) cx.explodeTicksLeft--;
+        if (cx.explodeTicksLeft > 0) return FIGHT_ONGOING;
+        cx.exploding = false;
+        cx.enemyChara = '*';                     // events.js swaps the glyph on blast
+        ex.hp -= cx.explosionDamage;             // ranged, no hit roll upstream
+        if (ex.hp <= 0) {
+            ex.hp = 0; cx.active = false;
+            die();
+            return FIGHT_LOST;
+        }
+        rollLoot(gs);
+        cx.won = true;
+        return FIGHT_WON;
+    }
+
+    // (7) the enemy's swing. A stunned or meditating enemy skips it (the clock
+    // still runs, matching upstream's interval + early `return`).
     bool stunned = cx.enemyStunLeft > 0;
     if (stunned) cx.enemyStunLeft--;
     if (cx.enemyDelayLeft > 0) cx.enemyDelayLeft--;
     if (cx.enemyDelayLeft <= 0) {
         cx.enemyDelayLeft = cx.enemyDelayS;          // rearm for the next swing
-        if (!stunned) {
-            bool hit = (int)(xorshift(ex.rng) % 1000u) < cx.enemyHitPM;
-            if (hit) {
-                ex.hp -= cx.enemyDamage;
-                if (ex.hp <= 0) {
-                    ex.hp = 0;
-                    cx.active = false;
-                    die();                            // discards trip + empties bag
-                    return FIGHT_LOST;
+        if (!stunned && cx.enemyStatus != ST_MEDITATION) {
+            // Meditation's payout: everything it swallowed comes back in ONE
+            // unavoidable hit, INSTEAD of the normal swing (events.js:739-748).
+            if (cx.meditateAccum > 0) {
+                int dmg = cx.meditateAccum;
+                cx.meditateAccum = 0;
+                ex.hp -= (int16_t)dmg;
+            } else {
+                bool hit = (int)(xorshift(ex.rng) % 1000u) < cx.enemyHitPM;
+                if (hit) {
+                    int dmg = cx.enemyDamage;
+                    if (cx.enemyStatus == ST_ENERGISED) {
+                        dmg *= ENERGISE_MULT;
+                        cx.enemyStatus = ST_NONE;    // spent on this hit
+                        cx.enemyStatusLeft = 0;
+                    }
+                    if (cx.playerStatus == ST_SHIELD) {
+                        // Shielded: the blow heals instead, and the shield breaks.
+                        ex.hp += (int16_t)dmg;
+                        if (ex.hp > ex.maxHp) ex.hp = ex.maxHp;
+                        cx.playerStatus = ST_NONE; cx.playerStatusLeft = 0;
+                        return FIGHT_ONGOING;        // a shielded hit hangs no venom
+                    }
+                    ex.hp -= (int16_t)dmg;
+                    // A venomous attacker hangs a DoT on whatever it just hit.
+                    if (cx.enemyStatus == ST_VENOMOUS) {
+                        cx.dotDamage = (int16_t)(dmg / 2);      // floor(dmg/2)
+                        cx.dotTicksLeft = STATUS_FOREVER;
+                    }
                 }
+            }
+            if (ex.hp <= 0) {
+                ex.hp = 0;
+                cx.active = false;
+                die();                            // discards trip + empties bag
+                return FIGHT_LOST;
             }
         }
     }
@@ -849,6 +1048,54 @@ uint8_t WorldState::fightMeds() {
     ex.outfitRes[R_MEDICINE]--;
     ex.hp += MEDS_HEAL; if (ex.hp > ex.maxHp) ex.hp = ex.maxHp;
     cx.medsCool = FIGHT_MEDS_COOLDOWN_S;
+    return FIGHT_ONGOING;
+}
+
+// world.js hypoHeal — the Fabricator's 30-point field heal. Same shape as meds.
+uint8_t WorldState::fightHypo() {
+    if (!cx.active || cx.won) return FIGHT_NOOP;
+    if (cx.hypoCool > 0) return FIGHT_NOOP;
+    if (ex.outfitRes[R_HYPO] <= 0) return FIGHT_NOOP;
+    if (ex.hp >= ex.maxHp) return FIGHT_NOOP;
+    ex.outfitRes[R_HYPO]--;
+    ex.hp += HYPO_HEAL; if (ex.hp > ex.maxHp) ex.hp = ex.maxHp;
+    cx.hypoCool = FIGHT_HYPO_COOLDOWN_S;
+    return FIGHT_ONGOING;
+}
+
+// events.js useStim, with §12 Q7's two rulings folded in: the stim IS spent (upstream
+// forgets to deduct it, so it could be pressed forever), and its payoff is BOOST_MULT
+// weapon damage for BOOST_TICKS (upstream defines none). The BOOST_DAMAGE self-harm is
+// upstream's and can kill — dotDamage(player, 10) has no floor there either, so a
+// desperate stim at low HP is a real gamble.
+uint8_t WorldState::fightStim() {
+    if (!cx.active || cx.won) return FIGHT_NOOP;
+    if (cx.stimCool > 0) return FIGHT_NOOP;
+    if (ex.outfitRes[R_STIM] <= 0) return FIGHT_NOOP;
+    ex.outfitRes[R_STIM]--;
+    cx.playerStatus = ST_BOOST;
+    cx.playerStatusLeft = (uint8_t)BOOST_TICKS;
+    cx.stimCool = FIGHT_STIM_COOLDOWN_S;
+    ex.hp -= BOOST_DAMAGE;
+    if (ex.hp <= 0) {
+        ex.hp = 0;
+        cx.active = false;
+        die();
+        return FIGHT_LOST;
+    }
+    return FIGHT_ONGOING;
+}
+
+// events.js:343-351 — the shield button, gated on OWNING kinetic armour (upstream
+// reads `stores`, not the expedition outfit, so the caller checks gs.items; this
+// engine call only arms the status). The shield sits until a hit breaks it.
+uint8_t WorldState::fightShield() {
+    if (!cx.active || cx.won) return FIGHT_NOOP;
+    if (cx.shieldCool > 0) return FIGHT_NOOP;
+    if (cx.playerStatus == ST_SHIELD) return FIGHT_NOOP;
+    cx.playerStatus = ST_SHIELD;
+    cx.playerStatusLeft = STATUS_FOREVER;
+    cx.shieldCool = FIGHT_SHIELD_COOLDOWN_S;
     return FIGHT_ONGOING;
 }
 
@@ -884,6 +1131,33 @@ void WorldState::spGrantGastronome(GameState& gs) {
 // goHome, discarded at die() (working-layer, same as revealed/tiles).
 void WorldState::spMarkVisited() {
     if (inBounds(ex.x, ex.y)) setBit(ex.visited, widx(ex.x, ex.y));
+}
+
+// world.js applyMap — uncover a Manhattan-radius-5 diamond around a randomly
+// chosen STILL-DARK cell (research-phase2.md §2.5 uncoverMap). Written to
+// ex.revealed, not the committed mask: see the world_state.h note for why that
+// fixes the upstream bug rather than reproducing it. Upstream draws its two
+// coordinates from `floor(random * RADIUS * 2)` (0..59, one column/row shy of the
+// grid) — mirrored here so the reachable reveal set matches. The retry loop is
+// bounded: on a fully-lit map upstream would spin forever, we simply do nothing.
+void WorldState::spApplyMap() {
+    if (!ex.active) return;
+    const int SPAN = WORLD_RADIUS * 2;             // upstream's 0..59 draw range
+    int x = -1, y = -1;
+    for (int tries = 0; tries < 512; tries++) {
+        int cx_ = (int)(xorshift(ex.rng) % (uint32_t)SPAN);
+        int cy_ = (int)(xorshift(ex.rng) % (uint32_t)SPAN);
+        if (!getBit(ex.revealed, widx(cx_, cy_))) { x = cx_; y = cy_; break; }
+    }
+    if (x < 0) return;                             // everything already lit
+    const int r = 5;                               // applyMap's fixed uncover radius
+    for (int i = -r; i <= r; i++) {
+        int span = r - iabs(i);
+        for (int j = -span; j <= span; j++) {
+            int tx = x + i, ty = y + j;
+            if (inBounds(tx, ty)) setBit(ex.revealed, widx(tx, ty));
+        }
+    }
 }
 
 int WorldState::spRand1000() { return (int)(xorshift(ex.rng) % 1000u); }
@@ -984,6 +1258,8 @@ bool WorldState::loadWorld() {
 //   [starving u8][thirsty u8][rng u32][clearedFlags u8][usedOutpostN u8]
 //   [usedOutpostX 16][usedOutpostY 16][outfitRes i16 x RES_COUNT]
 //   [outfitItem i16 x ITEM_COUNT][tiles CELLS][revealed MASK][visited MASK]
+// v1 is the same layout with the pre-Phase-3c array widths (19 Res / 18 Item) and
+// still loads — see TREK_BIN_SIZE_V1 and the migration branch in loadTrek.
 
 bool WorldState::saveTrek() const {
     static uint8_t buf[TREK_BIN_SIZE];
@@ -1019,11 +1295,16 @@ bool WorldState::saveTrek() const {
 bool WorldState::loadTrek() {
     static uint8_t buf[TREK_BIN_SIZE];
     int n = w_read(ADR_TREK_PATH, buf, sizeof buf);
-    if (n < (int)TREK_BIN_SIZE) { ex.active = false; return false; }
+    if (n < (int)TREK_BIN_SIZE_V1) { ex.active = false; return false; }
     size_t o = 0;
     if (getU32(buf, o) != TREK_MAGIC) { ex.active = false; return false; }
     uint8_t ver = buf[o++]; o += 3;
-    if (ver != TREK_VER) { ex.active = false; return false; }
+    if (ver != 1 && ver != TREK_VER) { ex.active = false; return false; }
+    if (ver == TREK_VER && n < (int)TREK_BIN_SIZE) { ex.active = false; return false; }
+    // A v1 file carries the OLD array widths; the new tail slots stay 0 (the memset
+    // below), which reads correctly as "this trip packed no hypo/stim/new gear".
+    const int resN  = (ver == 1) ? TREK_V1_RES  : RES_COUNT;
+    const int itemN = (ver == 1) ? TREK_V1_ITEM : ITEM_COUNT;
     memset(&ex, 0, sizeof ex);
     ex.active = buf[o++] != 0;
     ex.dead   = buf[o++] != 0;
@@ -1043,8 +1324,8 @@ bool WorldState::loadTrek() {
     ex.usedOutpostN = buf[o++];
     memcpy(ex.usedOutpostX, buf + o, 16); o += 16;
     memcpy(ex.usedOutpostY, buf + o, 16); o += 16;
-    for (int i = 0; i < RES_COUNT; i++)  ex.outfitRes[i] = getI16(buf, o);
-    for (int i = 0; i < ITEM_COUNT; i++) ex.outfitItem[i] = getI16(buf, o);
+    for (int i = 0; i < resN; i++)  ex.outfitRes[i] = getI16(buf, o);
+    for (int i = 0; i < itemN; i++) ex.outfitItem[i] = getI16(buf, o);
     memcpy(ex.tiles, buf + o, WORLD_CELLS);          o += WORLD_CELLS;
     memcpy(ex.revealed, buf + o, WORLD_MASK_BYTES);  o += WORLD_MASK_BYTES;
     memcpy(ex.visited, buf + o, WORLD_MASK_BYTES);   o += WORLD_MASK_BYTES;

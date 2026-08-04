@@ -14,7 +14,10 @@
 // a player block (生命 N/M + HP bar + 水/熏肉/药剂 counts), and a bottom-anchored
 // two-column button grid (one attack band per packed weapon — verb label + a
 // draining cooldown bar, drawn by the shared action_band like every other button
-// in the firmware — then 吃肉 / 服药 when carried, then 跑 to flee). A victory
+// in the firmware — then 吃肉 / 服药 / hypo / stim / shield when the wanderer has
+// them, then 跑 to flee, always last). The grid is capped at 6 rows and the weapon
+// bands paginate behind a 更多 cell once they no longer fit — see GRID_MAX_CELLS
+// for the arithmetic. A victory
 // panel replaces the body on a kill:
 // the enemy's death line + the banked loot + a 离开 band. The per-second tick and
 // each landed action FASTEST-repaint just the dynamic band [enemy HP .. buttons];
@@ -73,6 +76,17 @@ constexpr int COL_W      = (CONTENT_W - COL_GAP) / 2;        // 240
 constexpr int COL_X0[2]  = { PAD, PAD + COL_W + COL_GAP };   // {24, 276}
 constexpr int COL_MID    = 270;                // x < MID => left column
 constexpr int VBTN_TOP   = BTN_BOTTOM - BTN_H; // victory 离开 band (832)
+// Phase 3c can offer up to 12 weapons and 6 fixed actions — 17-18 bands, which at
+// 80px would run off the top of the panel (research-phase3.md §10.4's layout risk,
+// §12 Q13). Resolution: keep the 80px long-press floor and PAGINATE the weapons,
+// exactly the way room_page / trade_page batch their action lists. Six rows is the
+// ceiling that still clears the player supply line: 6*80 + 5*10 = 530, so the grid
+// tops out at 912-530 = 382, comfortably below SUP_Y+GLYPH = 332.
+constexpr int GRID_MAX_CELLS = 12;             // 6 rows x 2 columns
+constexpr int GRID_MAX_ROWS  = GRID_MAX_CELLS / 2;
+static_assert(BTN_BOTTOM - (GRID_MAX_ROWS * BTN_H + (GRID_MAX_ROWS - 1) * BTN_GAP)
+              > SUP_Y + GLYPH,
+              "the worst-case fight grid must not overlap the player supply line");
 
 // Dynamic-repaint band: enemy HP bar down through the buttons (the static enemy
 // glyph/name/notification above it never change during a fight).
@@ -87,9 +101,11 @@ uint32_t s_lastMs     = 0;     // last interaction (idle-timeout clock)
 uint32_t s_lastTickMs = 0;     // 1s combat-tick gate
 uint32_t s_victoryMs  = 0;     // when the victory panel appeared (spam guard)
 uint32_t s_lastPressMs = 0;    // press debounce (e-ink double-tap bounce, pager.cpp)
+int      s_wpnPage    = 0;     // weapon-batch page (only >0 once paging is needed)
 
 // ---- button model, rebuilt each render ----
-enum : uint8_t { BK_WEAPON, BK_EAT, BK_MEDS, BK_FLEE };
+enum : uint8_t { BK_WEAPON, BK_EAT, BK_MEDS, BK_HYPO, BK_STIM, BK_SHIELD,
+                 BK_MORE, BK_FLEE };
 struct FBtn {
     uint8_t kind;
     int     wslot;             // weapon slot (BK_WEAPON) else -1
@@ -97,13 +113,55 @@ struct FBtn {
     bool    enabled;
     int     coolLeft, coolTotal;
 };
-FBtn s_btns[16];
+FBtn s_btns[GRID_MAX_CELLS];
 int  s_btnN = 0;
 
+// How many fixed (non-weapon, non-"更多") action cells the current state offers.
+// Gates are events.js:144-155: meat/meds off the BAG, hypo/stim off the bag too,
+// shield off the VILLAGE stores (upstream reads `stores`, not the outfit — kinetic
+// armour is worn, not carried). Flee is unconditional.
+int fixedActionCount() {
+    int n = 1;                                              // flee, always
+    if (g_world.ex.outfitRes[R_CURED_MEAT] > 0) n++;
+    if (g_world.ex.outfitRes[R_MEDICINE] > 0)   n++;
+    if (g_world.ex.outfitRes[R_HYPO] > 0)       n++;
+    if (g_world.ex.outfitRes[R_STIM] > 0)       n++;
+    if (g_game.items[I_KINETIC_ARMOUR] > 0)     n++;
+    return n;
+}
+
+void addFixed(uint8_t kind, const char* label, bool enabled, int coolLeft,
+              int coolTotal) {
+    if (s_btnN >= GRID_MAX_CELLS) return;
+    FBtn& b = s_btns[s_btnN++];
+    b.kind = kind; b.wslot = -1;
+    snprintf(b.label, sizeof b.label, "%s", label);
+    b.enabled = enabled; b.coolLeft = coolLeft; b.coolTotal = coolTotal;
+}
+
+// Order: the weapon batch, then "更多" when the weapons don't all fit, then the
+// fixed actions with 跑 pinned last. cx.weapons is frozen at beginFight, so the
+// page split can't shift under the player's finger mid-fight.
 void buildButtons() {
     s_btnN = 0;
     const Combat& cx = g_world.combat();
-    for (int s = 0; s < g_world.fightWeaponCount() && s_btnN < 16; s++) {
+    const int fixedN  = fixedActionCount();
+    const int total   = g_world.fightWeaponCount();
+    const int maxWpn  = GRID_MAX_CELLS - fixedN;
+
+    int numPages = 1, start = 0, take = total, pg = 0;
+    bool more = false;
+    if (total > maxWpn) {
+        int perPage = maxWpn - 1;                            // one cell buys "更多"
+        if (perPage < 1) perPage = 1;
+        numPages = (total + perPage - 1) / perPage;
+        pg = ((s_wpnPage % numPages) + numPages) % numPages;
+        start = pg * perPage;
+        take = total - start; if (take > perPage) take = perPage;
+        more = true;
+    }
+    for (int i = 0; i < take && s_btnN < GRID_MAX_CELLS; i++) {
+        int s = start + i;
         FBtn& b = s_btns[s_btnN++];
         b.kind = BK_WEAPON; b.wslot = s;
         uint8_t wid = g_world.fightWeaponId(s);
@@ -112,26 +170,38 @@ void buildButtons() {
         b.coolLeft  = g_world.fightWeaponCoolLeft(s);
         b.coolTotal = WEAPONS[wid].cooldownS;
     }
-    if (g_world.ex.outfitRes[R_CURED_MEAT] > 0 && s_btnN < 16) {
+    if (more && s_btnN < GRID_MAX_CELLS) {
         FBtn& b = s_btns[s_btnN++];
-        b.kind = BK_EAT; b.wslot = -1;
-        snprintf(b.label, sizeof b.label, "%s", tr("eat meat"));
-        b.enabled   = cx.eatCool == 0 && g_world.ex.hp < g_world.ex.maxHp;
-        b.coolLeft  = cx.eatCool; b.coolTotal = FIGHT_EAT_COOLDOWN_S;
-    }
-    if (g_world.ex.outfitRes[R_MEDICINE] > 0 && s_btnN < 16) {
-        FBtn& b = s_btns[s_btnN++];
-        b.kind = BK_MEDS; b.wslot = -1;
-        snprintf(b.label, sizeof b.label, "%s", tr("use meds"));
-        b.enabled   = cx.medsCool == 0 && g_world.ex.hp < g_world.ex.maxHp;
-        b.coolLeft  = cx.medsCool; b.coolTotal = FIGHT_MEDS_COOLDOWN_S;
-    }
-    if (s_btnN < 16) {                              // flee — always offered
-        FBtn& b = s_btns[s_btnN++];
-        b.kind = BK_FLEE; b.wslot = -1;
-        snprintf(b.label, sizeof b.label, "%s", tr("run"));   // 跑
+        b.kind = BK_MORE; b.wslot = -1;
+        // UI chrome with no upstream string, so it uses the two closure-present
+        // glyphs 更/多 + an ASCII page indicator — room_page's exact convention,
+        // deliberately NOT routed through tr().
+        snprintf(b.label, sizeof b.label, "更多 (%d/%d)",
+                 (pg + 1 < numPages ? pg + 2 : 1), numPages);
         b.enabled = true; b.coolLeft = 0; b.coolTotal = 0;
     }
+
+    if (g_world.ex.outfitRes[R_CURED_MEAT] > 0)
+        addFixed(BK_EAT, tr("eat meat"),
+                 cx.eatCool == 0 && g_world.ex.hp < g_world.ex.maxHp,
+                 cx.eatCool, FIGHT_EAT_COOLDOWN_S);
+    if (g_world.ex.outfitRes[R_MEDICINE] > 0)
+        addFixed(BK_MEDS, tr("use meds"),
+                 cx.medsCool == 0 && g_world.ex.hp < g_world.ex.maxHp,
+                 cx.medsCool, FIGHT_MEDS_COOLDOWN_S);
+    if (g_world.ex.outfitRes[R_HYPO] > 0)
+        addFixed(BK_HYPO, tr("use hypo"),
+                 cx.hypoCool == 0 && g_world.ex.hp < g_world.ex.maxHp,
+                 cx.hypoCool, FIGHT_HYPO_COOLDOWN_S);
+    if (g_world.ex.outfitRes[R_STIM] > 0)
+        // No hp<max gate: a stim is a damage buff that COSTS health, not a heal.
+        addFixed(BK_STIM, tr("use stim"), cx.stimCool == 0,
+                 cx.stimCool, FIGHT_STIM_COOLDOWN_S);
+    if (g_game.items[I_KINETIC_ARMOUR] > 0)
+        addFixed(BK_SHIELD, tr("shield"),
+                 cx.shieldCool == 0 && cx.playerStatus != ST_SHIELD,
+                 cx.shieldCool, FIGHT_SHIELD_COOLDOWN_S);
+    addFixed(BK_FLEE, tr("run"), true, 0, 0);       // 跑 — always last
 }
 
 int gridRows()      { return (s_btnN + 1) / 2; }
@@ -283,6 +353,7 @@ void raise(uint32_t nowMs) {
     s_lastTickMs  = nowMs;
     s_victoryMs   = 0;
     s_lastPressMs = 0;         // don't inherit a stale press time from a prior fight
+    s_wpnPage     = 0;         // every fight opens on the first weapon batch
     push();
     // encounter alert: a short falling two-note chime, distinct from the event
     // pop (1047->1568 rising) and the switcher tone (2000).
@@ -330,6 +401,13 @@ bool handleHold(int x, int y) {
     pages::Rect pr = btnRect(b);
     pager::flashPressRect(pr);
 
+    if (s_btns[b].kind == BK_MORE) {                // next weapon batch, no combat cost
+        s_wpnPage++;
+        beeper::tone(2000, 30);
+        push();
+        return true;
+    }
+
     if (s_btns[b].kind == BK_FLEE) {
         bool sp = g_world.combat().setpiece;
         g_world.fightFlee();
@@ -344,8 +422,18 @@ bool handleHold(int x, int y) {
         case BK_WEAPON: st = g_world.fightAttack(g_game, s_btns[b].wslot); break;
         case BK_EAT:    st = g_world.fightEat();  break;
         case BK_MEDS:   st = g_world.fightMeds(); break;
+        case BK_HYPO:   st = g_world.fightHypo(); break;
+        case BK_STIM:   st = g_world.fightStim(); break;
+        case BK_SHIELD: st = g_world.fightShield(); break;
     }
 
+    if (st == FIGHT_LOST) {                          // only the stim's self-harm
+        s_active = false;
+        if (g_world.combat().setpiece) setpiece_modal::abort();
+        world_page::enterDeath();
+        Serial.println("[fight] stim self-damage killed the wanderer");
+        return true;
+    }
     if (st == FIGHT_WON) {
         beeper::tone(1568, 120);                 // victory chime
         if (g_world.combat().setpiece) {
@@ -396,12 +484,20 @@ void tick(uint32_t nowMs) {
     }
 
     bool sp = g_world.combat().setpiece;
-    uint8_t st = g_world.fightTick();
+    uint8_t st = g_world.fightTick(g_game);
     if (st == FIGHT_LOST) {
         s_active = false;                            // release the guard first
         if (sp) setpiece_modal::abort();             // tear down the setpiece too
         world_page::enterDeath();                    // shared World death frame
         Serial.println("[fight] player died -> death frame");
+        return;
+    }
+    // A scene `explosion` defers the kill: the enemy hit 0 HP, wound up for
+    // EXPLOSION_TICKS, and the win only lands here once the blast is survived.
+    if (st == FIGHT_WON) {
+        beeper::tone(1568, 120);
+        if (sp) { s_active = false; setpiece_modal::onFightResult(true); }
+        else    { push(); s_victoryMs = millis(); }
         return;
     }
     push();                                // HP bars + cooldown bars drained

@@ -43,6 +43,13 @@
 namespace adr {
 
 // ---- scene-transition sentinels (a button's `next` field) -----------------
+constexpr uint8_t SP_SCENE_EVENT = 0xFC; // events.js `nextEvent`: leave THIS setpiece
+                                         // and start another one, keeping the World
+                                         // state. The target SetpieceId rides in the
+                                         // button's `probStart` (a prob table and a
+                                         // cross-event jump are mutually exclusive,
+                                         // so the field is free) — see
+                                         // setpiece_engine.cpp choose().
 constexpr uint8_t SP_SCENE_PROB = 0xFD;  // resolve via the button's prob table
 constexpr uint8_t SP_SCENE_END  = 0xFF;  // close the setpiece (back to World)
 
@@ -56,6 +63,9 @@ enum SpEffect : uint8_t {
     SPE_CLEAR_SULPHUR,
     SPE_CLEAR_SHIP,        // record ship (Phase-3 door), draw road
     SPE_GRANT_GASTRONOME,  // swamp charm -> perk (x2 meat heal)
+    SPE_REVEAL_MAP3,       // executioner-martial 7-1 `scavenge maps`: World.applyMap()
+                           // three times, onto the WORKING fog (upstream bug fixed,
+                           // see WorldState::spApplyMap)
 };
 
 // ---- probability branch ({0.25:'a',0.5:'b',1:'c'} semantics) --------------
@@ -64,16 +74,26 @@ enum SpEffect : uint8_t {
 struct SpProb { int16_t thresholdMilli; uint8_t scene; };  // scene = LOCAL idx
 
 // ---- button --------------------------------------------------------------
-// A setpiece cost is always a single unit of one thing (torch / charm). costSlot
-// == 0xFF means free. next is a LOCAL scene idx | SP_SCENE_PROB | SP_SCENE_END.
-constexpr uint8_t SP_NO_COST = 0xFF;
+// A Res/Item setpiece cost is always a SINGLE unit of one thing (torch / charm),
+// so costSlot alone describes it. The Executioner's engineering wing adds the two
+// non-inventory currencies upstream spends there (`cost: {water: 5}` / `{hp: 10}`,
+// research-phase3.md §3.6), which DO need an amount — hence the two sentinel slots
+// plus `costAmt`, appended so every existing row keeps its five-field form and
+// aggregate-inits costAmt to 0 (unread for Res/Item). costSlot == SP_NO_COST is
+// free. next is a LOCAL scene idx | SP_SCENE_EVENT | SP_SCENE_PROB | SP_SCENE_END.
+constexpr uint8_t SP_NO_COST    = 0xFF;
+constexpr uint8_t SP_COST_WATER = 0xFE;  // costAmt units of expedition water
+constexpr uint8_t SP_COST_HP    = 0xFD;  // costAmt HP — affordable only while
+                                         // hp > costAmt (paying can't be lethal)
 struct SpButton {
     const char* textKey;
-    uint8_t     costSlot;     // Res or Item slot, or SP_NO_COST
-    bool        costIsItem;   // torch -> Item; charm -> Res
-    uint8_t     next;         // scene idx | SP_SCENE_PROB | SP_SCENE_END
-    uint8_t     probStart;    // into this setpiece's probs[] when next==SP_SCENE_PROB
+    uint8_t     costSlot;     // Res or Item slot, or SP_NO_COST/SP_COST_WATER/_HP
+    bool        costIsItem;   // torch -> Item; charm -> Res (ignored for water/hp)
+    uint8_t     next;         // scene idx | SP_SCENE_EVENT | SP_SCENE_PROB | SP_SCENE_END
+    uint8_t     probStart;    // into this setpiece's probs[] when next==SP_SCENE_PROB;
+                              // the target SetpieceId when next==SP_SCENE_EVENT
     uint8_t     probCount;
+    int16_t     costAmt;      // water/hp amount; unread (and 0) for Res/Item costs
 };
 
 // ---- scene ---------------------------------------------------------------

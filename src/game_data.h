@@ -78,12 +78,20 @@ enum Res : uint8_t {
     R_WOOD = 0, R_FUR, R_MEAT, R_BAIT, R_LEATHER, R_CURED_MEAT,
     R_IRON, R_COAL, R_SULPHUR, R_STEEL, R_TEETH, R_SCALES, R_CLOTH, R_CHARM,
     R_BULLETS, R_MEDICINE, R_ENERGY_CELL, R_ALIEN_ALLOY, R_COMPASS,
+    // -- Phase 3c combat consumables (Fabricator products, world.js hypoHeal /
+    // events.js useStim). APPENDED AT THE TAIL on purpose: game.json's "stores"
+    // is a POSITIONAL array, and readIntArr stops at the ']' of a short array, so
+    // a v5 save's 19 entries still map 1:1 and the two new slots read 0 — no
+    // SAVE_VER bump is needed for the growth. (trek.bin is length-derived, so it
+    // DOES need a version: TREK_VER 1 -> 2, see world_state.cpp loadTrek.)
+    R_HYPO, R_STIM,
     RES_COUNT
 };
 static const char* const RES_KEY[RES_COUNT] = {
     "wood", "fur", "meat", "bait", "leather", "cured meat",
     "iron", "coal", "sulphur", "steel", "teeth", "scales", "cloth", "charm",
-    "bullets", "medicine", "energy cell", "alien alloy", "compass" };
+    "bullets", "medicine", "energy cell", "alien alloy", "compass",
+    "hypo", "stim" };
 
 // ---- Buildings (game.buildings) — P1 craftables + P2 World mines ----------
 enum Bld : uint8_t {
@@ -118,13 +126,20 @@ enum Item : uint8_t {
     // World expedition can carry and bank on goHome. Their Path.Weight (>1, see
     // world_data.h WEIGHTS) is why they get dedicated slots rather than a Res row.
     I_BAYONET, I_LASER_RIFLE, I_GRENADE, I_BOLAS,
+    // -- Phase 3c Fabricator / Executioner gear (world.js World.Weapons +
+    // getMaxHealth). Same tail-append rule as the Res block above: game.json's
+    // "itm" array is positional, so a v5 save's 18 entries still line up.
+    // kinetic armour is an UPGRADE, not a weapon — it sits in items[] because
+    // that is where getMaxHealth's armour tiers already live.
+    I_PLASMA_RIFLE, I_ENERGY_BLADE, I_DISRUPTOR, I_KINETIC_ARMOUR,
     ITEM_COUNT
 };
 static const char* const ITEM_KEY[ITEM_COUNT] = {
     "torch", "waterskin", "cask", "water tank", "bone spear", "rucksack",
     "wagon", "convoy", "l armour", "i armour", "s armour", "iron sword",
     "steel sword", "rifle",
-    "bayonet", "laser rifle", "grenade", "bolas" };
+    "bayonet", "laser rifle", "grenade", "bolas",
+    "plasma rifle", "energy blade", "disruptor", "kinetic armour" };
 
 // ---- Unified craftable table (room.js Room.Craftables) --------------------
 // Craft ids 0..9 are buildings (aligned 1:1 with Bld); 10..23 are items

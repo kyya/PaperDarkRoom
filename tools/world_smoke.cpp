@@ -787,9 +787,9 @@ int main() {
         CHECK(w.fightWeaponCoolLeft(0) == 2, "fists set a 2s cooldown");
         CHECK(w.fightAttack(gs, 0) == FIGHT_NOOP, "attacking while cooling is a no-op");
         CHECK(!w.fightWeaponEnabled(0), "cooling weapon reads disabled");
-        w.fightTick();
+        w.fightTick(gs);
         CHECK(w.fightWeaponCoolLeft(0) == 1, "tick drains cooldown 2 -> 1");
-        w.fightTick();
+        w.fightTick(gs);
         CHECK(w.fightWeaponEnabled(0), "cooldown cleared -> weapon ready again");
     }
 
@@ -818,9 +818,9 @@ int main() {
         plant(w, gs, VILLAGE_X + 25, VILLAGE_Y, T_BARRENS, 1);  // soldier dmg 8, delay 2
         w.beginFight(E_SOLDIER);
         w.ex.hp = 5;
-        uint8_t st = w.fightTick();                   // delay 2 -> 1, no swing yet
+        uint8_t st = w.fightTick(gs);                   // delay 2 -> 1, no swing yet
         CHECK(st == FIGHT_ONGOING && w.ex.hp == 5, "no enemy swing before its delay");
-        st = w.fightTick();                           // delay 1 -> 0 -> swing (rng=? hits)
+        st = w.fightTick(gs);                           // delay 1 -> 0 -> swing (rng=? hits)
         CHECK(st == FIGHT_LOST, "enemy swing (8) kills the 5-hp wanderer");
         CHECK(w.ex.dead && !w.ex.active, "player death routed through die()");
         CHECK(!w.cx.active, "combat ended on death");
@@ -839,7 +839,7 @@ int main() {
         CHECK(w.cx.enemyStunLeft == FIGHT_STUN_S, "bolas stuns for 4s");
         CHECK(w.ex.outfitItem[I_BOLAS] == 0, "bolas consumed itself");
         int hp = w.ex.hp;
-        w.fightTick();                                // enemy delay hits 0 but stunned
+        w.fightTick(gs);                                // enemy delay hits 0 but stunned
         CHECK(w.ex.hp == hp, "stunned enemy skips its swing (no damage)");
     }
 

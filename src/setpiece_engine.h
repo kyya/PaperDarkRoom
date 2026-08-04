@@ -35,6 +35,12 @@ void bind(adr::WorldState* world, adr::GameState* gs);
 // were a combat scene it would arm the fight here too, but no Phase-2 setpiece
 // opens on combat, so begin() always lands on a narrative scene.
 bool begin(uint8_t setpieceId);
+// The same start, from a table pointer instead of a SetpieceId — the seam the host
+// mechanics suite drives a throwaway test setpiece through, so a scene graph built
+// purely to exercise the engine never has to be shipped in setpieces_data.h
+// (research-phase3.md §11, 3c-1: "用一个临时测试 setpiece（不进最终版）"). begin()
+// is this plus the id lookup.
+bool beginTable(const adr::SpDef* def);
 
 // A setpiece owns the (modal) screen.
 bool active();
