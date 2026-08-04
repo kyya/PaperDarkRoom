@@ -19,6 +19,8 @@
  */
 
 const REPO = "kyya/PaperDarkRoom";
+// per_page=100 is the API maximum; fetchAllReleases() follows Link: rel="next"
+// until every page is in, so a repo past 100 releases still lists every asset.
 const RELEASES_API = `https://api.github.com/repos/${REPO}/releases?per_page=100`;
 
 // Tags are `v<semver>` and assets keep their file name, so a firmware name is
@@ -171,13 +173,48 @@ const cacheKey = (request, name) =>
  */
 let lastGoodListing = null;
 
+/**
+ * Parse the next page URL out of a GitHub Link header, or null if this is the
+ * last page. GitHub's form is:
+ *   <https://api.github.com/...&page=2>; rel="next", <...>; rel="last"
+ */
+const nextPageUrl = (linkHeader) => {
+  if (!linkHeader) return null;
+  for (const part of linkHeader.split(",")) {
+    const m = part.match(/<([^>]+)>\s*;\s*rel="next"/);
+    if (m) return m[1];
+  }
+  return null;
+};
+
+/**
+ * Every release page, in GitHub's order (newest first). Throws on any non-OK
+ * page so listFirmwares can fall back to the last-good copy rather than a
+ * partial listing that silently drops older firmwares.
+ */
+async function fetchAllReleases(env) {
+  const headers = apiHeaders(env);
+  const all = [];
+  let url = RELEASES_API;
+  while (url) {
+    const res = await fetch(url, { headers });
+    if (!res.ok) throw new Error(`GitHub releases API: HTTP ${res.status}`);
+    const page = await res.json();
+    all.push(...page);
+    url = nextPageUrl(res.headers.get("link"));
+  }
+  return all;
+}
+
 async function fetchListing(env) {
-  const res = await fetch(RELEASES_API, { headers: apiHeaders(env) });
-  if (!res.ok) throw new Error(`GitHub releases API: HTTP ${res.status}`);
-  const releases = await res.json();
+  const releases = await fetchAllReleases(env);
 
   const out = [];
   for (const release of releases) {
+    // A token with push access makes the releases endpoint return drafts too.
+    // Their assets show up in the listing, but download URLs (and HEAD) do not
+    // send that token, so every install would 404 — skip them entirely.
+    if (release.draft) continue;
     for (const asset of release.assets ?? []) {
       if (!asset.name.endsWith(MERGED_SUFFIX)) continue;
       const version = parseVersion(asset.name);
@@ -293,6 +330,11 @@ async function serveFirmware(request, ctx, key) {
  * Does this exact asset exist on its release? One HEAD, briefly remembered —
  * ESP Web Tools fetches the manifest on every install click, and the answer
  * only changes when a release is published or pulled.
+ *
+ * Returns true / false for an authoritative answer, or null when GitHub
+ * flaked (403 / 429 / 5xx / network). Only 200 and 404 are cached: a transient
+ * failure must not be remembered as "missing" for the full EXISTS_TTL, or the
+ * whole colo stops installs for five minutes on a rate-limit blip.
  */
 async function firmwareExists(request, ctx, version, key) {
   const cache = caches.default;
@@ -301,19 +343,30 @@ async function firmwareExists(request, ctx, version, key) {
   const hit = await cache.match(marker);
   if (hit) return (await hit.text()) === "1";
 
-  const head = await fetch(downloadUrl(version, key), {
-    method: "HEAD",
-    headers: { "user-agent": UA },
-  });
-  ctx.waitUntil(
-    cache.put(
-      marker,
-      new Response(head.ok ? "1" : "0", {
-        headers: { "cache-control": EXISTS_TTL },
-      }),
-    ),
-  );
-  return head.ok;
+  let head;
+  try {
+    head = await fetch(downloadUrl(version, key), {
+      method: "HEAD",
+      headers: { "user-agent": UA },
+    });
+  } catch {
+    return null;
+  }
+
+  if (head.ok || head.status === 404) {
+    ctx.waitUntil(
+      cache.put(
+        marker,
+        new Response(head.ok ? "1" : "0", {
+          headers: { "cache-control": EXISTS_TTL },
+        }),
+      ),
+    );
+    return head.ok;
+  }
+
+  // Rate limit, 5xx, unexpected status: do not cache, let the caller 502.
+  return null;
 }
 
 async function serveManifest(request, ctx, name) {
@@ -323,7 +376,11 @@ async function serveManifest(request, ctx, name) {
   if (!version) return notFound();
   if (key.includes("/")) return notFound();
 
-  if (!(await firmwareExists(request, ctx, version, key))) return notFound();
+  const exists = await firmwareExists(request, ctx, version, key);
+  if (exists === null) {
+    return new Response("Upstream error", { status: 502 });
+  }
+  if (!exists) return notFound();
 
   return json(
     {
