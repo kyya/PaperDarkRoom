@@ -172,7 +172,9 @@ class M5BurnerClient:
 
     def login(self, username, password):
         print(f"[login] as {username} ...")
-        response = self.session.post(LOGIN_URL, json={"email": username, "password": password})
+        response = self.session.post(
+            LOGIN_URL, json={"email": username, "password": password}, timeout=(10, 60)
+        )
         if response.status_code != 200:
             raise RuntimeError(f"login failed: HTTP {response.status_code}")
 
@@ -185,7 +187,7 @@ class M5BurnerClient:
 
     def list_firmware(self):
         url = f"{self.api_base_url}/api/admin/firmware"
-        response = self.session.get(url)
+        response = self.session.get(url, timeout=(10, 60))
         if response.status_code != 200:
             raise RuntimeError(f"listing firmware failed: HTTP {response.status_code} - {response.text}")
         return response.json()
@@ -215,7 +217,7 @@ class M5BurnerClient:
         }
         print(f"[upload] {binary_path} as version {version} ...")
         with open(binary_path, "rb") as f:
-            response = self.session.post(url, data=data, files={"firmware": f})
+            response = self.session.post(url, data=data, files={"firmware": f}, timeout=(10, 300))
         if response.status_code != 200:
             raise RuntimeError(f"upload failed: HTTP {response.status_code} - {response.text}")
         print("[upload] ok")
@@ -232,7 +234,7 @@ class M5BurnerClient:
             )
         url = f"{self.api_base_url}/api/admin/firmware/{fid}/publish/{file_id}/1"
         print(f"[publish] version {version} (file={file_id}) ...")
-        response = self.session.put(url)
+        response = self.session.put(url, timeout=(10, 60))
         if response.status_code != 200:
             raise RuntimeError(f"publish failed: HTTP {response.status_code} - {response.text}")
         result = response.json()
