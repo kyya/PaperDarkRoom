@@ -6,6 +6,7 @@
 #include "event_modal.h"
 #include "fight_modal.h"
 #include "setpiece_modal.h"
+#include "space_page.h"
 #include "page_tabs.h"
 #include "assign_page.h"
 #include "path_page.h"
@@ -292,6 +293,12 @@ static void drawFrame() {
     if (event_modal::active())    { event_modal::renderFrame();    return; }
     if (fight_modal::active())    { fight_modal::renderFrame();    return; }
     if (setpiece_modal::active()) { setpiece_modal::renderFrame(); return; }
+    // The Space level (3b). Last of the four full-screen owners and the only one
+    // that is not pumped by appLoop: it runs a blocking sub-loop that composes and
+    // presents its own frames. It is in this ladder for ONE reason — deghost()
+    // composes through here, and the level's entry/exit deghosts must snapshot the
+    // GAME's frame, not the Starship page hiding behind it.
+    if (space_page::active())     { space_page::renderFrame();     return; }
     pages::Page* p = pageAt(currentRingIndex());
     if (p && p->draw(canvas)) {
         status_bar::drawOnto(canvas);
@@ -312,6 +319,7 @@ static uint32_t frameIdentity() {
     if (event_modal::active())    return 0xE0000000u;
     if (fight_modal::active())    return 0xF0000000u;
     if (setpiece_modal::active()) return 0x50000000u;
+    if (space_page::active())     return 0x5AC30000u;
     return (uint32_t)currentRingIndex();
 }
 
@@ -413,6 +421,9 @@ bool showPage(int ring, bool quality) {
     // run (including an interleaved fight); setpiece_modal clears its flag before
     // its own closeToWorld showPage.
     if (setpiece_modal::active()) return false;
+    // Same for the Space level: it owns the panel for the whole flight and clears
+    // its own flag before the showPage that restores the Starship page.
+    if (space_page::active()) return false;
     pages::Page* p = pageAt(ring);
     if (!p) return false;
     bool ok = p->draw(canvas);
@@ -555,6 +566,17 @@ static bool dispatchRegion(int ring, int tx, int ty) {
 bool handleTouch() {
     int tc = touch::count();
     uint32_t nowMs = millis();
+
+    // Space level (3b): it samples touch itself, inside its own loop, and it must
+    // NOT get this function's policy — the 24 px edge band would clip the ends of
+    // its control strip, the 350 ms tap debounce is four logic frames of dead
+    // input, and hugging the bottom edge with a whole hand is how the level is
+    // played, not a grip to latch out (research-phase3.md §8.3). It intercepts
+    // first, exactly like the three modals below, for the same reason they do.
+    //   Structurally this can never be reached — run() blocks the app task, so
+    // appLoop is not calling handleTouch while it is up — which makes the line an
+    // assertion against a future non-blocking rewrite rather than dead code.
+    if (space_page::active()) return true;
 
     // Swallow everything until all fingers lift once — armed by a latched
     // multi-finger grip, and by deghost() (see there). Keeps that release out of

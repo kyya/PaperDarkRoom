@@ -53,6 +53,17 @@ struct Detail {
     int      x = 0, y = 0;     // portrait content frame, see the header note
     bool     clicked = false;  // released this pass, having never become a hold
     bool     held    = false;  // crossed the long-press threshold this pass
+    // STILL ON THE GLASS RIGHT NOW — a LEVEL, where the two above are EDGES.
+    // Everything the pager does is edge-driven (a tap turns a page, a hold fires
+    // a region), so this bit had no reader until the Space level, whose whole
+    // control scheme is "the ship is wherever the finger is" (research-phase3.md
+    // §8.3): a drag that never releases and never crosses the hold threshold
+    // produces no edge at all, so with clicked/held alone the level is unplayable.
+    // count() cannot stand in for it either — a contact that released during this
+    // pass is still counted, deliberately, so the release stays observable.
+    //   Pure addition: no existing field changes meaning, and pager.cpp reads
+    // none of this. Adding it was §7's second driver gap and §12 Q3.
+    bool     down    = false;
     uint32_t baseMsec = 0;     // millis() at press — the grip-graze tiebreak
 };
 

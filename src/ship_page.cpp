@@ -259,7 +259,12 @@ void ShipPage::onLocalAction(uint8_t param, int x, int y) {
         return;
     }
 
-    g_game.liftOff();          // 3a stub; 3b hands off to the Space module here
+    // Raises spacePending; main.cpp's loop starts the Space level on its next
+    // pass (space_page.h explains why it cannot start from inside this handler).
+    // The showPage below is still worth doing — it acks the press with the
+    // cooldown bar already draining, which is the frame the player sees for the
+    // ~5 ms before the level takes the panel.
+    g_game.liftOff();
     beeper::tone(1800, 80);
     g_game.save();
     pager::showPage(pager::currentRingIndex(), false);

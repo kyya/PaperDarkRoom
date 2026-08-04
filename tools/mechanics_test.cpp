@@ -42,6 +42,7 @@
 #include "combat_data.h"
 #include "world_data.h"
 #include "game_data.h"
+#include "space_game.h"
 #include <cstdio>
 #include <cstdint>
 #include <cstring>
@@ -795,6 +796,361 @@ static void layer4_gamejson() {
     CHECK(gs2.whole(R_WOOD) == 42, "other fields still load correctly");
 }
 
+
+// ===========================================================================
+// Layer 5: the Space level (Phase 3b) — research-phase3.md §2 (upstream) and
+// §8 (the e-ink re-derivation). This is the only layer whose subject is an
+// ACTION game, so the shape is different from the four above: every rule is
+// pure (space_game.cpp has no Arduino in it), the PRNG is seeded, and a whole
+// 60-second flight is 679 deterministic calls to step(). What that buys is a
+// golden frame count for the victory clock, which is the one acceptance
+// criterion (§11.3b.5) that nobody can eyeball on the glass.
+// ===========================================================================
+
+namespace sp = adr::space;
+
+static void layer5_space_constants() {
+    printf("== [L5] space: geometry + tempo constants (§8.2/§8.4/§8.5) ==\n");
+    // Double entry, same discipline as layer1_constants: the numbers are
+    // transcribed a SECOND time here straight out of the spec, so an edit to
+    // space_game.h that drifts one of them fails here rather than on the glass.
+    CHECK(sp::FRAME_MS == 92,            "logic frame is 92 ms (4 scans, §8.2)");
+    CHECK(sp::GAME_SECONDS == 60,        "the flight is 60 s of game time (§2.6)");
+    CHECK(sp::PF_TOP == 84 && sp::PF_BOT == 788, "playfield is y 84..788 (§8.5)");
+    CHECK(sp::PF_BOT - sp::PF_TOP == 704, "playfield is 704 px tall (§8.5)");
+    CHECK(sp::CTRL_TOP == 792,           "control band starts at y=792 (§8.5)");
+    CHECK(sp::SHIP_W == 48 && sp::SHIP_H == 36, "ship is 48x36 (§8.4 d5)");
+    CHECK(sp::SHIP_Y == 740,             "ship y is fixed at 740 (§8.3, 1-D)");
+    CHECK(sp::SHIP_X_MIN == 24 && sp::SHIP_X_MAX == 516,
+          "ship x range is [24,516] (§11.3b.2)");
+    CHECK(sp::MAX_ASTEROIDS == 16,       "at most 16 asteroids alive (§8.4 d4)");
+    CHECK(sp::AST_SPEED_MIN == 24 && sp::AST_SPEED_MAX == 48,
+          "asteroid speed is 24..48 px/frame = 260..521 px/s (§8.4 d3/d5)");
+    CHECK(sp::AST_DIAM_SMALL == 40 && sp::AST_DIAM_MID == 48 &&
+          sp::AST_DIAM_BIG == 56, "asteroid diameters are 40/48/56 (§8.4 d1)");
+    CHECK(sp::AST_DIAM_SMALL >= 40, "40 px is the hard readability floor (§8.4 d2)");
+    CHECK(sp::XITION_FRAMES == 3,        "layer transition holds 3 frames = 276 ms (§9.3)");
+}
+
+static void layer5_space_curves() {
+    printf("== [L5] space: thrusters, spawn curve, layers, tones ==\n");
+    // §8.3: SHIP_MAX_STEP = min(72, 32 + 8*thrusters).
+    CHECK(sp::shipMaxStep(1) == 40, "thrusters 1 -> 40 px/frame (434 px/s)");
+    CHECK(sp::shipMaxStep(2) == 48, "thrusters 2 -> 48 px/frame");
+    CHECK(sp::shipMaxStep(3) == 56, "thrusters 3 -> 56 px/frame");
+    CHECK(sp::shipMaxStep(4) == 64, "thrusters 4 -> 64 px/frame");
+    CHECK(sp::shipMaxStep(5) == 72, "thrusters 5 -> 72 px/frame (the cap)");
+    CHECK(sp::shipMaxStep(9) == 72, "thrusters past 5 buy nothing (§12 Q12)");
+    CHECK(sp::shipMaxStep(0) == 40, "a corrupt thrusters=0 still flies (floor at 1)");
+
+    // §8.4 d4's table, band by band, at both ends of every band.
+    CHECK(sp::spawnIntervalFrames(0)  == 10 && sp::waveCount(0)  == 1, "0 km:  1 / 10 frames");
+    CHECK(sp::spawnIntervalFrames(10) == 10 && sp::waveCount(10) == 1, "10 km: 1 / 10 frames");
+    CHECK(sp::spawnIntervalFrames(11) == 7  && sp::waveCount(11) == 1, "11 km: 1 / 7 frames");
+    CHECK(sp::spawnIntervalFrames(20) == 7  && sp::waveCount(20) == 1, "20 km: 1 / 7 frames");
+    CHECK(sp::spawnIntervalFrames(21) == 7  && sp::waveCount(21) == 2, "21 km: 2 / 7 frames");
+    CHECK(sp::spawnIntervalFrames(30) == 7  && sp::waveCount(30) == 2, "30 km: 2 / 7 frames");
+    CHECK(sp::spawnIntervalFrames(31) == 5  && sp::waveCount(31) == 2, "31 km: 2 / 5 frames");
+    CHECK(sp::spawnIntervalFrames(45) == 5  && sp::waveCount(45) == 2, "45 km: 2 / 5 frames");
+    CHECK(sp::spawnIntervalFrames(46) == 5  && sp::waveCount(46) == 3, "46 km: 3 / 5 frames");
+    CHECK(sp::spawnIntervalFrames(60) == 5  && sp::waveCount(60) == 3, "60 km: 3 / 5 frames");
+
+    // §2.6's thresholds, WITHOUT upstream's `altitude % 10` staleness (§12 Q4).
+    CHECK(sp::layerOf(0) == 0 && sp::layerOf(9) == 0,   "0..9 km is the troposphere");
+    CHECK(sp::layerOf(10) == 1 && sp::layerOf(19) == 1, "10..19 km is the stratosphere");
+    CHECK(sp::layerOf(20) == 2 && sp::layerOf(29) == 2, "20..29 km is the mesosphere");
+    CHECK(sp::layerOf(30) == 3 && sp::layerOf(44) == 3, "30..44 km is the thermosphere");
+    CHECK(sp::layerOf(45) == 4, "45 km IS the exosphere — upstream's %10 bug is not ported");
+    CHECK(sp::layerOf(49) == 4 && sp::layerOf(59) == 4, "45..59 km stays the exosphere");
+    CHECK(sp::layerOf(60) == 5, "60 km is space");
+    CHECK(sp::isLayerEdge(10) && sp::isLayerEdge(20) && sp::isLayerEdge(30) &&
+          sp::isLayerEdge(45) && sp::isLayerEdge(60), "the five transition altitudes");
+    CHECK(!sp::isLayerEdge(0) && !sp::isLayerEdge(40) && !sp::isLayerEdge(50),
+          "and nothing else fires a transition");
+
+    // §2.5's three bands, three pitches (§8.4).
+    CHECK(sp::hitToneHz(0) == 880 && sp::hitToneHz(20) == 880, "<=20 km hit tone 880 Hz");
+    CHECK(sp::hitToneHz(21) == 1200 && sp::hitToneHz(40) == 1200, "21..40 km hit tone 1200 Hz");
+    CHECK(sp::hitToneHz(41) == 1600 && sp::hitToneHz(60) == 1600, ">40 km hit tone 1600 Hz");
+}
+
+static void layer5_space_control() {
+    printf("== [L5] space: the absolute control band (§8.3) ==\n");
+    sp::Game g;
+    sp::reset(g, 5, 1, 12345);                       // thrusters 1 -> 40 px/frame
+    CHECK(g.shipX == sp::UI_W / 2, "the ship starts centred (space.js:64)");
+    CHECK(g.maxStep == 40, "maxStep comes from thrusters at reset");
+
+    // A finger at the far right: the ship closes at most maxStep a frame and
+    // stops exactly at the clamp, never past it.
+    int start = g.shipX;
+    sp::step(g, 539);
+    CHECK(g.shipX == start + 40, "one frame closes at most maxStep on the finger");
+    for (int i = 0; i < 40; i++) sp::step(g, 539);
+    CHECK(g.shipX == sp::SHIP_X_MAX, "a finger at the right edge reaches x=516 and stops");
+
+    // Lifting the finger holds position — no re-centring, no drift (§8.3).
+    int held = g.shipX;
+    for (int i = 0; i < 10; i++) sp::step(g, -1);
+    CHECK(g.shipX == held, "a lifted finger leaves the ship exactly where it was");
+
+    for (int i = 0; i < 40; i++) sp::step(g, 0);
+    CHECK(g.shipX == sp::SHIP_X_MIN, "a finger at the left edge reaches x=24 and stops");
+
+    // A finger closer than maxStep lands the ship exactly on it (1:1 absolute).
+    sp::step(g, 40);
+    CHECK(g.shipX == 40, "a finger within maxStep is matched exactly, not overshot");
+}
+
+// Drop one asteroid onto the field by hand. The generator is random by design,
+// so every collision assertion below places its own.
+static void placeAsteroid(sp::Game& g, int x, int y, int r) {
+    for (int i = 0; i < sp::MAX_ASTEROIDS; i++) {
+        if (g.ast[i].alive) continue;
+        g.ast[i].x = (int16_t)x; g.ast[i].y = (int16_t)y;
+        g.ast[i].r = (uint8_t)r; g.ast[i].vy = 0; g.ast[i].alive = true;
+        return;
+    }
+}
+
+static void layer5_space_collision() {
+    printf("== [L5] space: AABB collisions and the hull (§2.5/§8.4 d5) ==\n");
+    sp::Game g;
+    sp::reset(g, 3, 1, 999);
+    int x = g.shipX;
+
+    // Dead centre: a hit, one hull, and the asteroid is consumed.
+    placeAsteroid(g, x, sp::SHIP_Y, 24);
+    sp::FrameOut ev = sp::step(g, -1);
+    CHECK(ev.hit, "an asteroid on the ship is a hit");
+    CHECK(g.hull == 2, "a hit costs exactly 1 hull");
+    CHECK(sp::aliveCount(g) == 0, "the asteroid that hit is removed (§2.5)");
+    CHECK(g.hitFlash > 0, "the hit arms the reversed-ship feedback");
+
+    // One pixel outside the AABB on each axis: no hit. vy is 0 so the placement
+    // is exactly what is tested.
+    sp::reset(g, 3, 1, 999);
+    x = g.shipX;
+    placeAsteroid(g, x + sp::SHIP_W / 2 + 24 + 1, sp::SHIP_Y, 24);
+    ev = sp::step(g, -1);
+    CHECK(!ev.hit && g.hull == 3, "one px clear on x is a miss");
+    sp::reset(g, 3, 1, 999);
+    placeAsteroid(g, g.shipX, sp::SHIP_Y - sp::SHIP_H / 2 - 24 - 1, 24);
+    ev = sp::step(g, -1);
+    CHECK(!ev.hit && g.hull == 3, "one px clear on y is a miss");
+
+    // Two asteroids in one frame cost two hull.
+    sp::reset(g, 3, 1, 999);
+    placeAsteroid(g, g.shipX - 10, sp::SHIP_Y, 24);
+    placeAsteroid(g, g.shipX + 10, sp::SHIP_Y, 24);
+    sp::step(g, -1);
+    CHECK(g.hull == 1, "two asteroids in one frame cost two hull");
+
+    // An asteroid past the floor is retired, not counted.
+    sp::reset(g, 3, 1, 999);
+    placeAsteroid(g, g.shipX, sp::PF_BOT + 25, 24);
+    sp::step(g, -1);
+    CHECK(sp::aliveCount(g) == 0 && g.hull == 3,
+          "an asteroid past y=788 is removed without a hit");
+
+    // The §8.4 d4 cap: pile on far more than 16 and the field never exceeds it.
+    sp::reset(g, 99, 1, 4242);
+    for (int i = 0; i < 400; i++) sp::step(g, -1);
+    CHECK(sp::aliveCount(g) <= sp::MAX_ASTEROIDS,
+          "the field never holds more than 16 asteroids (§8.4 d4)");
+}
+
+static void layer5_space_crash() {
+    printf("== [L5] space: the crash sequence (§8.6) ==\n");
+    sp::Game g;
+    sp::reset(g, 1, 1, 77);
+    placeAsteroid(g, g.shipX, sp::SHIP_Y, 24);
+    sp::FrameOut ev = sp::step(g, -1);
+    CHECK(ev.crashed && g.crashed, "the last hull point starts the crash");
+    CHECK(g.hull == 0, "hull is 0 at the crash");
+    CHECK(g.phase == sp::PH_CRASH_POP, "the crash opens on the 96x96 burst frame");
+
+    int frames = 0;
+    while (!sp::done(g) && frames < 100) { sp::step(g, -1); frames++; }
+    CHECK(sp::done(g), "the crash sequence terminates");
+    // 1 burst + 3 black + 1 text, each counted by the step that LEAVES it.
+    CHECK(frames == sp::CRASH_POP_FRAMES + sp::CRASH_BLACK_FRAMES + sp::CRASH_TEXT_FRAMES,
+          "the crash 演出 is 1 + 3 + 1 logic frames (§8.6)");
+    CHECK(!g.won, "a crash is not a win");
+}
+
+static void layer5_space_victory() {
+    printf("== [L5] space: the victory clock (§11.3b.5) ==\n");
+    // A hull nothing can empty, so the flight is decided by the clock alone.
+    sp::Game g;
+    sp::reset(g, 30000, 1, 20260804u);
+    long winFrame = -1;
+    long frames = 0;
+    while (!sp::done(g) && frames < 5000) {
+        sp::FrameOut ev = sp::step(g, -1);
+        frames++;
+        if (ev.won) winFrame = frames;
+        if (ev.crashed) break;
+    }
+    CHECK(g.won && !g.crashed, "an untouchable ship reaches space");
+    CHECK(g.altitude == 60, "the flight ends at 60 km (§2.6)");
+    CHECK(g.xitions == 5, "five layer transitions play: 10/20/30/45/60 (§9.3)");
+    CHECK(g.layer == 5, "the last layer announced is 太空 / Space");
+    // 653 PLAY frames carry gameMs past 60 000, and the five transitions add 3
+    // frames each while the clock is FROZEN — §9.3's whole point.
+    CHECK(winFrame == 653 + 5 * sp::XITION_FRAMES,
+          "victory fires on logic frame 668 (653 played + 15 paused)");
+    long winMs = winFrame * (long)sp::FRAME_MS;
+    CHECK(winMs >= 60400 && winMs <= 62400,
+          "victory lands at 61.4 +/- 1 s of wall clock (§11.3b.5)");
+    CHECK(g.gameMs >= 60000 && g.gameMs < 60000 + (uint32_t)sp::FRAME_MS,
+          "exactly 60 s of GAME time was played; the transitions cost none of it");
+
+    // The 演出 that follows: 3 rise frames, then 8 of empty sky.
+    CHECK(frames == winFrame + sp::WIN_RISE_FRAMES + sp::WIN_WHITE_FRAMES,
+          "the victory 演出 is 3 + 8 logic frames (§8.6)");
+}
+
+static void layer5_space_state() {
+    printf("== [L5] space: the outcome lands in GameState (§2.7/§11.3b.4) ==\n");
+    GameState gs; gs.init();
+    gs.shipUnlocked = true;
+    gs.shipHull = 4; gs.shipThrusters = 3;
+    gs.stores[R_ALIEN_ALLOY] = 7 * FP;
+    gs.stores[R_WOOD] = 100 * FP;
+    gs.items[I_IRON_SWORD] = 1;
+
+    CHECK(gs.startLiftoff(1000) == RC_OK, "liftoff is allowed with hull > 0");
+    CHECK(!gs.spacePending, "startLiftoff alone does not launch");
+    gs.liftOff();
+    CHECK(gs.spacePending, "liftOff raises the pending flag for the app loop");
+
+    // A crash costs the cooldown and NOTHING else (§2.7 / §12 Q14).
+    uint32_t score0 = gs.scoreTotal;
+    gs.onSpaceCrash(2000);
+    CHECK(!gs.spacePending, "the crash clears the pending flag");
+    CHECK(gs.shipHull == 4 && gs.shipThrusters == 3, "a crash spends no hull or engine");
+    CHECK(gs.whole(R_ALIEN_ALLOY) == 7 && gs.whole(R_WOOD) == 100,
+          "a crash spends no inventory");
+    CHECK(gs.items[I_IRON_SWORD] == 1, "a crash spends no items");
+    CHECK(gs.liftoffCooldownLeft(2000) == LIFTOFF_COOLDOWN_S,
+          "a crash restamps the full 120 s liftoff cooldown (space.js:376)");
+    CHECK(gs.liftoffCooldownLeft(2000 + LIFTOFF_COOLDOWN_S) == 0,
+          "and it expires 120 s later");
+    CHECK(!gs.spaceWon && gs.scoreTotal == score0, "a crash banks nothing");
+
+    // A win banks the score and latches the flag; it does NOT delete the save
+    // (upstream does — §12 Q1 parks that in 3d).
+    gs.liftOff();
+    uint32_t s = gs.score();
+    gs.onSpaceVictory(3000, s);
+    CHECK(gs.spaceWon, "a win latches spaceWon");
+    CHECK(gs.scoreTotal == s, "a win banks its score into the running total");
+    CHECK(gs.shipHull == 4, "a win spends no hull either");
+    gs.onSpaceVictory(4000, s);
+    CHECK(gs.scoreTotal == 2 * s, "a second win adds to the total");
+}
+
+static void layer5_space_score() {
+    printf("== [L5] space: scoring.js §2.8, against a hand-computed save ==\n");
+    GameState gs; gs.init();
+    // Hand computation, item by item, exactly as scoring.js would:
+    //   wood      10 x   1 =   10
+    //   fur        4 x 1.5 =    6
+    //   iron       3 x   2 =    6
+    //   sulphur    2 x   3 =    6
+    //   bait       3 x 1.5 =  4.5
+    //   bullets    5 x   3 =   15
+    //   torch      2 x   1 =    2
+    //   bone spear 1 x  10 =   10
+    //   rifle      1 x 150 =  150
+    //   alloy      2 x  10 =   20
+    //   hull       3 x  50 =  150
+    //                       ------
+    //                        379.5  -> floored to 379
+    gs.stores[R_WOOD]        = 10 * FP;
+    gs.stores[R_FUR]         =  4 * FP;
+    gs.stores[R_IRON]        =  3 * FP;
+    gs.stores[R_SULPHUR]     =  2 * FP;
+    gs.stores[R_BAIT]        =  3 * FP;
+    gs.stores[R_BULLETS]     =  5 * FP;
+    gs.stores[R_ALIEN_ALLOY] =  2 * FP;
+    gs.items[I_TORCH]        = 2;
+    gs.items[I_BONE_SPEAR]   = 1;
+    gs.items[I_RIFLE]        = 1;
+    gs.shipHull              = 3;
+    CHECK(gs.score() == 379, "the golden save scores 379 (379.5 floored)");
+
+    GameState empty; empty.init();
+    CHECK(empty.score() == 0, "a fresh save scores 0 (hull is 0 too)");
+
+    // The two heaviest weights, isolated, so a table typo cannot hide in a sum.
+    GameState one; one.init();
+    one.items[I_LASER_RIFLE] = 1;
+    CHECK(one.score() == 150, "laser rifle is worth 150");
+    one.init(); one.items[I_BAYONET] = 1;
+    CHECK(one.score() == 100, "bayonet is worth 100");
+    one.init(); one.shipHull = 1;
+    CHECK(one.score() == 50, "each hull point is worth 50 (scoring.js:23)");
+    // A half-weight on an ODD count is where an integer port goes wrong: 1 fur
+    // is 1.5 and must floor to 1, not round to 2 and not truncate to 0.
+    one.init(); one.stores[R_FUR] = 1 * FP;
+    CHECK(one.score() == 1, "one fur (1.5) floors to 1");
+    one.stores[R_FUR] = 3 * FP;
+    CHECK(one.score() == 4, "three fur (4.5) floors to 4");
+}
+
+static void layer5_space_save() {
+    printf("== [L5] space: save round-trip and v4 -> v5 compatibility ==\n");
+    GameState gs; gs.init();
+    gs.shipUnlocked = true; gs.shipSeenWarning = true;
+    gs.shipHull = 6; gs.shipThrusters = 4;
+    gs.spaceWon = true; gs.scoreTotal = 123456;
+    gs.spacePending = true;                       // RAM-only: must NOT survive
+    static char buf[8192];
+    gs.toJson(buf, sizeof buf);
+    CHECK(strstr(buf, "\"v\":5") != nullptr, "a fresh save is written as v5");
+    CHECK(strstr(buf, "\"tscore\":123456") != nullptr, "the running total is a flat key");
+
+    GameState r; r.init();
+    CHECK(r.fromJson(buf), "a v5 save parses");
+    CHECK(r.spaceWon && r.scoreTotal == 123456, "spaceWon + total survive a round trip");
+    CHECK(r.shipHull == 6 && r.shipThrusters == 4, "the v4 starship fields still survive");
+    CHECK(!r.spacePending, "spacePending is RAM-only and never persisted");
+
+    // A v4 save: no "tscore" key and no bit 128 in "fl". It must load, and it
+    // must read as "never flown" rather than as garbage.
+    char v4[8192];
+    { // strip tscore, relabel the version
+        const char* key = "\"tscore\":";
+        char* pos = strstr(buf, key);
+        CHECK(pos != nullptr, "reference save contains a tscore field to strip");
+        size_t head = (size_t)(pos - buf);
+        const char* comma = strchr(pos, ',');
+        memcpy(v4, buf, head);
+        strcpy(v4 + head, comma ? comma + 1 : "");
+        char* vp = strstr(v4, "\"v\":5");
+        if (vp) vp[4] = '4';
+        // clear bit 128 out of "fl"
+        char* fp = strstr(v4, "\"fl\":");
+        if (fp) {
+            long fl = strtol(fp + 5, nullptr, 10);
+            char* end = strchr(fp, ',');
+            char tail[8192]; strcpy(tail, end ? end : "");
+            snprintf(fp, sizeof(v4) - (size_t)(fp - v4), "\"fl\":%ld%s",
+                     fl & ~128L, tail);
+        }
+    }
+    CHECK(strstr(v4, "tscore") == nullptr, "the v4 save has no tscore key");
+    GameState old; old.init();
+    old.spaceWon = true; old.scoreTotal = 999;    // dirty, must be overwritten
+    CHECK(old.fromJson(v4), "a v4 save still loads under v5 firmware");
+    CHECK(!old.spaceWon, "a v4 save reads as never having reached space");
+    CHECK(old.scoreTotal == 0, "a v4 save reads as a zero running total");
+    CHECK(old.shipHull == 6 && old.shipThrusters == 4,
+          "and its v4 starship fields are untouched by the upgrade");
+}
+
 // ===========================================================================
 
 int main() {
@@ -818,6 +1174,17 @@ int main() {
     layer4_worldbin();
     layer4_trekbin();
     layer4_gamejson();
+
+    printf("\n############ Layer 5: the Space level (Phase 3b) ############\n");
+    layer5_space_constants();
+    layer5_space_curves();
+    layer5_space_control();
+    layer5_space_collision();
+    layer5_space_crash();
+    layer5_space_victory();
+    layer5_space_state();
+    layer5_space_score();
+    layer5_space_save();
 
     printf("\n==== %d passed, %d failed ====\n", g_pass, g_fail);
     return g_fail ? 1 : 0;

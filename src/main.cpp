@@ -68,6 +68,7 @@
 #include "event_engine.h"
 #include "event_modal.h"
 #include "fight_modal.h"        // World combat overlay (P2.3)
+#include "space_page.h"         // Space level (3b, blocking sub-loop)
 #include "assign_page.h"        // assign_page::isOpen/close (adr:reset re-hides it)
 #include "path_page.h"          // path_page::isOpen/close (adr:reset re-hides it)
 #include "tech_page.h"          // tech_page::isOpen/close (adr:reset re-hides it)
@@ -653,6 +654,25 @@ static void appLoop() {
     // it may interleave is ticked by fight_modal above; checkTimeout no-ops while
     // that fight is live (the fight owns the clock).
     setpiece_modal::checkTimeout(now);
+
+    // Space level (3b). GameState::liftOff() only raises a flag — both of its
+    // callers are inside a touch handler and the level is a blocking sub-loop
+    // that owns the app task and the panel for about a minute (space_page.h). We
+    // drain it HERE, on a clean pass with nothing else on screen: the 'fly'
+    // choice ends its event on the press, so the modal is already gone by the
+    // time this runs, and the three guards make that a rule rather than a
+    // coincidence.
+    //
+    // run() returns once the flight is over, with the Starship page back up and
+    // the outcome saved. Re-stamping g_lastInteraction is what stops the ~62 s
+    // the player just spent playing from counting as idle time toward sleep.
+    if (g_game.spacePending && !event_modal::active() && !fight_modal::active() &&
+        !setpiece_modal::active()) {
+        space_page::run();
+        now = millis();
+        g_lastInteraction = now;
+        enterInteractive("space");
+    }
 
     // OTA: on the last streamed byte, verify + commit + reboot (never returns)
     // or report ota=err. No-op unless an OTA transfer just finished. THE

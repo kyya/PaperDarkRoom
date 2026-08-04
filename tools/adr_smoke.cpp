@@ -981,7 +981,7 @@ int main() {
         CHECK(!d.shipSeenWarning, "linger does NOT latch the warning — it is still due");
     }
 
-    printf("== [3a ship] save v4 round-trip, and a v3 save upgrades cleanly ==\n");
+    printf("== [3a ship] save round-trip, and a v3 save upgrades cleanly ==\n");
     {
         GameState s; s.init(); s.settle(900000);
         s.unlockShip();
@@ -993,11 +993,15 @@ int main() {
 
         char json[4096];
         size_t n = s.toJson(json, sizeof json);
-        CHECK(n > 0 && n < sizeof json, "v4 save fits the 4KB buffer");
-        CHECK(strstr(json, "\"v\":4") != nullptr, "SAVE_VER is 4");
+        CHECK(n > 0 && n < sizeof json, "the save fits the 4KB buffer");
+        // SAVE_VER moved to 5 with the Space outcome (tscore + the spaceWon
+        // `fl` bit). The v4 starship fields this block is really about did not
+        // change, so only the version literal and the synthetic downgrade below
+        // had to follow it.
+        CHECK(strstr(json, "\"v\":5") != nullptr, "SAVE_VER is 5");
 
         GameState r; r.init();
-        CHECK(r.fromJson(json), "v4 save loads");
+        CHECK(r.fromJson(json), "the current save loads");
         CHECK(r.shipUnlocked && r.shipSeenWarning, "ship flags round-trip");
         CHECK(r.shipHull == 2 && r.shipThrusters == 2, "hull/thrusters round-trip");
         CHECK(r.cdLiftoff == 900000, "the liftoff cooldown epoch round-trips");
@@ -1010,29 +1014,32 @@ int main() {
         // by the version bump.
         char v3[4096];
         snprintf(v3, sizeof v3, "%s", json);
-        char* vp = strstr(v3, "\"v\":4");
+        char* vp = strstr(v3, "\"v\":5");
         CHECK(vp != nullptr, "found the version field to downgrade");
         vp[4] = '3';
         {   // "fl":N -> "fl":(N & 31)
             char* f = strstr(v3, "\"fl\":");
             long flv = strtol(f + 5, nullptr, 10);
-            CHECK((flv & 96) == 96, "the v4 save really did carry both ship bits");
+            CHECK((flv & 96) == 96, "the save really did carry both ship bits");
             char tail[4096];
             snprintf(tail, sizeof tail, "%s", strchr(f + 5, ','));
             snprintf(f, sizeof(v3) - (size_t)(f - v3), "\"fl\":%ld%s", flv & 31, tail);
         }
-        {   // strip "shiph":..,"shipt":..,"cdlift":..,  (one contiguous run)
+        {   // strip "shiph":..,"shipt":..,"cdlift":..,"tscore":..,  (one run —
+            // toJson emits the v5 key immediately after the three v4 ones, which
+            // is exactly why it was appended there and not somewhere tidier)
             char* a = strstr(v3, "\"shiph\":");
-            CHECK(a != nullptr, "found the v4 ship keys to strip");
-            char* b = strstr(a, "\"cdlift\":");
+            CHECK(a != nullptr, "found the ship keys to strip");
+            char* b = strstr(a, "\"tscore\":");
             b = strchr(b, ',') + 1;              // just past the run's trailing comma
             memmove(a, b, strlen(b) + 1);
-            CHECK(strstr(v3, "shiph") == nullptr && strstr(v3, "cdlift") == nullptr,
-                  "the v3 text carries no ship keys at all");
+            CHECK(strstr(v3, "shiph") == nullptr && strstr(v3, "cdlift") == nullptr &&
+                  strstr(v3, "tscore") == nullptr,
+                  "the v3 text carries no ship or space keys at all");
         }
 
         GameState old; old.init();
-        CHECK(old.fromJson(v3), "the v3 save still loads (fromJson accepts v<=4)");
+        CHECK(old.fromJson(v3), "the v3 save still loads (fromJson accepts v<=5)");
         CHECK(old.population == 11 && old.whole(R_ALIEN_ALLOY) == 1,
               "v3 migration: every pre-existing field survives untouched");
         CHECK(!old.shipUnlocked, "v3 migration: no ship -> the page stays hidden");
@@ -1044,8 +1051,9 @@ int main() {
         // ...and the very next save writes it back out as a full v4.
         char again[4096];
         old.toJson(again, sizeof again);
-        CHECK(strstr(again, "\"v\":4") && strstr(again, "\"shipt\":1"),
-              "a migrated save is rewritten as v4 with the defaults materialised");
+        CHECK(strstr(again, "\"v\":5") && strstr(again, "\"shipt\":1") &&
+              strstr(again, "\"tscore\":0"),
+              "a migrated save is rewritten as v5 with the defaults materialised");
     }
 
     printf("\n==== %d passed, %d failed ====\n", g_pass, g_fail);

@@ -57,11 +57,12 @@ struct LogEntry {
 };
 
 constexpr int   LOG_CAP    = 8;
-constexpr int   SAVE_VER   = 4;    // v2 adds the random-event fields (nextEventAt,
+constexpr int   SAVE_VER   = 5;    // v2 adds the random-event fields (nextEventAt,
                                    // delayed-echo slot); v3 adds the craft-unlock
                                    // bitsets (seen / craftShown); v4 adds the
                                    // starship (shiph / shipt / cdlift + two `fl`
-                                   // bits). EVERY older version still loads —
+                                   // bits); v5 adds the Space outcome (tscore +
+                                   // one more `fl` bit). EVERY older version still loads —
                                    // fromJson's "absent key -> init() default"
                                    // rule is what makes each bump lossless, so a
                                    // v1..v3 save upgrades in place on first load
@@ -114,6 +115,27 @@ public:
     // §1.2), so crashing never spends these. Unbounded by design (game_data.h).
     int16_t shipHull;
     int16_t shipThrusters;
+    // Has a flight ever reached 60 km (upstream `Engine.event('progress','win')`,
+    // space.js:384). Persisted as an `fl` bit, like the two above. Purely a
+    // record for now: §12 Q1 (delete the save + prestige on a win, as upstream
+    // does) is explicitly deferred to 3d, so 3b banks the fact and changes
+    // nothing else about the game.
+    bool spaceWon;
+    // Running total of every winning flight's score — our stand-in for upstream's
+    // `Prestige.get().score` (prestige.js), which this port does not have because
+    // it has no reincarnation cycle to carry a score across. The score screen's
+    // two lines are "this game" (computed live, never stored) and this.
+    uint32_t scoreTotal;
+    // RAM ONLY, and deliberately not persisted: liftOff() raises it and the app
+    // loop lowers it by running the Space level. It exists because liftOff() is
+    // reached from TWO places that both live below the UI — ShipPage's band and
+    // the 「准备好要离开了吗?」 event's 'fly' button (event_engine's
+    // applyBtnEffect) — and neither may call into a blocking full-screen game
+    // loop from inside a touch handler. A flag that main.cpp drains on its next
+    // pass is the same "raise it, the loop notices" shape events::active() and
+    // otaFrameWanted() already use. Not persisted because a power cut mid-flight
+    // must not relaunch the level on the next boot.
+    bool spacePending;
 
     // Craftable progressive-unlock bitsets (room.js craftUnlocked, v0.4.3).
     // seen: bit r set once stores[r] has ever been >0 — a craftable's non-wood
@@ -254,11 +276,31 @@ public:
     // Button.clearCooldown($('#liftoffButton')) — what the confirmation's 「裹足
     // 徘徊」 choice does, since the cooldown already started on the press.
     void   clearLiftoffCooldown() { cdLiftoff = 0; }
-    // Ship.liftOff(). PHASE 3a STUB: the Space module is 3b, so this only reports
-    // that the ship stayed on the ground. Everything AROUND it (the cooldown, the
-    // one-shot warning, the hull gate) is already the real thing, so 3b replaces
-    // exactly this body and nothing else.
+    // Ship.liftOff(). Upstream slides the Space panel in and hands the app over
+    // to it; here it raises spacePending and returns, because both callers are
+    // inside a touch handler (see spacePending). main.cpp's loop is what actually
+    // starts the level, on its next pass, with no modal on screen.
     void   liftOff();
+    // The flight ended. Both outcomes restamp the 120 s liftoff cooldown, which
+    // is upstream's rule for a crash (space.js:376 `Button.cooldown(liftoffButton)`)
+    // and — since we return to the ship page instead of ending the game — the only
+    // sane reading of it for a win too.
+    //
+    // NOTHING ELSE MOVES ON A CRASH (§2.7 / §12 Q14): hull, thrusters and the
+    // whole inventory are untouched, so a lost flight costs 120 seconds and not
+    // one alloy. That is what makes an action level workable with e-ink latency.
+    void   onSpaceCrash(uint32_t now);
+    // A win banks the score (see scoreTotal) and latches spaceWon. It does NOT
+    // delete the save or run a prestige roll — upstream does both (space.js:439,
+    // :445) and §12 Q1 defers that decision to 3d.
+    void   onSpaceVictory(uint32_t now, uint32_t gameScore);
+    // scoring.js: the end-of-game score. Every one of upstream's 24 weighted
+    // stores exists in this port, plus `alien alloy` x10 and maxHull x50; only
+    // `fleet beacon` x500 is missing, because it drops from the Executioner's
+    // command deck and that is 3c. Weights that are 1.5 in upstream are carried
+    // as halves internally and the total is floored, so a fur-heavy save scores
+    // the same integer JS would print for it.
+    uint32_t score() const;
 
     // ---- read helpers ----
     int32_t whole(uint8_t res) const { return stores[res] / FP; }  // display units

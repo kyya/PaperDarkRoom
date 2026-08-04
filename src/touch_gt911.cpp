@@ -405,6 +405,10 @@ Detail detail(int i) {
     d.y        = c->y;
     d.clicked  = c->clicked;
     d.held     = c->held;
+    // Live slots only. The released tail is served for exactly one more pass so
+    // its edge is observable, and for THIS bit that pass is precisely when the
+    // finger is no longer down.
+    d.down     = (i < s_liveN);
     d.baseMsec = c->baseMsec;
     return d;
 }
