@@ -234,6 +234,10 @@ uint32_t GameState::score() const {
         // scoring.js:21 — `alien alloy` is scored outside the storesMap loop, at
         // 10 a unit. Same arithmetic, so it rides the same table.
         { R_ALIEN_ALLOY, 20 },
+        // scoring.js:22 — `fleet beacon` x500, scored outside the storesMap loop
+        // like alien alloy above. The command deck's one drop, and by far the
+        // heaviest single line in the table.
+        { R_FLEET_BEACON, 1000 },
     };
     static const W ITEM_W[] = {
         { I_TORCH, 2 }, { I_BONE_SPEAR, 20 }, { I_IRON_SWORD, 60 },
@@ -246,11 +250,61 @@ uint32_t GameState::score() const {
         if (n > 0) halves += (uint64_t)n * w.half;
     }
     for (const W& w : ITEM_W) halves += (uint64_t)items[w.slot] * w.half;
-    // scoring.js:23 — Ship.getMaxHull() * 50. `fleet beacon` * 500 has no slot
-    // to read yet (3c); when it lands it adds one more line here.
+    // scoring.js:23 — Ship.getMaxHull() * 50.
     if (shipHull > 0) halves += (uint64_t)shipHull * 100;
     uint64_t total = halves / 2;
     return total > 0xFFFFFFFFull ? 0xFFFFFFFFu : (uint32_t)total;
+}
+
+// ===================== fabricator (fabricator.js) =========================
+// The Executioner's payoff page. Every gate here is upstream's except the
+// `maximum` one, which upstream wrote as dead code (game_data.h FABRICATE).
+
+void GameState::unlockFabricator() {
+    if (execEntered) return;      // world.js's !features.location.fabricator guard
+    execEntered = true;
+    // world.js:971 — upstream forgot to wrap this notification in _(), so it has
+    // no entry in the official po; the port's translation is a LOCAL_STRINGS key
+    // (tools/gen_adr_strings.py) keyed on the same English sentence.
+    pushLog("builder knows the strange device when she sees it. takes it for "
+            "herself real quick. doesn't ask where it came from.");
+}
+
+bool GameState::canFabricate(uint8_t fabId) const {
+    if (fabId >= FAB_COUNT) return false;
+    int8_t bp = FABRICATE[fabId].blueprintBit;
+    return bp == BP_NONE || hasBlueprint((uint8_t)bp);
+}
+
+int32_t GameState::fabricatedCount(uint8_t fabId) const {
+    if (fabId >= FAB_COUNT) return 0;
+    const Fabricatable& f = FABRICATE[fabId];
+    return f.isItem ? (int32_t)items[f.slot] : whole(f.slot);
+}
+
+Result GameState::fabricate(uint8_t fabId) {
+    if (fabId >= FAB_COUNT) return RC_ERR_INVALID;
+    if (!execEntered) return RC_ERR_LOCKED;          // page isn't even open
+    if (!canFabricate(fabId)) return RC_ERR_LOCKED;  // blueprint not redeemed
+    const Fabricatable& f = FABRICATE[fabId];
+    if (f.maximum >= 0 && fabricatedCount(fabId) >= f.maximum) return RC_ERR_MAX;
+    if (stores[R_ALIEN_ALLOY] < (int32_t)f.alloyCost * FP) {
+        // Same notice the ship page's two buttons push (ship.js/fabricator.js both
+        // route through `not enough <resource>`), and the same "costs nothing" —
+        // fabricating has no cooldown to spend.
+        pushLog("not enough alien alloy");
+        return RC_ERR_COST;
+    }
+    stores[R_ALIEN_ALLOY] -= (int32_t)f.alloyCost * FP;
+    if (f.isItem) {
+        int c = (int)items[f.slot] + f.quantity;
+        items[f.slot] = (uint8_t)(c > 255 ? 255 : c);
+    } else {
+        stores[f.slot] += (int32_t)f.quantity * FP;
+        markSeen(f.slot);          // a fabricated hypo/stim is "owned" (§ craft gates)
+    }
+    pushLog(f.buildMsg);
+    return RC_OK;
 }
 
 int GameState::cooldownLeft(int action, uint32_t now) const {

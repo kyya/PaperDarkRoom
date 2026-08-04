@@ -60,13 +60,14 @@ constexpr size_t WORLD_BIN_SIZE_V1 =
 constexpr size_t WORLD_BIN_SIZE =
     12 + WORLD_CELLS + 3 * WORLD_MASK_BYTES;                       // 5131
 constexpr size_t TREK_HDR = 8 + 2 + 18 + 2 + 4 + 1 + 1 + 32;      // 68
-// v3 appends two bytes AFTER the map blob (the Executioner wing flags + the
-// blueprints found this trip), so v1/v2 offsets are all untouched.
-constexpr size_t TREK_TAIL_V3 = 2;
+// v3 appended two bytes AFTER the map blob (the Executioner wing flags + the
+// blueprints found this trip), so v1/v2 offsets are all untouched. v4 keeps that
+// tail byte-for-byte and only widens the outfit arrays ahead of it.
+constexpr size_t TREK_TAIL = 2;
 constexpr size_t TREK_BIN_SIZE =
     TREK_HDR + RES_COUNT * 2 + ITEM_COUNT * 2 +
-    WORLD_CELLS + 2 * WORLD_MASK_BYTES + TREK_TAIL_V3;
-// v1/v2 = the earlier enum widths. The outfit arrays are FIXED LENGTH and sit
+    WORLD_CELLS + 2 * WORLD_MASK_BYTES + TREK_TAIL;
+// v1..v3 = the earlier enum widths. The outfit arrays are FIXED LENGTH and sit
 // ahead of the map blob, so growing Res/Item shifts everything after them — hence
 // a TREK_VER bump per growth (world_state.h) and these migration reads. Frozen
 // literals on purpose: they describe files on disk, not the current enums.
@@ -74,12 +75,18 @@ constexpr int    TREK_V1_RES  = 19;
 constexpr int    TREK_V1_ITEM = 18;
 constexpr int    TREK_V2_RES  = 21;      // 3c-1 added hypo + stim
 constexpr int    TREK_V2_ITEM = 22;      // ... and the four gear items
+constexpr int    TREK_V3_RES  = 22;      // 3c-2 added fleet beacon
+constexpr int    TREK_V3_ITEM = 22;      // (no new items that round)
 constexpr size_t TREK_BIN_SIZE_V1 =
     TREK_HDR + TREK_V1_RES * 2 + TREK_V1_ITEM * 2 +
     WORLD_CELLS + 2 * WORLD_MASK_BYTES;
 constexpr size_t TREK_BIN_SIZE_V2 =
     TREK_HDR + TREK_V2_RES * 2 + TREK_V2_ITEM * 2 +
     WORLD_CELLS + 2 * WORLD_MASK_BYTES;
+// v3 is the first older layout that HAS the tail, so its minimum size includes it.
+constexpr size_t TREK_BIN_SIZE_V3 =
+    TREK_HDR + TREK_V3_RES * 2 + TREK_V3_ITEM * 2 +
+    WORLD_CELLS + 2 * WORLD_MASK_BYTES + TREK_TAIL;
 
 // ===================== platform file I/O ==================================
 
@@ -245,6 +252,7 @@ bool WorldState::ensureGenerated(uint32_t s) {
 // ===================== equipment-derived caps =============================
 
 int WorldState::maxWater(const GameState& gs) {
+    if (gs.items[I_FLUID_RECYCLER] > 0) return WATER_RECYCLER;   // P3 Fabricator
     if (gs.items[I_WATER_TANK] > 0) return WATER_TANK;
     if (gs.items[I_CASK] > 0)       return WATER_CASK;
     if (gs.items[I_WATERSKIN] > 0)  return WATER_WATERSKIN;
@@ -258,6 +266,7 @@ int WorldState::maxHealth(const GameState& gs) {
     return HEALTH_BASE;
 }
 int WorldState::bagCapacityCenti(const GameState& gs) {
+    if (gs.items[I_CARGO_DRONE] > 0) return BAG_CARGO_DRONE;     // P3 Fabricator
     if (gs.items[I_CONVOY] > 0)   return BAG_CONVOY;
     if (gs.items[I_WAGON] > 0)    return BAG_WAGON;
     if (gs.items[I_RUCKSACK] > 0) return BAG_RUCKSACK;
@@ -582,8 +591,9 @@ void WorldState::goHome(GameState& gs) {
     // wanderer WALKS HOME from. Dying with three wings cleared throws all three
     // away (research-phase3.md §3.1 / §12 Q6 (a), copied rather than softened:
     // the risk IS the content at 28 tiles from the village).
-    // Opening the Fabricator page off execEntered is 3c-3's job.
-    if (ex.clearedExec)     gs.execEntered = true;
+    // unlockFabricator() is the execEntered latch AND builder's one-shot notice
+    // (world.js:969-973) — idempotent, so a second cleared trip re-notifies nothing.
+    if (ex.clearedExec)     gs.unlockFabricator();
     if (ex.wingEngineering) gs.wingEngineering = true;
     if (ex.wingMartial)     gs.wingMartial = true;
     if (ex.wingMedical)     gs.wingMedical = true;
@@ -1293,10 +1303,10 @@ bool WorldState::loadWorld() {
 //   [starving u8][thirsty u8][rng u32][clearedFlags u8][usedOutpostN u8]
 //   [usedOutpostX 16][usedOutpostY 16][outfitRes i16 x RES_COUNT]
 //   [outfitItem i16 x ITEM_COUNT][tiles CELLS][revealed MASK][visited MASK]
-//   [wingFlags u8][bpFound u8]                                   <- v3 tail
-// v1 (19 Res / 18 Item) and v2 (21 / 22, no tail) are the same layout with the
-// array widths of their era and still load — see TREK_BIN_SIZE_V1/_V2 and the
-// migration branches in loadTrek.
+//   [wingFlags u8][bpFound u8]                                   <- v3+ tail
+// v1 (19 Res / 18 Item, no tail), v2 (21 / 22, no tail) and v3 (22 / 22, tail)
+// are the same layout with the array widths of their era and still load — see
+// TREK_BIN_SIZE_V1/_V2/_V3 and the migration branches in loadTrek.
 
 bool WorldState::saveTrek() const {
     static uint8_t buf[TREK_BIN_SIZE];
@@ -1339,14 +1349,22 @@ bool WorldState::loadTrek() {
     size_t o = 0;
     if (getU32(buf, o) != TREK_MAGIC) { ex.active = false; return false; }
     uint8_t ver = buf[o++]; o += 3;
-    if (ver != 1 && ver != 2 && ver != TREK_VER) { ex.active = false; return false; }
+    if (ver != 1 && ver != 2 && ver != 3 && ver != TREK_VER) {
+        ex.active = false; return false;
+    }
     if (ver == 2 && n < (int)TREK_BIN_SIZE_V2)   { ex.active = false; return false; }
+    if (ver == 3 && n < (int)TREK_BIN_SIZE_V3)   { ex.active = false; return false; }
     if (ver == TREK_VER && n < (int)TREK_BIN_SIZE) { ex.active = false; return false; }
     // An older file carries the array widths of ITS era; the slots it never had
     // stay 0 (the memset below), which reads correctly as "this trip packed no
-    // hypo/stim/new gear" (v1) or "no fleet beacon" (v2).
-    const int resN  = (ver == 1) ? TREK_V1_RES  : (ver == 2 ? TREK_V2_RES  : RES_COUNT);
-    const int itemN = (ver == 1) ? TREK_V1_ITEM : (ver == 2 ? TREK_V2_ITEM : ITEM_COUNT);
+    // hypo/stim/new gear" (v1), "no fleet beacon" (v2) or "no cargo drone /
+    // fluid recycler" (v3 — both are upgrades that never ride the bag anyway).
+    const int resN  = (ver == 1) ? TREK_V1_RES
+                    : (ver == 2) ? TREK_V2_RES
+                    : (ver == 3) ? TREK_V3_RES  : RES_COUNT;
+    const int itemN = (ver == 1) ? TREK_V1_ITEM
+                    : (ver == 2) ? TREK_V2_ITEM
+                    : (ver == 3) ? TREK_V3_ITEM : ITEM_COUNT;
     memset(&ex, 0, sizeof ex);
     ex.active = buf[o++] != 0;
     ex.dead   = buf[o++] != 0;
@@ -1371,7 +1389,7 @@ bool WorldState::loadTrek() {
     memcpy(ex.tiles, buf + o, WORLD_CELLS);          o += WORLD_CELLS;
     memcpy(ex.revealed, buf + o, WORLD_MASK_BYTES);  o += WORLD_MASK_BYTES;
     memcpy(ex.visited, buf + o, WORLD_MASK_BYTES);   o += WORLD_MASK_BYTES;
-    if (ver == TREK_VER) {                            // v3 tail; absent -> 0
+    if (ver >= 3) {                                   // v3+ tail; absent -> 0
         uint8_t wf = buf[o++];
         ex.wingEngineering = wf & 1; ex.wingMartial = wf & 2; ex.wingMedical = wf & 4;
         ex.bpFound = buf[o++];

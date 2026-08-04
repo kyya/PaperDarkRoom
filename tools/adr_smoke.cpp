@@ -1056,6 +1056,79 @@ int main() {
               "a migrated save is rewritten as v5 with the defaults materialised");
     }
 
+    // =====================================================================
+    // Phase 3c-3 — the Fabricator (fabricator.js). Engine half only: the ledger
+    // and the save shape. The blueprint-drop -> goHome -> unlock chain that FEEDS
+    // this needs a WorldState and lives in tools/world_smoke.cpp; the FABRICATE
+    // table itself is double-entered in tools/mechanics_test.cpp (Layer 8).
+    // =====================================================================
+
+    printf("== [3c-3 fab] the alloy ledger persists like every other store ==\n");
+    {
+        GameState s; s.init(); s.settle(950000);
+        s.unlockFabricator();
+        s.blueprints = (uint8_t)(1u << BP_HYPO);
+        s.stores[R_ALIEN_ALLOY] = 5 * FP;
+        CHECK(s.fabricate(F_CARGO_DRONE) == RC_OK, "build a cargo drone (2 alloy)");
+        CHECK(s.fabricate(F_HYPO) == RC_OK, "and a batch of hypos (1 alloy)");
+        CHECK(s.items[I_CARGO_DRONE] == 1 && s.whole(R_HYPO) == 5 &&
+              s.whole(R_ALIEN_ALLOY) == 2, "the ledger lands: 1 drone, 5 hypo, 2 alloy");
+
+        char json[4096];
+        size_t n = s.toJson(json, sizeof json);
+        CHECK(n > 0 && n < sizeof json, "the save still fits the 4KB buffer");
+        GameState r; r.init();
+        CHECK(r.fromJson(json), "and reloads");
+        CHECK(r.execEntered && r.blueprints == (1u << BP_HYPO),
+              "the fabricator flag + the redeemed blueprint round-trip");
+        CHECK(r.items[I_CARGO_DRONE] == 1 && r.whole(R_HYPO) == 5,
+              "so do the two new store slots");
+        CHECK(r.canFabricate(F_HYPO) && !r.canFabricate(F_STIM),
+              "and the reloaded save offers exactly the rows it should");
+    }
+
+    printf("== [3c-3 fab] a save written before the Item enum grew still loads ==\n");
+    {
+        // game.json's "itm" is a POSITIONAL array, and readIntArr stops at the ']'
+        // of a short one — which is the whole reason the two 3c-3 items could be
+        // appended without a SAVE_VER bump. Prove it by trimming a current save's
+        // array back to the 22 entries a 3c-2 firmware wrote.
+        GameState s; s.init(); s.settle(960000);
+        s.unlockFabricator();
+        s.items[I_RIFLE] = 2;
+        s.items[I_KINETIC_ARMOUR] = 1;         // the LAST slot 3c-2 knew about
+        s.items[I_CARGO_DRONE] = 1;            // ...and the first it did not
+        s.population = 7;
+        char json[4096];
+        s.toJson(json, sizeof json);
+
+        char old[4096];
+        snprintf(old, sizeof old, "%s", json);
+        char* a = strstr(old, "\"itm\":[");
+        CHECK(a != nullptr, "found the item array to trim");
+        char* p = a + strlen("\"itm\":[");
+        for (int k = 0; k < ITEM_COUNT - 2; k++) p = strchr(p, ',') + 1;
+        char tail[4096];
+        snprintf(tail, sizeof tail, "%s", strchr(p, ']'));   // "],..." onward
+        // p now points at entry 22 (I_CARGO_DRONE); overwrite from p-1 (the comma
+        // before it) so the array closes after exactly 22 entries.
+        snprintf(p - 1, sizeof(old) - (size_t)(p - 1 - old), "%s", tail);
+        {
+            int commas = 0;
+            for (const char* q = strstr(old, "\"itm\":["); *q != ']'; q++)
+                if (*q == ',') commas++;
+            CHECK(commas == ITEM_COUNT - 3, "the trimmed array carries 22 entries");
+        }
+
+        GameState r; r.init();
+        CHECK(r.fromJson(old), "a 3c-2-era save loads under 3c-3 firmware");
+        CHECK(r.population == 7 && r.items[I_RIFLE] == 2,
+              "every pre-existing field survives untouched");
+        CHECK(r.items[I_KINETIC_ARMOUR] == 1, "including the last slot it did know");
+        CHECK(r.items[I_CARGO_DRONE] == 0 && r.items[I_FLUID_RECYCLER] == 0,
+              "and the two slots it never had read as 0, not as garbage");
+    }
+
     printf("\n==== %d passed, %d failed ====\n", g_pass, g_fail);
     return g_fail ? 1 : 0;
 }

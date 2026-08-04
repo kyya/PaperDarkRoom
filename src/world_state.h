@@ -52,7 +52,11 @@ constexpr uint8_t  WORLD_VER   = 2;   // v2 adds the used-outpost mask (v1 migra
 // v3 = 3c-2: R_FLEET_BEACON grows the Res array again, and two bytes (the wing
 // flags + the blueprints found this trip) are APPENDED PAST the map blob so every
 // earlier offset stays put and the v1/v2 branches keep reading unchanged.
-constexpr uint8_t  TREK_VER    = 3;
+// v4 = 3c-3: I_CARGO_DRONE + I_FLUID_RECYCLER grow the ITEM array. Same story as
+// v2/v3 — the outfit arrays sit ahead of the map blob, so the map and the v3 tail
+// both move and the file needs its own version. The tail itself is unchanged, so
+// v3 keeps reading it at the v3 offset.
+constexpr uint8_t  TREK_VER    = 4;
 
 // What one move() resolved to. Landmark is a hook for 2.4 (the setpiece engine);
 // FIGHT is live as of 2.3 — the caller (World page) starts the fight overlay.

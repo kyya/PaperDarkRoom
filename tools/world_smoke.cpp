@@ -1258,6 +1258,67 @@ int main() {
         setpiece::end();
     }
 
+    // ================= Phase 3c-3: the Fabricator unlock chain =============
+    // world.js goHome:969-973. The same two-layer rule the starship page obeys,
+    // with the prologue in place of the wreck: clear it, walk home, get the page
+    // AND builder's one-shot notice. Die on the way and the trip bought nothing.
+    printf("== [3c-3 fab] goHome opens the fabricator page and notifies ONCE ==\n");
+    {
+        auto sawDeviceNotice = [](const GameState& g) {
+            for (int i = 0; i < g.logCount; i++)
+                if (strncmp(g.log[i].enKey, "builder knows the strange device", 32) == 0)
+                    return true;
+            return false;
+        };
+        GameState gs; WorldState w;
+        plant(w, gs, VILLAGE_X + 3, VILLAGE_Y, T_BARRENS, 5152);
+        w.ex.tiles[VILLAGE_Y * WORLD_DIM + (VILLAGE_X + 4)] = T_EXECUTIONER;
+        setpiece::bind(&w, &gs);
+        CHECK(!gs.execEntered && !sawDeviceNotice(gs),
+              "a fresh game: no fabricator page, no notice");
+        w.move(gs, DIR_EAST);
+        w.clearMine(w.ex.x, w.ex.y, T_EXECUTIONER);      // the prologue's scene 7
+        // The blueprint the engineering wing would have dropped, found this trip.
+        w.ex.bpFound = (uint8_t)(1u << BP_KINETIC_ARMOUR);
+        CHECK(gs.blueprints == 0, "mid-trip the blueprint is NOT redeemed yet");
+        CHECK(!gs.canFabricate(F_KINETIC_ARMOUR), "so the row is still locked");
+
+        w.ex.x = VILLAGE_X + 1; w.ex.y = VILLAGE_Y;
+        StepResult r = w.move(gs, DIR_WEST);
+        CHECK(r.kind == STEP_HOME, "reached the village -> goHome");
+        CHECK(gs.execEntered, "goHome opens the fabricator page");
+        CHECK(sawDeviceNotice(gs), "and pushes builder's one-shot notice");
+        CHECK(gs.hasBlueprint(BP_KINETIC_ARMOUR),
+              "redeemBlueprints turned the find into a permanent blueprint");
+        CHECK(gs.canFabricate(F_KINETIC_ARMOUR) && !gs.canFabricate(F_PLASMA_RIFLE),
+              "which opens THAT row and only that row");
+
+        // A second cleared trip must not re-notify (unlockFabricator is idempotent).
+        gs.logCount = 0;
+        gs.stores[R_CURED_MEAT] = 5 * FP;
+        int16_t out[RES_COUNT] = { 0 }; out[R_CURED_MEAT] = 5;
+        CHECK(w.embark(gs, out, nullptr, 9), "a later expedition sets out");
+        CHECK(w.ex.clearedExec, "already knowing the battleship");
+        w.ex.x = VILLAGE_X + 1; w.ex.y = VILLAGE_Y;
+        w.move(gs, DIR_WEST);
+        CHECK(!sawDeviceNotice(gs), "coming home again says nothing about the device");
+    }
+
+    printf("== [3c-3 fab] dying on the way back forfeits the page ==\n");
+    {
+        GameState gs; WorldState w;
+        plant(w, gs, VILLAGE_X + 3, VILLAGE_Y, T_BARRENS, 5153);
+        w.ex.tiles[VILLAGE_Y * WORLD_DIM + (VILLAGE_X + 4)] = T_EXECUTIONER;
+        setpiece::bind(&w, &gs);
+        w.move(gs, DIR_EAST);
+        w.clearMine(w.ex.x, w.ex.y, T_EXECUTIONER);
+        w.ex.bpFound = (uint8_t)(1u << BP_HYPO);
+        w.die();
+        CHECK(!gs.execEntered, "died before reaching home -> no fabricator page");
+        CHECK(gs.blueprints == 0, "and the blueprint died with the wanderer");
+        CHECK(!gs.canFabricate(F_HYPO), "so nothing new is fabricable");
+    }
+
     printf("\n==== %d passed, %d failed ====\n", g_pass, g_fail);
     return g_fail ? 1 : 0;
 }

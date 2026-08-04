@@ -159,6 +159,11 @@ enum Item : uint8_t {
     // kinetic armour is an UPGRADE, not a weapon — it sits in items[] because
     // that is where getMaxHealth's armour tiers already live.
     I_PLASMA_RIFLE, I_ENERGY_BLADE, I_DISRUPTOR, I_KINETIC_ARMOUR,
+    // -- Phase 3c-3: the two remaining Fabricator upgrades (path.js getCapacity /
+    // world.js getMaxWater). Items for the same reason kinetic armour is one —
+    // bagCapacityCenti/maxWater already read their tiers off items[] — and
+    // appended for the same positional-array reason as the block above.
+    I_CARGO_DRONE, I_FLUID_RECYCLER,
     ITEM_COUNT
 };
 static const char* const ITEM_KEY[ITEM_COUNT] = {
@@ -166,7 +171,8 @@ static const char* const ITEM_KEY[ITEM_COUNT] = {
     "wagon", "convoy", "l armour", "i armour", "s armour", "iron sword",
     "steel sword", "rifle",
     "bayonet", "laser rifle", "grenade", "bolas",
-    "plasma rifle", "energy blade", "disruptor", "kinetic armour" };
+    "plasma rifle", "energy blade", "disruptor", "kinetic armour",
+    "cargo drone", "fluid recycler" };
 
 // ---- Unified craftable table (room.js Room.Craftables) --------------------
 // Craft ids 0..9 are buildings (aligned 1:1 with Bld); 10..23 are items
@@ -293,6 +299,69 @@ static const TradeGood TRADE[TRADE_COUNT] = {
     { R_ENERGY_CELL,  -1, { {R_SCALES,10}, {R_TEETH,10}, {RA_END,0} } },
     { R_ALIEN_ALLOY,  -1, { {R_FUR,1500}, {R_SCALES,750}, {R_TEETH,300} } },
     { R_COMPASS,       1, { {R_FUR,400}, {R_SCALES,20}, {R_TEETH,10} } },
+};
+
+// ---- Fabricator (fabricator.js Fabricator.Craftables) — Phase 3c-3 --------
+// The Executioner's payoff: a second workshop whose ONLY currency is alien alloy
+// and whose gate is a blueprint rather than a building. Kept out of CRAFT for
+// exactly those two reasons — a Craftable carries a 3-slot ResAmt cost list, a
+// woodIncrPerN curve and an availableMsg, none of which a fabricatable has, and
+// craftUnlocked()'s builder/workshop/seen gates are the wrong question entirely.
+//
+// EIGHT rows, not upstream's nine: `glow stone` is ruled out of the port (§12 Q8
+// — upstream can fabricate it but nothing in the whole game ever reads it), which
+// is the same ruling that left its blueprint out of the Blueprint enum above.
+//
+// The `maximum` column is upstream's, but the check that ENFORCES it is the
+// button-disable, not fabricate()'s own guard: fabricator.js:220 writes
+// `Math.min(0, stores[thing])`, which is 0 for any non-negative stock and makes
+// its `maximum <= numThings` test dead code (§4.2). This port implements the
+// behaviour players actually get — a capped upgrade's band goes dashed at 1 — by
+// checking the real count in BOTH places, so a stale region table cannot fabricate
+// a second cargo drone.
+enum Fab : uint8_t {
+    F_ENERGY_BLADE = 0, F_FLUID_RECYCLER, F_CARGO_DRONE, F_KINETIC_ARMOUR,
+    F_DISRUPTOR, F_HYPO, F_STIM, F_PLASMA_RIFLE,
+    FAB_COUNT
+};
+constexpr int8_t BP_NONE = -1;      // blueprintBit: fabricable from day one
+
+struct Fabricatable {
+    const char* key;          // en_key (tr + store identity, == ITEM_KEY/RES_KEY)
+    const char* buildMsg;     // en_key logged on a successful fabricate
+    // isItem/slot mirror LootDrop and path_page's Carry rather than §10.2's
+    // sketched FK_RES/FK_ITEM kind byte: those two tables are the neighbours a
+    // reader diffs this one against, and a third spelling of "Res or Item" is how
+    // the eight button copies action_band replaced got started.
+    bool        isItem;
+    uint8_t     slot;         // Item slot when isItem, else Res slot
+    int8_t      blueprintBit; // Blueprint enum value, or BP_NONE
+    int16_t     maximum;      // -1 = unlimited (weapons / tools)
+    int16_t     alloyCost;    // alien alloy, whole units — always 1 or 2
+    int16_t     quantity;     // produced per press (hypo is upstream's only x5)
+};
+
+// Order == fabricator.js's own declaration order (§4.2), so the two tables diff
+// line by line.
+static const Fabricatable FABRICATE[FAB_COUNT] = {
+    { "energy blade", "the blade hums, charged particles sparking and fizzing.",
+      true,  I_ENERGY_BLADE,   BP_NONE,             -1, 1, 1 },
+    { "fluid recycler", "water out, water in. waste not, want not.",
+      true,  I_FLUID_RECYCLER, BP_NONE,              1, 2, 1 },
+    { "cargo drone", "the workhorse of the wanderer fleet.",
+      true,  I_CARGO_DRONE,    BP_NONE,              1, 2, 1 },
+    { "kinetic armour", "wanderer soldiers succeed by subverting the enemy's rage.",
+      true,  I_KINETIC_ARMOUR, BP_KINETIC_ARMOUR,    1, 2, 1 },
+    // "somtimes" is upstream's own typo in the buildMsg (fabricator.js:52) and is
+    // the tr() key verbatim — do not correct it here or the lookup misses.
+    { "disruptor", "somtimes it is best not to fight.",
+      true,  I_DISRUPTOR,      BP_DISRUPTOR,        -1, 1, 1 },
+    { "hypo", "a handful of hypos. life in a vial.",
+      false, R_HYPO,           BP_HYPO,             -1, 1, 5 },
+    { "stim", "sometimes it is best to fight without restraint.",
+      false, R_STIM,           BP_STIM,             -1, 1, 1 },
+    { "plasma rifle", "the peak of wanderer weapons technology, sleek and deadly.",
+      true,  I_PLASMA_RIFLE,   BP_PLASMA_RIFLE,     -1, 1, 1 },
 };
 
 // ---- Worker income (outside.js _INCOME) -----------------------------------

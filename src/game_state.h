@@ -149,8 +149,8 @@ public:
     bool wingMartial;
     bool wingMedical;
     // Blueprints redeemed for good (game_data.h Blueprint bits) == upstream
-    // `character.blueprints`. Serialized as the flat "bp" key. The Fabricator that
-    // spends them is 3c-3; 3c-2 only has to make the find survive the walk home.
+    // `character.blueprints`. Serialized as the flat "bp" key. Read by the
+    // Fabricator page (3c-3) to decide which bands exist at all.
     uint8_t blueprints;
 
     // Craftable progressive-unlock bitsets (room.js craftUnlocked, v0.4.3).
@@ -311,12 +311,38 @@ public:
     // :445) and §12 Q1 defers that decision to 3d.
     void   onSpaceVictory(uint32_t now, uint32_t gameScore);
     // scoring.js: the end-of-game score. Every one of upstream's 24 weighted
-    // stores exists in this port, plus `alien alloy` x10 and maxHull x50; only
-    // `fleet beacon` x500 is missing, because it drops from the Executioner's
-    // command deck and that is 3c. Weights that are 1.5 in upstream are carried
-    // as halves internally and the total is floored, so a fur-heavy save scores
-    // the same integer JS would print for it.
+    // stores exists in this port, plus `alien alloy` x10, `fleet beacon` x500 and
+    // maxHull x50. Weights that are 1.5 in upstream are carried as halves
+    // internally and the total is floored, so a fur-heavy save scores the same
+    // integer JS would print for it.
     uint32_t score() const;
+
+    // ---- fabricator (fabricator.js) ----
+    // world.js goHome:969-973 — `if(World.state.executioner && !$SM.get('features
+    // .location.fabricator')) { Fabricator.init(); Notifications.notify(...) }`.
+    // execEntered IS that feature flag in this port (both are set by the same
+    // goHome line and read by the same page gate), so this is the whole unlock:
+    // latch it and push builder's one-shot notice. Idempotent — a second cleared
+    // trip must not re-notify.
+    void   unlockFabricator();
+    // Fabricator.canFabricate(thing): does the player hold the blueprint this row
+    // needs? Rows with BP_NONE are always true. Upstream does not even CREATE the
+    // button when this is false (fabricator.js:213-215), which is what the page
+    // reproduces — a locked row is an absent band, not a dashed one.
+    bool   canFabricate(uint8_t fabId) const;
+    // How many of fabricatable `fabId` the village already owns — the count the
+    // `maximum` column is measured against (and what greys a capped upgrade's
+    // band once it is 1).
+    int32_t fabricatedCount(uint8_t fabId) const;
+    // Fabricator.fabricate(thing): spend the alloy, add `quantity` of the product,
+    // log the buildMsg. RC_ERR_LOCKED before the page is unlocked or without the
+    // blueprint, RC_ERR_MAX at the cap, RC_ERR_COST (+ the "not enough alien alloy"
+    // notice, exactly like the ship page's two buttons) when short.
+    Result fabricate(uint8_t fabId);
+    // Has blueprint `bp` (game_data.h Blueprint) been redeemed?
+    bool   hasBlueprint(uint8_t bp) const {
+        return bp < BP_COUNT && (blueprints & (uint8_t)(1u << bp));
+    }
 
     // ---- read helpers ----
     int32_t whole(uint8_t res) const { return stores[res] / FP; }  // display units

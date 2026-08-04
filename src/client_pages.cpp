@@ -6,6 +6,7 @@
 #include "path_page.h"
 #include "world_page.h"
 #include "tech_page.h"
+#include "fabricator_page.h"
 #include "ship_page.h"
 #include "event_engine.h"
 #include "fight_modal.h"
@@ -53,15 +54,26 @@ static WorldPage s_world;
 static TechPage s_tech;
 // ShipPage (P3a) is the W landmark's payoff — a location page of its own, not a
 // village sub-page, so it has no latch: available() reads the persistent
-// g_game.shipUnlocked that world_state goHome sets. Appended to the TAIL (the
-// research-phase3.md §12 Q9 recommendation) so every earlier slot keeps the ring
-// index it already had; nothing resolves this one by position — path_page/
-// world_page/tech_page all jump by pager::ringIndexByName — and frame_store
-// persists the current page by NAME (meta.json curName), so a cold boot that
-// last sat on "ship" comes back to it without a version bump.
+// g_game.shipUnlocked that world_state goHome sets. Appended to the TAIL of the
+// Phase-1/2 ring (the research-phase3.md §12 Q9 recommendation) so every earlier
+// slot keeps the ring index it already had; 3c-3 then slid the Fabricator in just
+// ahead of it (see below), which is the one and only slot that has ever moved.
+// Nothing resolves either of them by position — path_page/world_page/tech_page all
+// jump by pager::ringIndexByName — and frame_store persists the current page by
+// NAME (meta.json curName), so a cold boot that last sat on "ship" comes back to
+// it without a version bump.
 static ShipPage s_ship;
+// FabricatorPage (P3c-3) is the X landmark's payoff and, like ShipPage, a location
+// page with no latch: available() reads the persistent g_game.execEntered that
+// world_state goHome sets. It sits immediately BEFORE ship, which is upstream's
+// own ring order — fabricator.js:99 passes 'ship' as Header.addLocation's `before`
+// argument (research-phase3.md §1.5). Inserting rather than appending shifts only
+// ship's raw ring index, and nothing resolves ship by position: path/world/tech
+// jump via pager::ringIndexByName and frame_store persists the current page by
+// NAME (meta.json curName), so a cold boot parked on "ship" still lands on "ship".
+static FabricatorPage s_fabricator;
 static pages::Page* s_reg[] = { &s_room, &s_outside, &s_trade, &s_assign, &s_path,
-                                &s_world, &s_tech, &s_ship };
+                                &s_world, &s_tech, &s_fabricator, &s_ship };
 
 int count() { return (int)(sizeof(s_reg) / sizeof(s_reg[0])); }
 

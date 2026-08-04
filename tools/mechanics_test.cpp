@@ -30,6 +30,9 @@
 //            38 combat scenes transcribed a second time from upstream
 //            executioner.js, the wing bookkeeping, the blueprint drops, the front
 //            hall's availability gates and the burning corridor.
+//   Layer 8  the Fabricator (Phase 3c-3) — the FABRICATE table, fabricate()'s
+//            blueprint/cost/cap rules, and the bag / water / armour tiers its
+//            three upgrades finally switch on.
 //
 // Zero source intrusion: every RNG the statistics need is already injectable —
 // generateMap(seed) for the map stream, embark(trekSeed) / the public ex.rng for
@@ -1123,6 +1126,14 @@ static void layer5_space_score() {
     CHECK(one.score() == 100, "bayonet is worth 100");
     one.init(); one.shipHull = 1;
     CHECK(one.score() == 50, "each hull point is worth 50 (scoring.js:23)");
+    // scoring.js:22 — the command deck's beacon, the heaviest line in the table.
+    one.init(); one.stores[R_FLEET_BEACON] = 1 * FP;
+    CHECK(one.score() == 500, "one fleet beacon is worth 500");
+    one.stores[R_FLEET_BEACON] = 2 * FP;
+    CHECK(one.score() == 1000, "and it scales linearly like every other store");
+    // The same golden save, now carrying the beacon: 379.5 + 500 -> 879.
+    gs.stores[R_FLEET_BEACON] = 1 * FP;
+    CHECK(gs.score() == 879, "the golden save + a beacon scores 879");
     // A half-weight on an ODD count is where an integer port goes wrong: 1 fur
     // is 1.5 and must floor to 1, not round to 2 and not truncate to 0.
     one.init(); one.stores[R_FUR] = 1 * FP;
@@ -1811,10 +1822,10 @@ static void layer6_setpiece_seams() {
 }
 
 static void layer6_trek_v2() {
-    printf("== [L6] trek.bin v1/v2 -> v3 migration (two rounds of enum growth) ==\n");
-    // Produce a real v3 file, then hand-fold it back into the v1 layout (19 Res /
-    // 18 Item, no tail) and the v2 layout (21 / 22, no tail) and prove both
-    // migrations read losslessly.
+    printf("== [L6] trek.bin v1/v2/v3 -> v4 migration (three rounds of enum growth) ==\n");
+    // Produce a real v4 file, then hand-fold it back into the v1 layout (19 Res /
+    // 18 Item, no tail), the v2 layout (21 / 22, no tail) and the v3 layout
+    // (22 / 22, WITH the tail) and prove all three migrations read losslessly.
     GameState gs; gs.init();
     WorldState w; w.init(); w.generateMap(0xC0DEC0);
     gs.stores[R_CURED_MEAT] = 8 * FP; gs.stores[R_MEDICINE] = 2 * FP;
@@ -1828,38 +1839,64 @@ static void layer6_trek_v2() {
 
     const size_t HDR  = 68;
     const size_t MAP  = WORLD_CELLS + 2 * WORLD_MASK_BYTES;
+    const size_t TAIL = 2;                        // wing flags + bpFound (v3 onward)
     const size_t BODY = HDR + RES_COUNT * 2 + ITEM_COUNT * 2 + MAP;
-    const size_t V3SZ = BODY + 2;                 // + the wing/blueprint tail
+    const size_t V4SZ = BODY + TAIL;
+    const size_t V3SZ = HDR + 22 * 2 + 22 * 2 + MAP + TAIL;
     const size_t V2SZ = HDR + 21 * 2 + 22 * 2 + MAP;
     const size_t V1SZ = HDR + 19 * 2 + 18 * 2 + MAP;
-    uint8_t* v3 = (uint8_t*)malloc(V3SZ);
+    uint8_t* v4 = (uint8_t*)malloc(V4SZ);
     FILE* f = fopen(ADR_TREK_PATH, "rb");
     CHECK(f != nullptr, "the freshly saved trek.bin is readable");
-    size_t got = f ? fread(v3, 1, V3SZ, f) : 0;
+    size_t got = f ? fread(v4, 1, V4SZ, f) : 0;
     if (f) fclose(f);
-    CHECK(got == V3SZ, "and it is exactly the v3 size (body + 2-byte tail)");
-    CHECK(v3[4] == 3, "written as TREK_VER 3");
+    CHECK(got == V4SZ, "and it is exactly the v4 size (body + 2-byte tail)");
+    CHECK(v4[4] == 4, "written as TREK_VER 4");
 
-    // v3 round-trips its own tail.
+    // v4 round-trips its own tail.
     {
         WorldState ld; ld.init();
-        CHECK(ld.loadTrek(), "a v3 trek.bin loads");
+        CHECK(ld.loadTrek(), "a v4 trek.bin loads");
         CHECK(ld.ex.wingMartial && !ld.ex.wingEngineering && !ld.ex.wingMedical,
               "the wing flags survive a power-cut mid-wing");
         CHECK(ld.ex.bpFound == (1 << BP_STIM), "so does the blueprint found this trip");
     }
 
+    // Fold down to v3: same Res array, the Item array minus the two 3c-3 upgrade
+    // slots, tail intact (v3 is the first version that HAS one).
+    uint8_t* v3 = (uint8_t*)malloc(V3SZ);
+    memcpy(v3, v4, HDR);
+    v3[4] = 3;
+    memcpy(v3 + HDR, v4 + HDR, 22 * 2);
+    memcpy(v3 + HDR + 22 * 2, v4 + HDR + RES_COUNT * 2, 22 * 2);
+    memcpy(v3 + HDR + 22 * 2 + 22 * 2,
+           v4 + HDR + RES_COUNT * 2 + ITEM_COUNT * 2, MAP + TAIL);
+    writeRaw(ADR_TREK_PATH, v3, V3SZ);
+    {
+        WorldState ld; ld.init();
+        CHECK(ld.loadTrek(), "a v3 trek.bin still loads under v4 firmware");
+        CHECK(ld.ex.active && ld.ex.x == w.ex.x && ld.ex.y == w.ex.y,
+              "the interrupted expedition is NOT silently dropped");
+        CHECK(ld.ex.outfitRes[R_MEDICINE] == 2 && ld.ex.outfitItem[I_RIFLE] == 1,
+              "the v3-era bag survives the wider Item array");
+        CHECK(ld.ex.wingMartial && ld.ex.bpFound == (1 << BP_STIM),
+              "and the v3 tail is still found at ITS offset, not the v4 one");
+        CHECK(ld.ex.outfitItem[I_CARGO_DRONE] == 0 &&
+              ld.ex.outfitItem[I_FLUID_RECYCLER] == 0,
+              "the two slots v3 never had read as empty");
+    }
+
     // Fold down to v2: same arrays minus the fleet-beacon slot, and no tail.
     uint8_t* v2 = (uint8_t*)malloc(V2SZ);
-    memcpy(v2, v3, HDR);
+    memcpy(v2, v4, HDR);
     v2[4] = 2;
-    memcpy(v2 + HDR, v3 + HDR, 21 * 2);
-    memcpy(v2 + HDR + 21 * 2, v3 + HDR + RES_COUNT * 2, 22 * 2);
-    memcpy(v2 + HDR + 21 * 2 + 22 * 2, v3 + HDR + RES_COUNT * 2 + ITEM_COUNT * 2, MAP);
+    memcpy(v2 + HDR, v4 + HDR, 21 * 2);
+    memcpy(v2 + HDR + 21 * 2, v4 + HDR + RES_COUNT * 2, 22 * 2);
+    memcpy(v2 + HDR + 21 * 2 + 22 * 2, v4 + HDR + RES_COUNT * 2 + ITEM_COUNT * 2, MAP);
     writeRaw(ADR_TREK_PATH, v2, V2SZ);
     {
         WorldState ld; ld.init();
-        CHECK(ld.loadTrek(), "a v2 trek.bin still loads under v3 firmware");
+        CHECK(ld.loadTrek(), "a v2 trek.bin still loads under v4 firmware");
         CHECK(ld.ex.active && ld.ex.x == w.ex.x && ld.ex.y == w.ex.y,
               "the interrupted expedition is NOT silently dropped");
         CHECK(ld.ex.outfitRes[R_MEDICINE] == 2 && ld.ex.outfitItem[I_RIFLE] == 1,
@@ -1870,16 +1907,16 @@ static void layer6_trek_v2() {
     }
 
     uint8_t* v1 = (uint8_t*)malloc(V1SZ);
-    memcpy(v1, v3, HDR);
+    memcpy(v1, v4, HDR);
     v1[4] = 1;                                        // relabel as v1
-    memcpy(v1 + HDR, v3 + HDR, 19 * 2);               // the old 19 Res slots
-    memcpy(v1 + HDR + 19 * 2, v3 + HDR + RES_COUNT * 2, 18 * 2);   // old 18 Items
+    memcpy(v1 + HDR, v4 + HDR, 19 * 2);               // the old 19 Res slots
+    memcpy(v1 + HDR + 19 * 2, v4 + HDR + RES_COUNT * 2, 18 * 2);   // old 18 Items
     memcpy(v1 + HDR + 19 * 2 + 18 * 2,
-           v3 + HDR + RES_COUNT * 2 + ITEM_COUNT * 2, MAP);        // map, unchanged
+           v4 + HDR + RES_COUNT * 2 + ITEM_COUNT * 2, MAP);        // map, unchanged
     writeRaw(ADR_TREK_PATH, v1, V1SZ);
 
     WorldState ld; ld.init();
-    CHECK(ld.loadTrek(), "a v1 trek.bin still loads under v3 firmware");
+    CHECK(ld.loadTrek(), "a v1 trek.bin still loads under v4 firmware");
     CHECK(ld.ex.active, "the interrupted expedition is NOT silently dropped");
     CHECK(ld.ex.x == w.ex.x && ld.ex.y == w.ex.y, "position survives the migration");
     CHECK(ld.ex.hp == w.ex.hp && ld.ex.water == w.ex.water && ld.ex.rng == w.ex.rng,
@@ -1892,7 +1929,7 @@ static void layer6_trek_v2() {
           ld.ex.outfitItem[I_KINETIC_ARMOUR] == 0,
           "and the slots v1 never had read as empty");
     CHECK(memcmp(ld.ex.tiles, w.ex.tiles, WORLD_CELLS) == 0, "the working map survives");
-    free(v1); free(v2); free(v3);
+    free(v1); free(v2); free(v3); free(v4);
 
     // A v1 file that is one byte short of even the v1 layout is still rejected.
     {
@@ -2454,6 +2491,207 @@ static void layer7_heal_and_maps() {
 }
 
 // ===========================================================================
+// Layer 8 — the Fabricator (Phase 3c-3): the FABRICATE table transcribed a
+// second time from research-phase3.md §4.2, the fabricate() rules, and the two
+// equipment tiers (§4.3) the products finally switch on.
+// ===========================================================================
+
+static void layer8_fabricate_table() {
+    printf("== [L8] FABRICATE[] against §4.2, row by row ==\n");
+    // Double entry: every column of §4.2's table, re-typed from the doc rather
+    // than copied from game_data.h, so a future edit to either one shows up here.
+    struct FRow { uint8_t id; const char* key; bool isItem; uint8_t slot;
+                  int8_t bp; int16_t maximum, cost, qty; const char* msg; };
+    static const FRow EXPECT[] = {
+        { F_ENERGY_BLADE,   "energy blade",   true,  I_ENERGY_BLADE,   BP_NONE,
+          -1, 1, 1, "the blade hums, charged particles sparking and fizzing." },
+        { F_FLUID_RECYCLER, "fluid recycler", true,  I_FLUID_RECYCLER, BP_NONE,
+           1, 2, 1, "water out, water in. waste not, want not." },
+        { F_CARGO_DRONE,    "cargo drone",    true,  I_CARGO_DRONE,    BP_NONE,
+           1, 2, 1, "the workhorse of the wanderer fleet." },
+        { F_KINETIC_ARMOUR, "kinetic armour", true,  I_KINETIC_ARMOUR, BP_KINETIC_ARMOUR,
+           1, 2, 1, "wanderer soldiers succeed by subverting the enemy's rage." },
+        { F_DISRUPTOR,      "disruptor",      true,  I_DISRUPTOR,      BP_DISRUPTOR,
+          -1, 1, 1, "somtimes it is best not to fight." },
+        { F_HYPO,           "hypo",           false, R_HYPO,           BP_HYPO,
+          -1, 1, 5, "a handful of hypos. life in a vial." },
+        { F_STIM,           "stim",           false, R_STIM,           BP_STIM,
+          -1, 1, 1, "sometimes it is best to fight without restraint." },
+        { F_PLASMA_RIFLE,   "plasma rifle",   true,  I_PLASMA_RIFLE,   BP_PLASMA_RIFLE,
+          -1, 1, 1, "the peak of wanderer weapons technology, sleek and deadly." },
+    };
+    CHECK((int)(sizeof(EXPECT) / sizeof(EXPECT[0])) == FAB_COUNT,
+          "eight fabricatables — upstream's nine minus glow stone (§12 Q8)");
+    for (const FRow& e : EXPECT) {
+        const Fabricatable& f = FABRICATE[e.id];
+        char msg[128];
+        snprintf(msg, sizeof msg, "%s: %d alloy -> x%d, max %d, %s",
+                 e.key, (int)e.cost, (int)e.qty, (int)e.maximum,
+                 e.bp == BP_NONE ? "no blueprint" : "blueprint-gated");
+        CHECK(strcmp(f.key, e.key) == 0 && f.isItem == e.isItem &&
+              f.slot == e.slot && f.blueprintBit == e.bp &&
+              f.maximum == e.maximum && f.alloyCost == e.cost &&
+              f.quantity == e.qty && strcmp(f.buildMsg, e.msg) == 0, msg);
+        // The key doubles as the store identity, so it MUST name the slot it fills.
+        CHECK(strcmp(f.key, f.isItem ? ITEM_KEY[f.slot] : RES_KEY[f.slot]) == 0,
+              "…and its key names the very slot it fills");
+    }
+    // The three no-blueprint rows are exactly the ones §4.2 calls out.
+    int free = 0;
+    for (int i = 0; i < FAB_COUNT; i++) if (FABRICATE[i].blueprintBit == BP_NONE) free++;
+    CHECK(free == 3, "three rows need no blueprint (energy blade / recycler / drone)");
+    // Every Blueprint bit has exactly one product, or a redeemed blueprint would
+    // unlock nothing (or two things).
+    for (uint8_t bp = 0; bp < BP_COUNT; bp++) {
+        int hits = 0;
+        for (int i = 0; i < FAB_COUNT; i++)
+            if (FABRICATE[i].blueprintBit == (int8_t)bp) hits++;
+        char msg[80];
+        snprintf(msg, sizeof msg, "blueprint %s unlocks exactly one row", BLUEPRINT_KEY[bp]);
+        CHECK(hits == 1, msg);
+    }
+}
+
+static void layer8_fabricate_rules() {
+    printf("== [L8] fabricate(): the blueprint gate, the alloy ledger, the caps ==\n");
+    // Locked until goHome banked the prologue.
+    {
+        GameState gs; gs.init();
+        gs.stores[R_ALIEN_ALLOY] = 10 * FP;
+        CHECK(!gs.execEntered, "fresh game: no fabricator");
+        CHECK(gs.fabricate(F_ENERGY_BLADE) == RC_ERR_LOCKED,
+              "fabricating is refused before the page is unlocked");
+        CHECK(gs.whole(R_ALIEN_ALLOY) == 10, "a refused press spends nothing");
+        gs.unlockFabricator();
+        CHECK(gs.execEntered, "unlockFabricator opens the page");
+        bool sawNotice = false;
+        for (int i = 0; i < gs.logCount; i++)
+            if (strncmp(gs.log[i].enKey, "builder knows the strange device", 32) == 0)
+                sawNotice = true;
+        CHECK(sawNotice, "…and pushes builder's one-shot notice (world.js:971)");
+        int before = gs.logCount;
+        gs.unlockFabricator();
+        CHECK(gs.logCount == before, "a second cleared trip re-notifies nothing");
+    }
+    // The blueprint gate: six of eight rows are invisible until redeemed.
+    {
+        GameState gs; gs.init(); gs.unlockFabricator();
+        gs.stores[R_ALIEN_ALLOY] = 20 * FP;
+        CHECK(gs.canFabricate(F_ENERGY_BLADE) && gs.canFabricate(F_FLUID_RECYCLER) &&
+              gs.canFabricate(F_CARGO_DRONE),
+              "the three blueprint-free rows are fabricable the moment the page opens");
+        CHECK(!gs.canFabricate(F_HYPO) && !gs.canFabricate(F_PLASMA_RIFLE),
+              "the blueprint-gated rows are not");
+        CHECK(gs.fabricate(F_HYPO) == RC_ERR_LOCKED, "and pressing one is refused");
+        CHECK(gs.whole(R_ALIEN_ALLOY) == 20, "a refused press spends nothing");
+        gs.blueprints |= (uint8_t)(1u << BP_HYPO);
+        CHECK(gs.canFabricate(F_HYPO), "redeeming the blueprint opens the row");
+        CHECK(gs.fabricate(F_HYPO) == RC_OK, "and now it fabricates");
+        // fabricator.js's only quantity > 1.
+        CHECK(gs.whole(R_HYPO) == 5, "hypo comes five at a time (quantity: 5)");
+        CHECK(gs.whole(R_ALIEN_ALLOY) == 19, "for exactly 1 alloy");
+        CHECK(gs.hasSeen(R_HYPO), "a fabricated resource counts as seen");
+        bool sawMsg = false;
+        for (int i = 0; i < gs.logCount; i++)
+            if (strcmp(gs.log[i].enKey, FABRICATE[F_HYPO].buildMsg) == 0) sawMsg = true;
+        CHECK(sawMsg, "and its buildMsg reaches the log");
+    }
+    // The 2-alloy price and the per-upgrade cap.
+    {
+        GameState gs; gs.init(); gs.unlockFabricator();
+        gs.stores[R_ALIEN_ALLOY] = 1 * FP;
+        CHECK(gs.fabricate(F_CARGO_DRONE) == RC_ERR_COST, "1 alloy cannot buy a 2-alloy row");
+        bool sawShort = false;
+        for (int i = 0; i < gs.logCount; i++)
+            if (strcmp(gs.log[i].enKey, "not enough alien alloy") == 0) sawShort = true;
+        CHECK(sawShort, "a short press notifies 「外星合金不足」");
+        CHECK(gs.whole(R_ALIEN_ALLOY) == 1 && gs.items[I_CARGO_DRONE] == 0,
+              "and changes nothing");
+        gs.stores[R_ALIEN_ALLOY] = 6 * FP;
+        CHECK(gs.fabricate(F_CARGO_DRONE) == RC_OK, "with 6 alloy it builds");
+        CHECK(gs.items[I_CARGO_DRONE] == 1 && gs.whole(R_ALIEN_ALLOY) == 4,
+              "one drone, four alloy left");
+        CHECK(gs.fabricate(F_CARGO_DRONE) == RC_ERR_MAX,
+              "a second is refused: maximum 1 (the button goes dashed)");
+        CHECK(gs.whole(R_ALIEN_ALLOY) == 4, "and the refusal is free");
+        // Uncapped rows really are uncapped.
+        gs.blueprints = 0xFF;
+        gs.stores[R_ALIEN_ALLOY] = 3 * FP;
+        CHECK(gs.fabricate(F_ENERGY_BLADE) == RC_OK &&
+              gs.fabricate(F_ENERGY_BLADE) == RC_OK &&
+              gs.fabricate(F_ENERGY_BLADE) == RC_OK,
+              "an uncapped weapon can be built over and over");
+        CHECK(gs.items[I_ENERGY_BLADE] == 3 && gs.whole(R_ALIEN_ALLOY) == 0,
+              "three blades for three alloy");
+        CHECK(gs.fabricate(FAB_COUNT) == RC_ERR_INVALID, "an out-of-range id is rejected");
+    }
+}
+
+static void layer8_gear_tiers() {
+    printf("== [L8] cargo drone / fluid recycler: highest tier wins, never additive ==\n");
+    // §4.3 + research-phase2.md's tier tables, transcribed a second time.
+    CHECK(BAG_CARGO_DRONE == 11000, "cargo drone bag = 110 (10 base + 100)");
+    CHECK(WATER_RECYCLER == 110,    "fluid recycler water = 110 (10 base + 100)");
+    {
+        GameState gs; gs.init();
+        CHECK(WorldState::bagCapacityCenti(gs) == BAG_BASE_CENTI, "bare hands carry 10");
+        gs.items[I_CONVOY] = 1;
+        CHECK(WorldState::bagCapacityCenti(gs) == BAG_CONVOY, "a convoy carries 70");
+        gs.items[I_CARGO_DRONE] = 1;
+        CHECK(WorldState::bagCapacityCenti(gs) == BAG_CARGO_DRONE,
+              "convoy + drone carries 110, NOT 180 — the tiers are exclusive");
+        gs.items[I_CONVOY] = 0; gs.items[I_WAGON] = 0; gs.items[I_RUCKSACK] = 0;
+        CHECK(WorldState::bagCapacityCenti(gs) == BAG_CARGO_DRONE,
+              "and the drone alone is still 110 (it does not stack ON the convoy)");
+    }
+    {
+        GameState gs; gs.init();
+        CHECK(WorldState::maxWater(gs) == WATER_BASE, "bare hands hold 10 water");
+        gs.items[I_WATER_TANK] = 1;
+        CHECK(WorldState::maxWater(gs) == WATER_TANK, "a water tank holds 60");
+        gs.items[I_FLUID_RECYCLER] = 1;
+        CHECK(WorldState::maxWater(gs) == WATER_RECYCLER,
+              "tank + recycler holds 110, NOT 170 — the tiers are exclusive");
+        gs.items[I_WATER_TANK] = 0; gs.items[I_CASK] = 0; gs.items[I_WATERSKIN] = 0;
+        CHECK(WorldState::maxWater(gs) == WATER_RECYCLER, "and the recycler alone is 110");
+    }
+    // The armour ceiling 3c-1 already wired, re-checked here so all three tier
+    // tables are asserted in one place (kinetic armour is the row that made
+    // getMaxHealth read items[] at all).
+    {
+        GameState gs; gs.init();
+        gs.items[I_S_ARMOUR] = 1;
+        CHECK(WorldState::maxHealth(gs) == HEALTH_S_ARMOUR, "steel armour caps HP at 45");
+        gs.items[I_KINETIC_ARMOUR] = 1;
+        CHECK(WorldState::maxHealth(gs) == HEALTH_KINETIC,
+              "kinetic armour caps HP at 85, not 45+75");
+    }
+    // The whole loop, live: fabricate the drone, embark, and the trip really does
+    // get the bigger bag and canteen.
+    {
+        GameState gs; gs.init(); gs.unlockFabricator();
+        WorldState w; w.init(); w.generateMap(0xFAB1);
+        gs.stores[R_ALIEN_ALLOY] = 4 * FP;
+        gs.stores[R_CURED_MEAT]  = 5 * FP;
+        CHECK(gs.fabricate(F_CARGO_DRONE) == RC_OK &&
+              gs.fabricate(F_FLUID_RECYCLER) == RC_OK, "build both upgrades");
+        int16_t out[RES_COUNT] = { 0 }; out[R_CURED_MEAT] = 5;
+        int16_t outi[ITEM_COUNT] = { 0 };
+        CHECK(w.embark(gs, out, outi, 0xFAB2), "embark with them standing in the village");
+        CHECK(w.ex.maxWater == WATER_RECYCLER && w.ex.water == WATER_RECYCLER,
+              "the expedition sets out with a 110 canteen, full");
+        CHECK(WorldState::bagCapacityCenti(gs) == BAG_CARGO_DRONE,
+              "and a 110 bag to fill");
+        // Neither upgrade rides the bag: they are `upgrade`-type, so Path never
+        // renders a row for them and goHome never remembers one (§4.4).
+        w.goHome(gs);
+        CHECK(gs.savedOutfitItem[I_CARGO_DRONE] == 0 &&
+              gs.savedOutfitItem[I_FLUID_RECYCLER] == 0,
+              "and neither is ever packed — they work from the village stores");
+    }
+}
+
+// ===========================================================================
 
 int main() {
     printf("############ Layer 1: static data-table validation ############\n");
@@ -2515,6 +2753,11 @@ int main() {
     layer7_command_deck();
     layer7_burning_corridor();
     layer7_heal_and_maps();
+
+    printf("\n############ Layer 8: the Fabricator (Phase 3c-3) ############\n");
+    layer8_fabricate_table();
+    layer8_fabricate_rules();
+    layer8_gear_tiers();
 
     printf("\n==== %d passed, %d failed ====\n", g_pass, g_fail);
     return g_fail ? 1 : 0;

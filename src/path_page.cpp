@@ -83,6 +83,16 @@ constexpr int STEP_DIV_X = stepper::dividerX(BAND_W);    // 344 — zone's left 
 // g_game.whole) or an Item slot (g_game.items). Index 0 (cured meat) is the
 // embark gate: it is always shown, even at zero.
 struct Carry { const char* key; bool isItem; uint8_t idx; };
+// Phase 3c-3 adds the Fabricator's five CARRYABLE products. path.js's carryable
+// set is `内置表 ∪ Room.Craftables ∪ Fabricator.Craftables` (path.js:167), and
+// updateOutfitting only renders rows whose `type` is tool or weapon — so hypo /
+// stim (tools) and plasma rifle / energy blade / disruptor (weapons) get rows,
+// while cargo drone / fluid recycler / kinetic armour do NOT: they are `upgrade`
+// type, they are read straight off the village stores (bagCapacityCenti /
+// maxWater / maxHealth), and packing them would be meaningless (§4.4).
+// Placement follows the existing display order's intent — supplies and ammo first
+// so a shrunk bag keeps them (see prefillOutfit's two clamps), weapons last —
+// so the two consumables join the supply block and the three weapons the tail.
 const Carry CARRY[] = {
     { "cured meat",  false, R_CURED_MEAT },
     { "bullets",     false, R_BULLETS },
@@ -92,6 +102,8 @@ const Carry CARRY[] = {
     { "energy cell", false, R_ENERGY_CELL },
     { "bayonet",     true,  I_BAYONET },
     { "charm",       false, R_CHARM },
+    { "hypo",        false, R_HYPO },
+    { "stim",        false, R_STIM },
     { "alien alloy", false, R_ALIEN_ALLOY },
     { "medicine",    false, R_MEDICINE },
     { "torch",       true,  I_TORCH },
@@ -99,6 +111,9 @@ const Carry CARRY[] = {
     { "iron sword",  true,  I_IRON_SWORD },
     { "steel sword", true,  I_STEEL_SWORD },
     { "rifle",       true,  I_RIFLE },
+    { "plasma rifle", true, I_PLASMA_RIFLE },
+    { "energy blade", true, I_ENERGY_BLADE },
+    { "disruptor",    true, I_DISRUPTOR },
 };
 constexpr int CARRY_N          = (int)(sizeof(CARRY) / sizeof(CARRY[0]));
 constexpr int CARRY_CURED_MEAT = 0;      // always-shown embark-gate row
