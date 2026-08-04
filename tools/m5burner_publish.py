@@ -1,4 +1,27 @@
 #!/usr/bin/env python3
+# Portions adapted from bmorcelli/Launcher (support_files/m5burner_post.py), MIT License:
+#
+#   MIT License
+#
+#   Copyright (c) 2023 shikarunochi
+#
+#   Permission is hereby granted, free of charge, to any person obtaining a copy
+#   of this software and associated documentation files (the "Software"), to deal
+#   in the Software without restriction, including without limitation the rights
+#   to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+#   copies of the Software, and to permit persons to whom the Software is
+#   furnished to do so, subject to the following conditions:
+#
+#   The above copyright notice and this permission notice shall be included in all
+#   copies or substantial portions of the Software.
+#
+#   THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+#   IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+#   FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+#   AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+#   LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+#   OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+#   SOFTWARE.
 """Upload + publish one dist image as a new version of the M5Burner entry.
 
 Adapted from bmorcelli/Launcher's support_files/m5burner_post.py (MIT) and cut
@@ -266,6 +289,13 @@ def main() -> int:
     parser.add_argument("--dry-run", action="store_true",
                         help="log in, resolve the entry and the bin, print what would "
                              "happen, then stop without uploading or publishing")
+    parser.add_argument("--resume", action="store_true",
+                        help="if the version was already uploaded but never published, "
+                             "publish the file already sitting on the server instead of "
+                             "aborting. Risky: this does NOT verify that server-side file "
+                             "matches the local --bin you're pointing at now — only pass "
+                             "this once you've confirmed the earlier upload is the one "
+                             "you want live.")
     parser.add_argument("--output", metavar="FILE",
                         help="write a redacted HTTP request/response log here")
     args = parser.parse_args()
@@ -282,10 +312,19 @@ def main() -> int:
     check_merged_image(bin_path)
     print(f"[plan] version={version} bin={bin_path} ({bin_path.stat().st_size} bytes)")
 
-    if args.output and os.path.realpath(args.output) == os.path.realpath(bin_path):
-        print(f"[log] --output {args.output} resolves to the same file as --bin {bin_path} — "
-              "refusing, this would truncate the firmware image before upload")
-        return 2
+    if args.output:
+        output_path = Path(args.output)
+        if output_path.exists():
+            try:
+                same_file = os.path.samefile(output_path, bin_path)
+            except OSError:
+                same_file = os.path.realpath(output_path) == os.path.realpath(bin_path)
+        else:
+            same_file = os.path.realpath(args.output) == os.path.realpath(bin_path)
+        if same_file:
+            print(f"[log] --output {args.output} resolves to the same file as --bin {bin_path} — "
+                  "refusing, this would truncate the firmware image before upload")
+            return 2
 
     logger = RequestLogger(args.output) if args.output else None
     if logger:
@@ -309,12 +348,22 @@ def main() -> int:
                       "entry. Bump -DCARD_VERSION / pass a different --tag, or delete it in "
                       "the GUI.")
                 return 1
+            if not args.resume:
+                print(f"[abort] version {version} was uploaded but never published. Pass "
+                      "--resume to publish the file already sitting on the server instead "
+                      "of re-uploading — this does NOT verify that file matches the local "
+                      f"--bin ({bin_path}) you're pointing at now, so only use it once "
+                      "you're sure the earlier upload is the one you want live.")
+                return 1
             print(f"[resume] version {version} was uploaded but never published — skipping "
-                  "upload, retrying publish only")
+                  "upload, retrying publish only. WARNING: publishing the file already on "
+                  "the server as-is, not verified against the local bin.")
 
         if args.dry_run:
             if existing_entry is not None:
-                print(f"[dry-run] would publish existing unpublished version {version}")
+                print(f"[dry-run] would publish existing unpublished version {version} "
+                      "(--resume: publishing the file already on the server, not "
+                      "verified against the local bin)")
             else:
                 print(f"[dry-run] would upload {bin_path} as version {version}, then publish it")
             return 0
