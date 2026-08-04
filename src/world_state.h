@@ -49,7 +49,10 @@ constexpr uint8_t  WORLD_VER   = 2;   // v2 adds the used-outpost mask (v1 migra
 // after them; without the bump an in-progress expedition would be silently dropped
 // across the OTA. loadTrek keeps a v1 branch that reads the old 19 Res / 18 Item
 // arrays and leaves the new slots at 0 — the rest of the layout is unchanged.
-constexpr uint8_t  TREK_VER    = 2;
+// v3 = 3c-2: R_FLEET_BEACON grows the Res array again, and two bytes (the wing
+// flags + the blueprints found this trip) are APPENDED PAST the map blob so every
+// earlier offset stays put and the v1/v2 branches keep reading unchanged.
+constexpr uint8_t  TREK_VER    = 3;
 
 // What one move() resolved to. Landmark is a hook for 2.4 (the setpiece engine);
 // FIGHT is live as of 2.3 — the caller (World page) starts the fight overlay.
@@ -168,7 +171,19 @@ struct Expedition {
     int16_t  outfitRes[RES_COUNT];
     int16_t  outfitItem[ITEM_COUNT];
     // Cleared-this-trip flags, committed to game.buildings at goHome.
+    // clearedExec is the odd one out: upstream's World.state.executioner is SEEDED
+    // from the committed world at embark and only re-committed by goHome, so it
+    // reads "the prologue has been cleared, as far as this trip knows" — which is
+    // what picks the antechamber over the intro when the X tile is stepped on
+    // again (world.js doSpace:573-576).
     bool     clearedIron, clearedCoal, clearedSulphur, clearedShip, clearedExec;
+    // The three Executioner wings + the blueprints found this trip. Same two-layer
+    // rule as everything else here and as upstream's World.state: seeded from the
+    // save at embark, written by the wings' terminal scenes, committed by goHome,
+    // DISCARDED by die() — clear a wing and starve on the way back and the wing is
+    // open again (research-phase3.md §3.1's "移植警示", kept faithful; §12 Q6 (a)).
+    bool     wingEngineering, wingMartial, wingMedical;
+    uint8_t  bpFound;           // Blueprint bits (game_data.h), redeemed at goHome
     // Outposts used THIS trip (position-keyed) don't re-trigger; a small ring is
     // plenty for one expedition. Merged into the committed usedOutpost bitmap at
     // goHome, discarded at die(). outpostUsed() checks this ring AND that bitmap.
@@ -273,6 +288,13 @@ public:
     int  bankLootTable(GameState& gs, const LootDrop* tbl, int n,
                        LootLine* out, int outCap);
     void spFillWater() { ex.water = ex.maxWater; }        // outpost / house well
+    // World.setHp(World.getMaxHealth()) — the Executioner's two regeneration
+    // machines. Recomputed from gs rather than reusing ex.maxHp so a mid-trip
+    // armour change (there is none today) could not desync the ceiling.
+    void spHealFull(const GameState& gs) {
+        ex.maxHp = (int16_t)maxHealth(gs);
+        ex.hp = ex.maxHp;
+    }
     void spGrantGastronome(GameState& gs);                // swamp charm -> perk
     // world.js markVisited — mark the CURRENT landmark tile as consumed (upstream
     // appends '!' to the tile char). A visited landmark's doSpace LANDMARKS lookup

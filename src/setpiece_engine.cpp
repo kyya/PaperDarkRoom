@@ -47,8 +47,54 @@ void applyEffect(uint8_t effect) {
         case SPE_REVEAL_MAP3:
             for (int i = 0; i < 3; i++) s_w->spApplyMap();
             break;
+        // ---- Phase 3c-2: the Executioner --------------------------------------
+        case SPE_HEAL_FULL:        s_w->spHealFull(*s_gs); break;
+        case SPE_CLEAR_EXEC:       s_w->clearMine(s_w->ex.x, s_w->ex.y, T_EXECUTIONER); break;
+        case SPE_MARK_ENGINEERING: s_w->ex.wingEngineering = true; break;
+        case SPE_MARK_MARTIAL:     s_w->ex.wingMartial     = true; break;
+        case SPE_MARK_MEDICAL:     s_w->ex.wingMedical     = true; break;
         default: break;
     }
+}
+
+// world.js redeemBlueprints' other half: a blueprint FOUND this trip. Upstream
+// banks a weight-1 backpack item; the port sets the expedition's bit (goHome
+// promotes it to GameState::blueprints, die() drops it — the same two-layer rule
+// the bag itself obeys). The name goes to the log so the find is visible: the
+// panel's loot list is Res/Item-shaped and a blueprint is neither.
+void grantBlueprint(uint8_t bp1) {
+    if (!bp1 || bp1 > BP_COUNT) return;
+    uint8_t bit = (uint8_t)(1u << (bp1 - 1));
+    if (s_w->ex.bpFound & bit) return;
+    s_w->ex.bpFound |= bit;
+    if (s_gs) s_gs->pushLog(BLUEPRINT_KEY[bp1 - 1]);
+}
+
+// events.js `available: fn` — the front hall's four wing buttons.
+bool availCondMet(uint8_t cond) {
+    const Expedition& e = s_w->ex;
+    switch (cond) {
+        case SPA_NOT_ENGINEERING: return !e.wingEngineering;
+        case SPA_NOT_MEDICAL:     return !e.wingMedical;
+        case SPA_NOT_MARTIAL:     return !e.wingMartial;
+        case SPA_ALL_WINGS:       return e.wingEngineering && e.wingMedical && e.wingMartial;
+        default: return true;
+    }
+}
+
+// events.js updateButtons' cost half (getQuantity(store) < cost -> disabled).
+// NOTE the `>=` on hp: upstream's test is `num < cost`, so a 10-HP wanderer CAN
+// pay a 10-HP price and land on exactly 0 — World.setHp clamps at zero and never
+// checks death (that lives in doSpace / the combat loop), so paying is survivable
+// but leaves nothing in the tank. See the engineering `1-3` note in
+// executioner_data.h: that is the one scene where it matters, and it is also the
+// one scene with no way back out.
+bool costAffordable(const SpButton& b) {
+    if (b.costSlot == SP_NO_COST)    return true;
+    if (b.costSlot == SP_COST_WATER) return s_w->ex.water >= b.costAmt;
+    if (b.costSlot == SP_COST_HP)    return s_w->ex.hp    >= b.costAmt;
+    return b.costIsItem ? s_w->ex.outfitItem[b.costSlot] > 0
+                        : s_w->ex.outfitRes[b.costSlot] > 0;
 }
 
 // Load LOCAL scene `idx`: run its effect + notification, then either arm the
@@ -62,6 +108,9 @@ void loadScene(int idx) {
     applyEffect(sc.effect);
     if (sc.visit) s_w->spMarkVisited();               // setpieces.js World.markVisited
     if (sc.notify && s_gs) s_gs->pushLog(sc.notify);
+    // A narrative scene's blueprint is part of its loot, so it lands on load; a
+    // combat scene's lands on victory (resolveCombat), where its loot would.
+    if (sc.bp && !sc.combat) grantBlueprint(sc.bp);
     if (sc.combat) {
         s_w->beginFightSetpiece(s_def->enemies[sc.enemy]);
         s_awaitCombat = true;                     // modal hands it to fight_modal
@@ -143,14 +192,7 @@ bool btnAvailable(int localBtn) {
     const SpScene* sc = cur();
     if (!sc || localBtn < 0 || localBtn >= sc->btnCount) return false;
     const SpButton& b = s_def->btns[sc->btnStart + localBtn];
-    if (b.costSlot == SP_NO_COST)    return true;
-    if (b.costSlot == SP_COST_WATER) return s_w->ex.water >= b.costAmt;
-    // Strictly greater, not >=: an HP price may never be the thing that kills you.
-    // (Whether a 0-HP-margin player is then SOFT-LOCKED in a wing with no other
-    // exit is a content question for 3c-2, once the real scene graph exists.)
-    if (b.costSlot == SP_COST_HP)    return s_w->ex.hp > b.costAmt;
-    return b.costIsItem ? s_w->ex.outfitItem[b.costSlot] > 0
-                        : s_w->ex.outfitRes[b.costSlot] > 0;
+    return availCondMet(b.availCond) && costAffordable(b);
 }
 uint8_t btnCostSlot(int localBtn) {
     const SpScene* sc = cur();
@@ -161,6 +203,15 @@ bool btnCostIsItem(int localBtn) {
     const SpScene* sc = cur();
     if (!sc || localBtn < 0 || localBtn >= sc->btnCount) return false;
     return s_def->btns[sc->btnStart + localBtn].costIsItem;
+}
+int btnCostAmt(int localBtn) {
+    const SpScene* sc = cur();
+    if (!sc || localBtn < 0 || localBtn >= sc->btnCount) return 0;
+    const SpButton& b = s_def->btns[sc->btnStart + localBtn];
+    if (b.costSlot == SP_NO_COST) return 0;
+    // A Res/Item setpiece price is always exactly one unit (torch / charm / a
+    // grenade / an alien alloy); only water and hp carry an amount.
+    return (b.costSlot == SP_COST_WATER || b.costSlot == SP_COST_HP) ? b.costAmt : 1;
 }
 int defaultBtnIndex() {
     const SpScene* sc = cur();
@@ -180,6 +231,8 @@ void resolveCombat(bool won) {
     const Combat& cx = s_w->combat();
     s_dispN = cx.lootN > SP_SCENE_LOOT_MAX ? SP_SCENE_LOOT_MAX : cx.lootN;
     for (int i = 0; i < s_dispN; i++) s_disp[i] = cx.loot[i];
+    const SpScene* sc = cur();
+    if (sc && sc->bp) grantBlueprint(sc->bp);      // it was the kill's loot line
     s_w->fightEndVictory();
     s_w->spCommitStep();
 }
@@ -189,6 +242,9 @@ Result choose(int localBtn) {
     if (!sc || s_awaitCombat) return RC_ERR_INVALID;
     if (localBtn < 0 || localBtn >= sc->btnCount) return RC_ERR_INVALID;
     const SpButton& b = s_def->btns[sc->btnStart + localBtn];
+    // events.js renders an `available: fn` button DISABLED rather than hiding it,
+    // so a press has to be refused here too (a greyed band is still touchable).
+    if (!availCondMet(b.availCond)) return RC_ERR_LOCKED;
 
     // Pay the cost: a single unit from the bag, or (Executioner) an amount of the
     // expedition's own water / blood. Same affordability rule as btnAvailable.
@@ -196,8 +252,8 @@ Result choose(int localBtn) {
         if (s_w->ex.water < b.costAmt) return RC_ERR_COST;
         s_w->ex.water -= b.costAmt;
     } else if (b.costSlot == SP_COST_HP) {
-        if (s_w->ex.hp <= b.costAmt) return RC_ERR_COST;
-        s_w->ex.hp -= b.costAmt;
+        if (s_w->ex.hp < b.costAmt) return RC_ERR_COST;
+        s_w->ex.hp -= b.costAmt;            // may land on exactly 0 — see above
     } else if (b.costSlot != SP_NO_COST) {
         if (b.costIsItem) {
             if (s_w->ex.outfitItem[b.costSlot] <= 0) return RC_ERR_COST;
@@ -207,6 +263,9 @@ Result choose(int localBtn) {
             s_w->ex.outfitRes[b.costSlot]--;
         }
     }
+
+    // events.js buttonClick order: cost, THEN onChoose, then the transition.
+    if (b.effect != SPE_NONE) applyEffect(b.effect);
 
     uint8_t nxt = b.next;
     if (nxt == SP_SCENE_END) { end(); return RC_OK; }

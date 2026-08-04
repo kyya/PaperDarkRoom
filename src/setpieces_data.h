@@ -32,8 +32,9 @@
 //     enemies / loot / text (all already in the official zh_cn set). The full
 //     town/city graphs are a documented follow-up; every landmark still triggers
 //     a real, playable, correctly-clearing setpiece.
-//   * executioner (Phase 3) / cache (prestige-only, never generated) have no
-//     table — the engine no-ops on them.
+//   * cache (prestige-only, never generated) has no table — the engine no-ops on
+//     it. The Executioner's six tables landed in Phase 3c-2 and live in their own
+//     file (executioner_data.h, included below).
 #pragma once
 #include <stdint.h>
 #include "game_data.h"
@@ -66,6 +67,27 @@ enum SpEffect : uint8_t {
     SPE_REVEAL_MAP3,       // executioner-martial 7-1 `scavenge maps`: World.applyMap()
                            // three times, onto the WORKING fog (upstream bug fixed,
                            // see WorldState::spApplyMap)
+    // ---- Phase 3c-2: the Executioner ----------------------------------------
+    SPE_HEAL_FULL,         // World.setHp(World.getMaxHealth()) — the two `use
+                           // machine` buttons (engineering `4`, martial `10`)
+    SPE_CLEAR_EXEC,        // executioner-intro `7`: drawRoad + World.state.executioner
+    SPE_MARK_ENGINEERING,  // engineering `8`  -> World.state.engineering = true
+    SPE_MARK_MARTIAL,      // martial     `13` -> World.state.martial = true
+    SPE_MARK_MEDICAL,      // medical     `17` -> World.state.medical = true
+};
+
+// ---- button availability gate (events.js `available: fn`) -----------------
+// Upstream renders an unavailable button and calls Button.setDisabled on it
+// (events.js:1155-1157 / 1184-1185) — the front hall's cleared wings GREY OUT,
+// they do not vanish, and the command deck is visible-but-dead until all three
+// are done. Routed through setpiece::btnAvailable so it lands on the SAME
+// action_band "disabled" contract an unaffordable cost already uses.
+enum SpAvail : uint8_t {
+    SPA_ALWAYS = 0,
+    SPA_NOT_ENGINEERING,   // !World.state.engineering
+    SPA_NOT_MEDICAL,
+    SPA_NOT_MARTIAL,
+    SPA_ALL_WINGS,         // engineering && medical && martial
 };
 
 // ---- probability branch ({0.25:'a',0.5:'b',1:'c'} semantics) --------------
@@ -83,8 +105,10 @@ struct SpProb { int16_t thresholdMilli; uint8_t scene; };  // scene = LOCAL idx
 // free. next is a LOCAL scene idx | SP_SCENE_EVENT | SP_SCENE_PROB | SP_SCENE_END.
 constexpr uint8_t SP_NO_COST    = 0xFF;
 constexpr uint8_t SP_COST_WATER = 0xFE;  // costAmt units of expedition water
-constexpr uint8_t SP_COST_HP    = 0xFD;  // costAmt HP — affordable only while
-                                         // hp > costAmt (paying can't be lethal)
+constexpr uint8_t SP_COST_HP    = 0xFD;  // costAmt HP — affordable at hp >= costAmt,
+                                         // upstream's own `num < cost` test, so it
+                                         // can leave the wanderer on exactly 0 (which
+                                         // World.setHp clamps to and never dies of)
 struct SpButton {
     const char* textKey;
     uint8_t     costSlot;     // Res or Item slot, or SP_NO_COST/SP_COST_WATER/_HP
@@ -94,6 +118,12 @@ struct SpButton {
                               // the target SetpieceId when next==SP_SCENE_EVENT
     uint8_t     probCount;
     int16_t     costAmt;      // water/hp amount; unread (and 0) for Res/Item costs
+    // ---- Phase 3c-2, appended so every older row aggregate-inits them inert ----
+    uint8_t     availCond;    // SpAvail; SPA_ALWAYS == no gate
+    uint8_t     effect;       // SpEffect run on PRESS (events.js `onChoose`, which is
+                              // a BUTTON field, not a scene one — the two `use
+                              // machine` heals and `scavenge maps` all live here).
+                              // Runs after the cost is paid, before the transition.
 };
 
 // ---- scene ---------------------------------------------------------------
@@ -112,6 +142,13 @@ struct SpScene {
                               // borehole, ship, swamp talk, mine cleared) spend the
                               // tile so it can't re-trigger. Omitted -> false (a scene
                               // you can leave and return to, e.g. a mine's start).
+    // ---- Phase 3c-2, appended (0 == absent on every pre-existing row) --------
+    uint8_t     bp;           // Blueprint index + 1 (0 = none). Upstream ships the six
+                              // blueprints as 100%-chance loot lines; the port banks
+                              // them as BITS instead (game_data.h Blueprint), so they
+                              // ride the scene rather than its loot table — granted on
+                              // load for a narrative scene, on VICTORY for a combat one
+                              // (which is exactly when its loot would have dropped).
 };
 
 // ---- setpiece ------------------------------------------------------------
@@ -543,9 +580,18 @@ static const SpScene ci_scenes[] = {
 };
 
 // ===========================================================================
+// The Executioner's six setpieces (103 scenes) live in their own file — they are
+// as big as everything above put together. It is a CONTINUATION of this header,
+// not a standalone one: it uses the types defined above and is included from
+// exactly here, so it carries no includes of its own.
+// ===========================================================================
+#define ADR_SETPIECE_TYPES_DEFINED 1
+#include "executioner_data.h"
+
+// ===========================================================================
 // Master table — indexed by SetpieceId (world_data.h). Unimplemented ids
-// (SP_NONE, SP_EXECUTIONER, SP_CACHE) carry a null scene pointer; the engine
-// treats a null table as "no setpiece" (a no-op landmark step).
+// (SP_NONE, SP_CACHE) carry a null scene pointer; the engine treats a null
+// table as "no setpiece" (a no-op landmark step).
 // ===========================================================================
 #define SPN(a) (uint8_t)(sizeof(a)/sizeof((a)[0]))
 static const SpDef SETPIECES[] = {
@@ -562,8 +608,13 @@ static const SpDef SETPIECES[] = {
     /* SP_BOREHOLE    */ { "A Huge Borehole",  bh_scenes, SPN(bh_scenes), bh_btns, nullptr,   nullptr },
     /* SP_BATTLEFIELD */ { "A Forgotten Battlefield", bf_scenes, SPN(bf_scenes), bf_btns, nullptr, nullptr },
     /* SP_SWAMP       */ { "A Murky Swamp",    sw_scenes, SPN(sw_scenes), sw_btns, nullptr,   nullptr },
-    /* SP_EXECUTIONER */ { nullptr, nullptr, 0, nullptr, nullptr, nullptr },   // Phase 3
+    /* SP_EXEC_INTRO  */ { "A Ravaged Battleship", xi_scenes, SPN(xi_scenes), xi_btns, xi_probs, exec_enemies },
     /* SP_CACHE       */ { nullptr, nullptr, 0, nullptr, nullptr, nullptr },   // prestige-only
+    /* SP_EXEC_ANTE   */ { "A Ravaged Battleship", xa_scenes, SPN(xa_scenes), xa_btns, nullptr,  exec_enemies },
+    /* SP_EXEC_ENG    */ { "Engineering Wing",     xe_scenes, SPN(xe_scenes), xe_btns, xe_probs, exec_enemies },
+    /* SP_EXEC_MAR    */ { "Martial Wing",         xm_scenes, SPN(xm_scenes), xm_btns, xm_probs, exec_enemies },
+    /* SP_EXEC_MED    */ { "Medical Wing",         xd_scenes, SPN(xd_scenes), xd_btns, xd_probs, exec_enemies },
+    /* SP_EXEC_CMD    */ { "Command Deck",         xc_scenes, SPN(xc_scenes), xc_btns, xc_probs, exec_enemies },
 };
 constexpr int SETPIECE_COUNT = (int)(sizeof(SETPIECES) / sizeof(SETPIECES[0]));
 #undef SPN

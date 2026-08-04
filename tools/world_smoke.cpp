@@ -8,9 +8,12 @@
 // bands / spawn / terrain sanity), diamond visibility, move upkeep + starvation/
 // thirst death, goHome commit (mine unlock + loot bank + fog persist), die
 // discard, drawRoad, world.bin + trek.bin round-trip / cold-boot restore, the
-// main-save headroom after the game_data enum growth, and (Phase 3a) the W
+// main-save headroom after the game_data enum growth, (Phase 3a) the W
 // landmark chain: salvage -> walk home -> the starship page unlocks, versus
-// salvage -> die -> it does not and the wreck is salvageable again.
+// salvage -> die -> it does not and the wreck is salvageable again, and
+// (Phase 3c-2) the X landmark's two doors: the prologue until it is cleared,
+// the elevator hall for every visit after, with the wings banked only by a trip
+// the wanderer walks home from.
 //
 // Build (clang++ is the host toolchain on this box):
 //   clang++ -std=c++17 -I src tools/world_smoke.cpp src/world_state.cpp \
@@ -891,9 +894,12 @@ int main() {
           setpieceExists(SP_BOREHOLE) && setpieceExists(SP_BATTLEFIELD) &&
           setpieceExists(SP_SWAMP) && setpieceExists(SP_SHIP),
           "all Phase-2 setpieces have a table");
-    CHECK(!setpieceExists(SP_NONE) && !setpieceExists(SP_EXECUTIONER) &&
-          !setpieceExists(SP_CACHE),
-          "SP_NONE / executioner (P3) / cache (prestige) have no table");
+    CHECK(setpieceExists(SP_EXEC_INTRO) && setpieceExists(SP_EXEC_ANTE) &&
+          setpieceExists(SP_EXEC_ENG) && setpieceExists(SP_EXEC_MAR) &&
+          setpieceExists(SP_EXEC_MED) && setpieceExists(SP_EXEC_CMD),
+          "all six Executioner setpieces have a table (Phase 3c-2)");
+    CHECK(!setpieceExists(SP_NONE) && !setpieceExists(SP_CACHE),
+          "SP_NONE / cache (prestige-only) still have no table");
 
     printf("== [setpiece] iron mine: torch gate -> fight -> clear -> goHome miner ==\n");
     {
@@ -1179,6 +1185,77 @@ int main() {
         CHECK(w.embark(gs, out, nullptr, 2), "re-embark after the death");
         CHECK(!w.exVisited(VILLAGE_X + 4, VILLAGE_Y),
               "the wreck is unspent again: a lost trip costs the salvage, not the map");
+    }
+
+    // ================= Phase 3c-2: the X landmark, both paths ==============
+    // world.js doSpace:573-576 — the battleship is the ONE landmark that is never
+    // markVisited'd: it opens the prologue until the prologue is cleared, then the
+    // elevator hall, every single visit, until the command deck clears the tile.
+    printf("== [3c-2 X] the battleship: prologue first, elevator hall after ==\n");
+    {
+        GameState gs; WorldState w;
+        plant(w, gs, VILLAGE_X + 3, VILLAGE_Y, T_BARRENS, 5150);
+        w.ex.tiles[VILLAGE_Y * WORLD_DIM + (VILLAGE_X + 4)] = T_EXECUTIONER;
+        setpiece::bind(&w, &gs);
+        CHECK(!gs.execEntered, "a fresh game has never boarded the battleship");
+
+        StepResult r = w.move(gs, DIR_EAST);
+        CHECK(r.kind == STEP_LANDMARK && r.scene == SP_EXEC_INTRO,
+              "the first visit routes to the prologue");
+        CHECK(setpiece::begin(r.scene), "the prologue opens");
+        CHECK(setpiece::btnCount() == 2, "enter / leave");
+        CHECK(setpiece::choose(1) == RC_OK && !setpiece::active(),
+              "`leave` closes it without entering");
+
+        // Walking back onto the tile re-opens the SAME prologue: no markVisited.
+        w.ex.x = VILLAGE_X + 3;
+        r = w.move(gs, DIR_EAST);
+        CHECK(r.kind == STEP_LANDMARK && r.scene == SP_EXEC_INTRO,
+              "leaving does not spend the tile — the prologue is offered again");
+
+        // Clear the prologue by hand (its scene 7 effect) and step on it again.
+        w.clearMine(w.ex.x, w.ex.y, T_EXECUTIONER);
+        CHECK(w.ex.clearedExec, "the prologue's last scene records the boarding");
+        w.ex.x = VILLAGE_X + 3;
+        r = w.move(gs, DIR_EAST);
+        CHECK(r.kind == STEP_LANDMARK && r.scene == SP_EXEC_ANTE,
+              "now the SAME tile opens the elevator hall instead");
+
+        // Die on the way home: like the W wreck, the boarding is forfeit.
+        w.die();
+        CHECK(!gs.execEntered, "dying banks nothing — the prologue is due again");
+        gs.stores[R_CURED_MEAT] = 5 * FP;
+        int16_t out[RES_COUNT] = { 0 }; out[R_CURED_MEAT] = 5;
+        CHECK(w.embark(gs, out, nullptr, 7), "re-embark after the death");
+        CHECK(!w.ex.clearedExec, "the new trip starts with the battleship sealed again");
+    }
+
+    printf("== [3c-2 X] walk home and the elevator hall is permanent ==\n");
+    {
+        GameState gs; WorldState w;
+        plant(w, gs, VILLAGE_X + 3, VILLAGE_Y, T_BARRENS, 5151);
+        w.ex.tiles[VILLAGE_Y * WORLD_DIM + (VILLAGE_X + 4)] = T_EXECUTIONER;
+        setpiece::bind(&w, &gs);
+        w.move(gs, DIR_EAST);
+        w.clearMine(w.ex.x, w.ex.y, T_EXECUTIONER);        // the prologue's effect
+        w.ex.wingMartial = true;                           // ...and one wing cleared
+        w.ex.x = VILLAGE_X + 1; w.ex.y = VILLAGE_Y;
+        StepResult r = w.move(gs, DIR_WEST);
+        CHECK(r.kind == STEP_HOME, "reached the village -> goHome");
+        CHECK(gs.execEntered && gs.wingMartial,
+              "goHome banks the boarding AND the cleared wing");
+        gs.stores[R_CURED_MEAT] = 5 * FP;
+        int16_t out[RES_COUNT] = { 0 }; out[R_CURED_MEAT] = 5;
+        CHECK(w.embark(gs, out, nullptr, 8), "a later expedition sets out");
+        CHECK(w.ex.clearedExec && w.ex.wingMartial,
+              "and starts already knowing both (World.state seeded from the save)");
+        w.ex.x = VILLAGE_X + 3; w.ex.y = VILLAGE_Y;
+        r = w.move(gs, DIR_EAST);
+        CHECK(r.kind == STEP_LANDMARK && r.scene == SP_EXEC_ANTE,
+              "so the tile opens the elevator hall on a brand new trip");
+        CHECK(setpiece::begin(r.scene) && !setpiece::btnAvailable(2),
+              "with the martial band already greyed out");
+        setpiece::end();
     }
 
     printf("\n==== %d passed, %d failed ====\n", g_pass, g_fail);

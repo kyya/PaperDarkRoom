@@ -125,10 +125,18 @@ static const uint8_t TERRAIN_TILE[TI_COUNT] = { T_FOREST, T_FIELD, T_BARRENS };
 // ---- Setpiece / scene ids (placeholders for P2.3 setpieces.js) ------------
 // A landmark step returns one of these as a hook; the setpiece + combat engine
 // lands in milestone 2.3. SP_NONE means "no event" (e.g. a used outpost).
+// The Executioner is SIX setpieces, not one: upstream splits it into five
+// Events.Executioner[*] events plus a front hall that hops between them with
+// `nextEvent` (research-phase3.md §3.1). SP_EXEC_INTRO keeps the X tile's slot
+// (it is what LANDMARKS points at, and what a first visit runs); move() swaps in
+// SP_EXEC_ANTE once the prologue has been cleared. The other four are never
+// reached from a tile — only through the front hall's SP_SCENE_EVENT buttons —
+// so they sit AFTER SP_CACHE and leave every pre-existing id's value untouched.
 enum SetpieceId : uint8_t {
     SP_NONE = 0, SP_OUTPOST, SP_IRONMINE, SP_COALMINE, SP_SULPHURMINE,
     SP_HOUSE, SP_CAVE, SP_TOWN, SP_CITY, SP_SHIP, SP_BOREHOLE,
-    SP_BATTLEFIELD, SP_SWAMP, SP_EXECUTIONER, SP_CACHE
+    SP_BATTLEFIELD, SP_SWAMP, SP_EXEC_INTRO, SP_CACHE,
+    SP_EXEC_ANTE, SP_EXEC_ENG, SP_EXEC_MAR, SP_EXEC_MED, SP_EXEC_CMD
 };
 
 // ---- Landmark distribution (world.js World.LANDMARKS) ---------------------
@@ -158,7 +166,7 @@ static const LandmarkDef LANDMARKS[] = {
     { T_BOREHOLE,    10, 15, 45, SP_BOREHOLE,     "A Borehole",           false },
     { T_BATTLEFIELD,  5, 18, 45, SP_BATTLEFIELD,  "A Battlefield",        false },
     { T_SWAMP,        1, 15, 45, SP_SWAMP,        "A Murky Swamp",        false },
-    { T_EXECUTIONER,  1, 28, 28, SP_EXECUTIONER,  "A Ravaged Battleship", false },
+    { T_EXECUTIONER,  1, 28, 28, SP_EXEC_INTRO,   "A Ravaged Battleship", false },
     { T_CACHE,        1, 10, 45, SP_CACHE,        "A Destroyed Village",  true  },
 };
 constexpr int LANDMARK_ROWS = (int)(sizeof(LANDMARKS) / sizeof(LANDMARKS[0]));

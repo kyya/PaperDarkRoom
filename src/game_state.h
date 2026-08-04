@@ -137,6 +137,22 @@ public:
     // must not relaunch the level on the next boot.
     bool spacePending;
 
+    // ---- The Executioner (Phase 3c-2, executioner.js) ----
+    // Upstream keeps these four on World.state (the expedition), which goHome
+    // commits into the persistent game.world blob. This port has no persisted
+    // "world state" object besides world.bin's map, so the committed half lives
+    // here and Expedition mirrors it for the trip (world_state.h). All four are
+    // `fl` bits — the same upgrade-safe growth the starship flags used, so a
+    // v1..v5 save simply reads them clear ("never boarded the battleship").
+    bool execEntered;                // the prologue was cleared and banked
+    bool wingEngineering;            // wing cleared and banked (front hall greys out)
+    bool wingMartial;
+    bool wingMedical;
+    // Blueprints redeemed for good (game_data.h Blueprint bits) == upstream
+    // `character.blueprints`. Serialized as the flat "bp" key. The Fabricator that
+    // spends them is 3c-3; 3c-2 only has to make the find survive the walk home.
+    uint8_t blueprints;
+
     // Craftable progressive-unlock bitsets (room.js craftUnlocked, v0.4.3).
     // seen: bit r set once stores[r] has ever been >0 — a craftable's non-wood
     // cost materials must all be "seen" before its button appears (RES_COUNT<=32).

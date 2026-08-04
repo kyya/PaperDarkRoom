@@ -85,13 +85,40 @@ enum Res : uint8_t {
     // SAVE_VER bump is needed for the growth. (trek.bin is length-derived, so it
     // DOES need a version: TREK_VER 1 -> 2, see world_state.cpp loadTrek.)
     R_HYPO, R_STIM,
+    // -- Phase 3c-2: the command deck boss's only drop (executioner.js:2310).
+    // Never spent — it is the flag Score.calculateScore and the expansion ending
+    // read off the village stores (research-phase3.md §3.9), which is also why it
+    // is absent from World.leaveItAtHome and rides home to STAY home.
+    R_FLEET_BEACON,
     RES_COUNT
 };
 static const char* const RES_KEY[RES_COUNT] = {
     "wood", "fur", "meat", "bait", "leather", "cured meat",
     "iron", "coal", "sulphur", "steel", "teeth", "scales", "cloth", "charm",
     "bullets", "medicine", "energy cell", "alien alloy", "compass",
-    "hypo", "stim" };
+    "hypo", "stim", "fleet beacon" };
+
+// ---- Blueprints (character.blueprints) — Phase 3c ------------------------
+// Upstream ships blueprints as weight-1 BACKPACK ITEMS that World.redeemBlueprints
+// (world.js:989-1009) converts into `character.blueprints[<product>] = true` on
+// goHome. The port keeps the persistent half but drops the inventory half: six
+// dedicated Res slots would inflate stores/savedOutfitRes/outfitRes by six each to
+// carry six booleans, so a blueprint is a BIT — found bits ride the expedition
+// (Expedition::bpFound, lost on death exactly like the item was), redeemed bits
+// ride the save (GameState::blueprints). See research-phase3.md §12 Q10.
+//
+// glowstone's blueprint (medical `8`) is DELIBERATELY ABSENT: §12 Q8 rules the
+// glow stone out of Phase 3 entirely (upstream has no consumer for it — pure
+// unfinished content), and the zh translation set was finalised without its four
+// strings. The unstable automaton therefore drops nothing, which is the honest
+// consequence of that ruling rather than a transcription slip.
+enum Blueprint : uint8_t {
+    BP_HYPO = 0, BP_KINETIC_ARMOUR, BP_PLASMA_RIFLE, BP_DISRUPTOR, BP_STIM,
+    BP_COUNT
+};
+static const char* const BLUEPRINT_KEY[BP_COUNT] = {
+    "hypo blueprint", "kinetic armour blueprint", "plasma rifle blueprint",
+    "disruptor blueprint", "stim blueprint" };
 
 // ---- Buildings (game.buildings) — P1 craftables + P2 World mines ----------
 enum Bld : uint8_t {

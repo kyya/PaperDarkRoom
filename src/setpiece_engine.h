@@ -61,9 +61,14 @@ int         lootGot(int i);
 
 int         btnCount();                 // buttons in the current scene
 const char* btnTextKey(int localBtn);   // button label tr() key, or nullptr
-bool        btnAvailable(int localBtn); // cost affordable from the bag (true if free)
-uint8_t     btnCostSlot(int localBtn);  // cost slot, or SP_NO_COST
+// Pressable right now: the `available` gate passes AND the cost is affordable
+// (true for a free, ungated button). The modal draws a false as the action_band
+// "disabled" band, which is exactly what upstream's Button.setDisabled does for
+// both halves (events.js updateButtons).
+bool        btnAvailable(int localBtn);
+uint8_t     btnCostSlot(int localBtn);  // cost slot, or SP_NO_COST/_WATER/_HP
 bool        btnCostIsItem(int localBtn);// cost slot is an Item (else a Res)
+int         btnCostAmt(int localBtn);   // water/hp amount; 1 for a Res/Item cost
 int         defaultBtnIndex();          // local index of the no-cost safe-exit button
 
 // ---- combat handoff ----

@@ -70,15 +70,21 @@ int hitButton(int x, int y) {
     return -1;
 }
 
-// A button's cost sub-line ("-1 火把"). Setpiece costs are one unit of one slot
-// (torch / charm). Returns false (empty) for a free button.
+// A button's cost sub-line ("-1 火把", "-5 水", "-10 生命"). A bag cost is always
+// one unit of one slot (torch / charm / grenade / alien alloy); the Executioner's
+// burning corridor is the only place that bills water or blood, and those DO carry
+// an amount. Returns false (empty) for a free button.
 bool costLine(int localBtn, char* out, size_t cap) {
     out[0] = 0;
     uint8_t slot = setpiece::btnCostSlot(localBtn);
     if (slot == SP_NO_COST) return false;
-    const char* nm = setpiece::btnCostIsItem(localBtn) ? tr(ITEM_KEY[slot])
-                                                       : tr(RES_KEY[slot]);
-    snprintf(out, cap, "-1 %s", nm);
+    const char* nm;
+    // "water" / "hp" are upstream's own cost keys (events.js getQuantity) and both
+    // are already in the official zh table (水 / 生命) — no local string needed.
+    if (slot == SP_COST_WATER)   nm = tr("water");
+    else if (slot == SP_COST_HP) nm = tr("hp");
+    else nm = setpiece::btnCostIsItem(localBtn) ? tr(ITEM_KEY[slot]) : tr(RES_KEY[slot]);
+    snprintf(out, cap, "-%d %s", setpiece::btnCostAmt(localBtn), nm);
     return true;
 }
 
@@ -188,7 +194,10 @@ bool handleHold(int x, int y) {
         afterTransition();
         return true;
     }
-    if (r == RC_ERR_COST) beeper::tone(600, 120);   // can't afford (no torch/charm)
+    // Can't afford it (no torch/charm/water/blood), or the `available` gate says
+    // no (a wing already cleared): same low buzz, since both draw the same
+    // disabled band and neither is a state the player can fix by pressing harder.
+    if (r == RC_ERR_COST || r == RC_ERR_LOCKED) beeper::tone(600, 120);
     pushFull();                    // clean frame back over the press flash
     return true;
 }

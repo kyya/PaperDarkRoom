@@ -356,11 +356,13 @@ void WorldPage::onLocalAction(uint8_t param, int x, int y) {
             pager::showPage(pager::currentRingIndex(), false);  // paints the frame
             return;
         case STEP_LANDMARK:
-            // 2.4: open the landmark's setpiece (r.scene is its SetpieceId). The
-            // overlay owns the screen until a leave / flee / clear / death. If the
-            // landmark has no Phase-2 table (executioner = Phase 3), begin() is
-            // inert and we fall back to r.notice (meat/water/danger, §3.1/§3.3) or,
-            // failing that, the landmark's own name in the HUD hint slot.
+            // 2.4: open the landmark's setpiece (r.scene is its SetpieceId, which
+            // move() has already resolved — the battleship picks its prologue or
+            // its elevator hall there). The overlay owns the screen until a leave /
+            // flee / clear / death. If a landmark still has no table (only the
+            // prestige-only cache, since 3c-2), begin() is inert and we fall back
+            // to r.notice (meat/water/danger, §3.1/§3.3) or, failing that, the
+            // landmark's own name in the HUD hint slot.
             m_msgKey = nullptr;
             setpiece_modal::begin(r.scene, millis());
             if (setpiece_modal::active()) return;

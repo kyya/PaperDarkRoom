@@ -31,6 +31,8 @@ void GameState::init() {
     spaceWon = false;
     spacePending = false;
     scoreTotal = 0;
+    execEntered = wingEngineering = wingMartial = wingMedical = false;
+    blueprints = 0;
     shipHull = SHIP_BASE_HULL;        // 0 — a fresh ship cannot fly (ship.js:8)
     shipThrusters = SHIP_BASE_THRUSTERS;
     seen = 0;
@@ -831,7 +833,11 @@ size_t GameState::toJson(char* out, size_t cap) const {
                 (woodSeen ? 4 : 0) | (seenForest ? 8 : 0) |
                 (needWoodActive ? 16 : 0) |
                 (shipUnlocked ? 32 : 0) | (shipSeenWarning ? 64 : 0) |
-                (spaceWon ? 128 : 0);
+                (spaceWon ? 128 : 0) |
+                // 3c-2 Executioner progress: the same bitfield-growth argument
+                // as the starship flags above.
+                (execEntered ? 256 : 0) | (wingEngineering ? 512 : 0) |
+                (wingMartial ? 1024 : 0) | (wingMedical ? 2048 : 0);
     AP("\"fl\":%d,", flags);
     AP("\"cd\":[%lu,%lu,%lu],", (unsigned long)cdFire,
        (unsigned long)cdGather, (unsigned long)cdTraps);
@@ -845,6 +851,8 @@ size_t GameState::toJson(char* out, size_t cap) const {
     // v5 Space outcome. Same flat-key rule as the three above: absent on a
     // v1..v4 save, where init()'s 0 stands and reads correctly as "never flown".
     AP("\"tscore\":%lu,", (unsigned long)scoreTotal);
+    // Redeemed blueprints (3c-2). Flat key, absent on every earlier save -> 0.
+    AP("\"bp\":%u,", (unsigned)blueprints);
     AP("\"tm\":[%d,%d,%d,%d,%d],", tTemp, tBuilder, tNeedWood, tFireCool, tPop);
     AP("\"nev\":%lu,", (unsigned long)nextEventAt);
     AP("\"echo\":[%d,%ld,%lu],", echoRes, (long)echoAmt,
@@ -904,6 +912,11 @@ bool GameState::fromJson(const char* j) {
     shipUnlocked       = flags & 32;     // v4; clear on v1..v3 -> no ship page
     shipSeenWarning    = flags & 64;     // v4; clear on v1..v3 -> warning still due
     spaceWon           = flags & 128;    // v5; clear on v1..v4 -> never reached space
+    execEntered        = flags & 256;    // 3c-2; clear on an older save -> prologue due
+    wingEngineering    = flags & 512;
+    wingMartial        = flags & 1024;
+    wingMedical        = flags & 2048;
+    blueprints = (uint8_t)readLong(afterKey(j, "bp"));   // absent -> none redeemed
     int32_t cd[3];  readIntArr(afterKey(j, "cd"), cd, 3);
     cdFire = (uint32_t)cd[0]; cdGather = (uint32_t)cd[1]; cdTraps = (uint32_t)cd[2];
     // v4 starship. PRESENCE-CHECKED, not readLong'd blind: shipThrusters defaults

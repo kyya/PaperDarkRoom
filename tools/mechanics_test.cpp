@@ -23,6 +23,13 @@
 //   Layer 4  save robustness: world.bin v1->v2 migration / truncation / bad
 //            version / v2 round-trip; trek.bin truncation / round-trip; game.json
 //            missing "dcool" -> deathAt==0.
+//   Layer 5  the Space level (Phase 3b).
+//   Layer 6  the Executioner combat MECHANICS (Phase 3c-1) — the six statuses,
+//            scene specials, atHealth, explosion, the three new weapons.
+//   Layer 7  the Executioner CONTENT (Phase 3c-2) — the 20 enemy stat blocks and
+//            38 combat scenes transcribed a second time from upstream
+//            executioner.js, the wing bookkeeping, the blueprint drops, the front
+//            hall's availability gates and the burning corridor.
 //
 // Zero source intrusion: every RNG the statistics need is already injectable —
 // generateMap(seed) for the map stream, embark(trekSeed) / the public ex.rng for
@@ -30,7 +37,7 @@
 //
 // Build (clang++ is the host toolchain on this box):
 //   clang++ -std=c++17 -I src tools/mechanics_test.cpp src/world_state.cpp \
-//           src/game_state.cpp src/setpiece_engine.cpp \
+//           src/game_state.cpp src/setpiece_engine.cpp src/space_game.cpp \
 //           -DADR_SAVE_PATH='"mechanics_game.json"' \
 //           -DADR_WORLD_PATH='"mechanics_world.bin"' \
 //           -DADR_TREK_PATH='"mechanics_trek.bin"' \
@@ -109,9 +116,18 @@ static const SpMeta SP_META[] = {
     /* SP_BOREHOLE    */ { 1, 0, 0 },
     /* SP_BATTLEFIELD */ { 1, 0, 0 },
     /* SP_SWAMP       */ { 5, 0, 0 },
-    /* SP_EXECUTIONER */ { 0, 0, 0 },
+    /* SP_EXEC_INTRO  */ { 27, 3, 20 },
     /* SP_CACHE       */ { 0, 0, 0 },
+    // The six Executioner tables share ONE 20-row enemy array, so every wing
+    // declares the same enemyN (executioner_data.h).
+    /* SP_EXEC_ANTE   */ { 5, 0, 20 },
+    /* SP_EXEC_ENG    */ { 41, 15, 20 },
+    /* SP_EXEC_MAR    */ { 54, 10, 20 },
+    /* SP_EXEC_MED    */ { 61, 14, 20 },
+    /* SP_EXEC_CMD    */ { 15, 2, 20 },
 };
+static_assert(sizeof(SP_META) / sizeof(SP_META[0]) == SETPIECE_COUNT,
+              "SP_META must describe every SETPIECES[] row");
 
 static bool lootSlotLegal(const LootDrop& d) {
     return d.isItem ? (d.slot < ITEM_COUNT) : (d.slot < RES_COUNT);
@@ -130,6 +146,9 @@ static bool sceneCanEnd(const SpDef& def, uint8_t sceneN, const SpMeta& m,
     for (int b = 0; b < sc.btnCount && !canEnd; b++) {
         const SpButton& btn = def.btns[sc.btnStart + b];
         if (btn.next == SP_SCENE_END) { canEnd = true; break; }
+        // A cross-event hop leaves THIS graph for another setpiece, which is just
+        // as good an exit as `end` for "can the player get out of this scene".
+        if (btn.next == SP_SCENE_EVENT) { canEnd = true; break; }
         if (btn.next == SP_SCENE_PROB) {
             for (int i = 0; i < btn.probCount; i++) {
                 uint8_t tgt = def.probs[btn.probStart + i].scene;
@@ -168,17 +187,29 @@ static void layer1_setpieces() {
             if (sc.btnStart + sc.btnCount > m.btnN) btnRangeOk = false;
             // combat scene enemy index
             if (sc.combat && sc.enemy >= m.enemyN) enemyOk = false;
-            // narrative loot slots
+            // narrative loot slots + the Executioner's blueprint bit
             for (int i = 0; i < sc.lootN; i++)
                 if (!lootSlotLegal(sc.loot[i])) lootOk = false;
+            if (sc.bp > BP_COUNT) lootOk = false;
             for (int b = 0; b < sc.btnCount; b++) {
                 const SpButton& btn = def.btns[sc.btnStart + b];
-                // cost slot legal
-                if (btn.costSlot != SP_NO_COST) {
+                // cost slot legal. The two non-inventory currencies (the
+                // Executioner's water/hp prices) are SENTINEL slots that carry an
+                // amount instead of indexing a table — they must have one, and a
+                // bag cost must have none (SpButton::costAmt is unread there).
+                if (btn.costSlot == SP_COST_WATER || btn.costSlot == SP_COST_HP) {
+                    if (btn.costAmt <= 0) costOk = false;
+                } else if (btn.costSlot != SP_NO_COST) {
+                    if (btn.costAmt != 0) costOk = false;
                     if (btn.costIsItem) { if (btn.costSlot >= ITEM_COUNT) costOk = false; }
                     else                { if (btn.costSlot >= RES_COUNT)  costOk = false; }
                 }
                 if (btn.next == SP_SCENE_END) continue;
+                if (btn.next == SP_SCENE_EVENT) {
+                    // probStart is the TARGET SetpieceId here, not a prob index.
+                    if (!setpieceExists(btn.probStart)) idxOk = false;
+                    continue;
+                }
                 if (btn.next == SP_SCENE_PROB) {
                     // prob window in bounds + thresholds monotone ending at 1000
                     if (btn.probStart + btn.probCount > m.probN) { probOk = false; continue; }
@@ -1714,17 +1745,21 @@ static void layer6_setpiece_seams() {
         CHECK(w.ex.water == 0, "and 5 water is deducted");
         setpiece::end();
     }
-    // -- hp cost: strictly greater, so paying can never be the killing blow --
+    // -- hp cost: upstream's `num < cost` gate, so exactly-enough is affordable and
+    // the wanderer can walk out of engineering `1-3` on precisely 0 HP (events.js
+    // updateButtons/buttonClick + World.setHp, which clamps and never kills). --
     {
         GameState gs; WorldState w; plantEx(w, gs, 40, 0xb2b2);
         setpiece::bind(&w, &gs);
         setpiece::beginTable(&TEST_SP);
+        w.ex.hp = 9;
+        CHECK(!setpiece::btnAvailable(1), "a 10-HP price is refused at 9 HP");
+        CHECK(setpiece::choose(1) == RC_ERR_COST, "and pressing it anyway is rejected");
         w.ex.hp = 10;
-        CHECK(!setpiece::btnAvailable(1), "a 10-HP price at exactly 10 HP is refused");
-        CHECK(setpiece::choose(1) == RC_ERR_COST, "paying it would be lethal, so it is blocked");
-        w.ex.hp = 11;
-        CHECK(setpiece::btnAvailable(1), "11 HP affords it");
-        CHECK(setpiece::choose(1) == RC_OK && w.ex.hp == 1, "and leaves the wanderer on 1 HP");
+        CHECK(setpiece::btnAvailable(1), "exactly 10 HP affords a 10-HP price");
+        CHECK(setpiece::choose(1) == RC_OK && w.ex.hp == 0,
+              "paying it lands on 0 HP — alive, one hit from the end (upstream parity)");
+        CHECK(w.ex.active && !w.ex.dead, "0 HP is NOT death: setHp never kills, doSpace does");
         setpiece::end();
     }
     // -- nextEvent: hop to another setpiece, keeping the expedition --
@@ -1776,9 +1811,10 @@ static void layer6_setpiece_seams() {
 }
 
 static void layer6_trek_v2() {
-    printf("== [L6] trek.bin v1 -> v2 migration (the Res/Item growth) ==\n");
-    // Produce a real v2 file, then hand-fold it back into the v1 layout (the old
-    // 19 Res / 18 Item array widths) and prove the migration reads it losslessly.
+    printf("== [L6] trek.bin v1/v2 -> v3 migration (two rounds of enum growth) ==\n");
+    // Produce a real v3 file, then hand-fold it back into the v1 layout (19 Res /
+    // 18 Item, no tail) and the v2 layout (21 / 22, no tail) and prove both
+    // migrations read losslessly.
     GameState gs; gs.init();
     WorldState w; w.init(); w.generateMap(0xC0DEC0);
     gs.stores[R_CURED_MEAT] = 8 * FP; gs.stores[R_MEDICINE] = 2 * FP;
@@ -1787,31 +1823,63 @@ static void layer6_trek_v2() {
     int16_t outi[ITEM_COUNT] = { 0 }; outi[I_RIFLE] = 1;
     w.embark(gs, out, outi, 0xC0DE);
     w.move(gs, DIR_EAST); w.move(gs, DIR_EAST);
+    w.ex.wingMartial = true; w.ex.bpFound = 1 << BP_STIM;
+    w.saveTrek();
 
-    const size_t HDR   = 68;
-    const size_t V2SZ  = HDR + RES_COUNT * 2 + ITEM_COUNT * 2 +
-                         WORLD_CELLS + 2 * WORLD_MASK_BYTES;
-    const size_t V1SZ  = HDR + 19 * 2 + 18 * 2 + WORLD_CELLS + 2 * WORLD_MASK_BYTES;
-    uint8_t* v2 = (uint8_t*)malloc(V2SZ);
+    const size_t HDR  = 68;
+    const size_t MAP  = WORLD_CELLS + 2 * WORLD_MASK_BYTES;
+    const size_t BODY = HDR + RES_COUNT * 2 + ITEM_COUNT * 2 + MAP;
+    const size_t V3SZ = BODY + 2;                 // + the wing/blueprint tail
+    const size_t V2SZ = HDR + 21 * 2 + 22 * 2 + MAP;
+    const size_t V1SZ = HDR + 19 * 2 + 18 * 2 + MAP;
+    uint8_t* v3 = (uint8_t*)malloc(V3SZ);
     FILE* f = fopen(ADR_TREK_PATH, "rb");
     CHECK(f != nullptr, "the freshly saved trek.bin is readable");
-    size_t got = f ? fread(v2, 1, V2SZ, f) : 0;
+    size_t got = f ? fread(v3, 1, V3SZ, f) : 0;
     if (f) fclose(f);
-    CHECK(got == V2SZ, "and it is exactly the v2 size");
-    CHECK(v2[4] == 2, "written as TREK_VER 2");
+    CHECK(got == V3SZ, "and it is exactly the v3 size (body + 2-byte tail)");
+    CHECK(v3[4] == 3, "written as TREK_VER 3");
+
+    // v3 round-trips its own tail.
+    {
+        WorldState ld; ld.init();
+        CHECK(ld.loadTrek(), "a v3 trek.bin loads");
+        CHECK(ld.ex.wingMartial && !ld.ex.wingEngineering && !ld.ex.wingMedical,
+              "the wing flags survive a power-cut mid-wing");
+        CHECK(ld.ex.bpFound == (1 << BP_STIM), "so does the blueprint found this trip");
+    }
+
+    // Fold down to v2: same arrays minus the fleet-beacon slot, and no tail.
+    uint8_t* v2 = (uint8_t*)malloc(V2SZ);
+    memcpy(v2, v3, HDR);
+    v2[4] = 2;
+    memcpy(v2 + HDR, v3 + HDR, 21 * 2);
+    memcpy(v2 + HDR + 21 * 2, v3 + HDR + RES_COUNT * 2, 22 * 2);
+    memcpy(v2 + HDR + 21 * 2 + 22 * 2, v3 + HDR + RES_COUNT * 2 + ITEM_COUNT * 2, MAP);
+    writeRaw(ADR_TREK_PATH, v2, V2SZ);
+    {
+        WorldState ld; ld.init();
+        CHECK(ld.loadTrek(), "a v2 trek.bin still loads under v3 firmware");
+        CHECK(ld.ex.active && ld.ex.x == w.ex.x && ld.ex.y == w.ex.y,
+              "the interrupted expedition is NOT silently dropped");
+        CHECK(ld.ex.outfitRes[R_MEDICINE] == 2 && ld.ex.outfitItem[I_RIFLE] == 1,
+              "the v2-era bag survives the wider Res array");
+        CHECK(ld.ex.outfitRes[R_FLEET_BEACON] == 0 && ld.ex.bpFound == 0 &&
+              !ld.ex.wingMartial,
+              "and everything v2 never had reads as empty");
+    }
 
     uint8_t* v1 = (uint8_t*)malloc(V1SZ);
-    memcpy(v1, v2, HDR);
+    memcpy(v1, v3, HDR);
     v1[4] = 1;                                        // relabel as v1
-    memcpy(v1 + HDR, v2 + HDR, 19 * 2);               // the old 19 Res slots
-    memcpy(v1 + HDR + 19 * 2, v2 + HDR + RES_COUNT * 2, 18 * 2);   // old 18 Items
+    memcpy(v1 + HDR, v3 + HDR, 19 * 2);               // the old 19 Res slots
+    memcpy(v1 + HDR + 19 * 2, v3 + HDR + RES_COUNT * 2, 18 * 2);   // old 18 Items
     memcpy(v1 + HDR + 19 * 2 + 18 * 2,
-           v2 + HDR + RES_COUNT * 2 + ITEM_COUNT * 2,
-           WORLD_CELLS + 2 * WORLD_MASK_BYTES);       // the map blob, unchanged
+           v3 + HDR + RES_COUNT * 2 + ITEM_COUNT * 2, MAP);        // map, unchanged
     writeRaw(ADR_TREK_PATH, v1, V1SZ);
 
     WorldState ld; ld.init();
-    CHECK(ld.loadTrek(), "a v1 trek.bin still loads under v2 firmware");
+    CHECK(ld.loadTrek(), "a v1 trek.bin still loads under v3 firmware");
     CHECK(ld.ex.active, "the interrupted expedition is NOT silently dropped");
     CHECK(ld.ex.x == w.ex.x && ld.ex.y == w.ex.y, "position survives the migration");
     CHECK(ld.ex.hp == w.ex.hp && ld.ex.water == w.ex.water && ld.ex.rng == w.ex.rng,
@@ -1824,7 +1892,7 @@ static void layer6_trek_v2() {
           ld.ex.outfitItem[I_KINETIC_ARMOUR] == 0,
           "and the slots v1 never had read as empty");
     CHECK(memcmp(ld.ex.tiles, w.ex.tiles, WORLD_CELLS) == 0, "the working map survives");
-    free(v1); free(v2);
+    free(v1); free(v2); free(v3);
 
     // A v1 file that is one byte short of even the v1 layout is still rejected.
     {
@@ -1889,6 +1957,503 @@ static void layer6_save_roundtrip() {
 }
 
 // ===========================================================================
+// Layer 7 — the Executioner CONTENT (Phase 3c-2)
+//
+// Layer 1a already proves the six graphs are structurally sound (reachable,
+// in-bounds, no dead end). This layer proves they are the RIGHT graphs: every
+// enemy stat block transcribed a second time from upstream
+// script/events/executioner.js, every combat scene's enemy assignment, the wing
+// bookkeeping (clear -> mark -> the front hall greys out -> goHome banks it, die
+// throws it away), the blueprint drops, and the two scenes that behave unlike
+// anything else in the game (the front hall's cross-event hops, and the burning
+// corridor with no way out).
+// ===========================================================================
+
+// Kit an expedition out for a full Executioner run: deep HP/water so a graph walk
+// cannot starve, and the four things its buttons bill (torch / grenade / alloy).
+static void plantExec(WorldState& w, GameState& gs, uint32_t rng) {
+    gs.init();
+    w.init();
+    w.generateMap(0x3C2E7EC);
+    gs.stores[R_CURED_MEAT] = 10 * FP;
+    // A convoy, in the STORES only (embark would otherwise deduct it): the bag has
+    // to have room left for the loot, or every drop silently fails the weight cap.
+    gs.items[I_CONVOY] = 1;
+    int16_t out[RES_COUNT] = { 0 };
+    out[R_CURED_MEAT] = 10; out[R_ALIEN_ALLOY] = 6;
+    int16_t outi[ITEM_COUNT] = { 0 };
+    // A steel sword so there is always an unlimited swing available: the grenades
+    // are here for martial `1`'s door, not for the fights, and a walk that spends
+    // them all would otherwise stall in front of the next machine.
+    outi[I_TORCH] = 5; outi[I_GRENADE] = 5; outi[I_STEEL_SWORD] = 1;
+    gs.stores[R_ALIEN_ALLOY] = 10 * FP;
+    gs.items[I_TORCH] = 5; gs.items[I_GRENADE] = 5; gs.items[I_STEEL_SWORD] = 1;
+    w.embark(gs, out, outi, rng);
+    w.ex.maxHp = 400; w.ex.hp = 400;
+    w.ex.maxWater = 99; w.ex.water = 99;
+    setpiece::bind(&w, &gs);
+}
+
+// Beat the armed setpiece fight without ever letting the enemy swing (the tick is
+// only pumped for an explosion wind-up, which is the one thing a player cannot
+// out-click), then hand the outcome back the way setpiece_modal does.
+static void winSetpieceFight(WorldState& w, GameState& gs) {
+    for (int g = 0; g < 20000 && w.cx.active && !w.cx.won; g++) {
+        if (w.cx.exploding) { w.fightTick(gs); continue; }
+        bool swung = false;
+        for (int s = 0; s < w.fightWeaponCount(); s++) {
+            w.cx.weaponCool[s] = 0;                       // ignore the cooldown
+            if (!w.fightWeaponEnabled(s)) continue;       // spent its ammo/itself
+            if (WEAPONS[w.fightWeaponId(s)].damage == DMG_STUN) continue;  // bolas-likes
+            w.fightAttack(gs, s);
+            swung = true;
+            break;
+        }
+        if (!swung) break;                                // nothing left to swing
+    }
+    setpiece::resolveCombat(w.cx.won);
+}
+
+// Press the FIRST band of every scene until the setpiece closes. Button 0 is the
+// forward move in every Executioner scene (continue / enter / power cycle / fight
+// / engage / observe / use machine / blow it down / scavenge maps / take device),
+// so this walks a whole wing end to end on any branch roll.
+static int driveWing(WorldState& w, GameState& gs) {
+    int steps = 0;
+    while (setpiece::active() && steps++ < 300) {
+        if (setpiece::awaitingCombat()) { winSetpieceFight(w, gs); continue; }
+        if (setpiece::choose(0) != RC_OK) break;
+    }
+    return steps;
+}
+
+static void layer7_enemies() {
+    printf("== [L7] exec_enemies[]: 20 stat blocks, transcribed a second time ==\n");
+    // Second source: executioner.js:1-115 (the four shared machines) plus every
+    // inline `combat: true` scene. delayCS is upstream's sub-second attackDelay in
+    // centiseconds (0 == the whole-second delayS is used verbatim).
+    struct ERow { const char* who; char chara; int16_t hp, dmg, hit, delayS, delayCS;
+                  bool ranged; uint8_t sk; int16_t sd; int16_t ath; int16_t exp;
+                  int lootN; };
+    static const ERow EXPECT[] = {
+        { "guard",              'G',  60, 10, 800, 2,   0, true,  SK_NONE,      0,  0,  0, 3 },
+        { "quadruped",          'Q',  70,  8, 800, 1,   0, false, SK_NONE,      0,  0,  0, 1 },
+        { "medic",              'M',  80, 15, 800, 3,   0, false, SK_NONE,      0, 40,  0, 2 },
+        { "turret",             'T',  50, 25, 800, 4,   0, true,  SK_NONE,      0,  0,  0, 3 },
+        { "chitinous horror",   'H',  60,  1, 700, 0,  25, false, SK_NONE,      0,  0,  0, 2 },
+        { "chitinous queen",    'Q',  70,  1, 700, 0,  25, false, SK_NONE,      0,  0,  0, 2 },
+        { "operative",          'O',  60,  8, 800, 2,   0, false, SK_NONE,      0,  0,  0, 3 },
+        { "researcher",         'R',  20,  1, 800, 2,   0, false, SK_NONE,      0,  0,  0, 3 },
+        { "ancient beast",      'A',  60,  6, 800, 1,   0, false, SK_NONE,      0,  0,  0, 3 },
+        { "automated turret",   'T',  60, 10, 800, 0, 250, true,  SK_NONE,      0,  0,  0, 2 },
+        { "unruly welder",      'W',  50, 13, 800, 2,   0, false, SK_NONE,      0,  0,  0, 2 },
+        { "unstable prototype", 'P', 150,  5, 800, 2,   0, false, SK_SHIELD,    5,  0,  0, 1 },
+        { "murderous robot",    'M', 250, 10, 800, 3,   0, false, SK_ENERGISED,13,  0,  0, 1 },
+        { "unstable automaton", 'A', 100, 10, 700, 2,   0, false, SK_NONE,      0,  0, 30, 0 },
+        { "malformed experiment",'E',200,  5, 800, 2,   0, false, SK_ENRAGED,  16,  0,  0, 0 },
+        { "immortal wanderer",  '@', 500, 12, 800, 2,   0, false, SK_RANDOM3,   7,  0,  0, 1 },
+        { "guard (8-1a)",       'G',  60, 10, 800, 2,   0, true,  SK_NONE,      0,  0,  0, 3 },
+        { "guard (9-1)",        'G',  60, 10, 800, 2,   0, true,  SK_NONE,      0,  0,  0, 3 },
+        { "medic (6-1a)",       'M',  80, 15, 800, 3,   0, false, SK_NONE,      0, 40,  0, 2 },
+        { "medic (6-2a)",       'M',  80, 15, 800, 3,   0, false, SK_NONE,      0, 40,  0, 2 },
+    };
+    const int N = (int)(sizeof(EXPECT) / sizeof(EXPECT[0]));
+    CHECK(N == 20, "the second source covers all 20 rows");
+    for (int i = 0; i < N; i++) {
+        const ERow& x = EXPECT[i];
+        const SetpieceEnemy& e = exec_enemies[i];
+        char m[128];
+        snprintf(m, sizeof m, "%s: %d hp / %d dmg / %d pm / delay %d s %d cs",
+                 x.who, (int)x.hp, (int)x.dmg, (int)x.hit, (int)x.delayS, (int)x.delayCS);
+        CHECK(e.chara == x.chara && e.health == x.hp && e.damage == x.dmg &&
+              e.hitPM == x.hit && e.attackDelayS == x.delayS &&
+              e.attackDelayCS == x.delayCS && e.ranged == x.ranged, m);
+        snprintf(m, sizeof m, "%s: special %d/%ds, atHealth %d, explosion %d, %d loot lines",
+                 x.who, (int)x.sk, (int)x.sd, (int)x.ath, (int)x.exp, x.lootN);
+        CHECK(e.specialKind == x.sk && e.specialDelayS == x.sd &&
+              e.atHealthThreshold == x.ath && e.explosionDamage == x.exp &&
+              e.lootN == x.lootN, m);
+        // The data-row invariant combat_data.h states: one delay form or the other.
+        CHECK((e.attackDelayCS != 0) == (e.attackDelayS == 0),
+              (snprintf(m, sizeof m, "%s: exactly one attackDelay form is set", x.who), m));
+    }
+    // The medic's blood line, and the two overrides that only change a line of text.
+    CHECK(exec_enemies[2].atHealthStatus == ST_VENOMOUS &&
+          exec_enemies[18].atHealthStatus == ST_VENOMOUS,
+          "every medic turns venomous at 40 hp, overrides included");
+    CHECK(strcmp(exec_enemies[16].notif, "drew some attention with all that noise.") == 0 &&
+          strcmp(exec_enemies[17].notif, "ran straight into another one.") == 0 &&
+          strcmp(exec_enemies[18].notif, "it had friends.") == 0 &&
+          strcmp(exec_enemies[19].notif, "the noise draws attention.") == 0,
+          "the four scene-specific notifications are on their own rows");
+    // §12 Q5: upstream's duplicate 'alien alloy' key means only 2-4 @ 0.2 survives.
+    CHECK(exec_enemies[1].lootN == 1 && exec_enemies[1].loot[0].mn == 2 &&
+          exec_enemies[1].loot[0].mx == 4 && exec_enemies[1].loot[0].chancePM == 200,
+          "quadruped keeps ONLY the second 'alien alloy' line (upstream's dup-key bug)");
+    // The boss's drop is the whole reason R_FLEET_BEACON exists.
+    CHECK(!exec_enemies[15].loot[0].isItem &&
+          exec_enemies[15].loot[0].slot == R_FLEET_BEACON &&
+          exec_enemies[15].loot[0].chancePM == 1000,
+          "the immortal wanderer always drops the fleet beacon");
+    // The folds §10.4 works out by hand, now applied to the REAL rows.
+    CHECK(foldAttack(exec_enemies[4].damage, exec_enemies[4].attackDelayCS).damage == 4,
+          "chitinous horror folds to 4 damage a tick");
+    CHECK(foldAttack(exec_enemies[9].damage, exec_enemies[9].attackDelayCS).delayS == 3 &&
+          foldAttack(exec_enemies[9].damage, exec_enemies[9].attackDelayCS).damage == 12,
+          "the automated turret folds to 12 damage every 3 ticks");
+}
+
+static void layer7_combat_scenes() {
+    printf("== [L7] all 38 combat scenes point at the enemy upstream spreads in ==\n");
+    // Second source: every `combat: true` / `...Enemies.Executioner.x` scene, in
+    // the scene order executioner_data.h declares.
+    struct CRow { uint8_t sp; uint8_t scene; uint8_t enemy; const char* sid; };
+    static const CRow EXPECT[] = {
+        { SP_EXEC_INTRO,  3,  4, "3-1" }, { SP_EXEC_INTRO,  4,  5, "4-1" },
+        { SP_EXEC_INTRO,  5,  6, "2-2" }, { SP_EXEC_INTRO,  7,  7, "4-2" },
+        { SP_EXEC_INTRO, 10,  8, "4-3" }, { SP_EXEC_INTRO, 12,  9, "6"   },
+        { SP_EXEC_ENG,    2, 10, "2-1a" }, { SP_EXEC_ENG,   4,  0, "3-1" },
+        { SP_EXEC_ENG,    5,  3, "1-2"  }, { SP_EXEC_ENG,   7,  0, "3-2a" },
+        { SP_EXEC_ENG,   10,  0, "2-3a" }, { SP_EXEC_ENG,  15,  3, "5-1" },
+        { SP_EXEC_ENG,   19, 11, "7"    },
+        { SP_EXEC_MAR,    3,  3, "3-1"  }, { SP_EXEC_MAR,   5,  3, "2-2" },
+        { SP_EXEC_MAR,    6,  1, "3-2a" }, { SP_EXEC_MAR,  10,  0, "3-3a" },
+        { SP_EXEC_MAR,   12,  1, "4-3"  }, { SP_EXEC_MAR,  16, 16, "8-1a" },
+        { SP_EXEC_MAR,   18, 17, "9-1"  }, { SP_EXEC_MAR,  22,  1, "9-2" },
+        { SP_EXEC_MAR,   25, 12, "12"   },
+        { SP_EXEC_MED,    1,  3, "1"    }, { SP_EXEC_MED,   3,  1, "3a"  },
+        { SP_EXEC_MED,    6,  2, "5-1"  }, { SP_EXEC_MED,   7, 18, "6-1a" },
+        { SP_EXEC_MED,   12, 19, "6-2a" }, { SP_EXEC_MED,  14,  1, "7-2" },
+        { SP_EXEC_MED,   15, 13, "8"    }, { SP_EXEC_MED,  17,  0, "10a" },
+        { SP_EXEC_MED,   19,  2, "11"   }, { SP_EXEC_MED,  21,  0, "13-1a" },
+        { SP_EXEC_MED,   23,  2, "14-1" }, { SP_EXEC_MED,  25,  2, "13-2a" },
+        { SP_EXEC_MED,   27,  2, "14-2" }, { SP_EXEC_MED,  29, 14, "16"  },
+        { SP_EXEC_CMD,    1,  0, "1"    }, { SP_EXEC_CMD,   7, 15, "6"   },
+    };
+    const int N = (int)(sizeof(EXPECT) / sizeof(EXPECT[0]));
+    bool ok = true;
+    for (int i = 0; i < N; i++) {
+        const SpDef& d = SETPIECES[EXPECT[i].sp];
+        const SpScene& s = d.scenes[EXPECT[i].scene];
+        if (!s.combat || s.enemy != EXPECT[i].enemy) {
+            ok = false;
+            printf("       (scene '%s' of sp#%d: combat=%d enemy=%d, expected %d)\n",
+                   EXPECT[i].sid, EXPECT[i].sp, (int)s.combat, (int)s.enemy,
+                   (int)EXPECT[i].enemy);
+        }
+    }
+    CHECK(ok, "every listed scene is a combat scene against the listed enemy");
+    // And nothing ELSE is a fight: the count has to match exactly, or a scene was
+    // silently turned into (or out of) combat.
+    int found = 0;
+    const uint8_t IDS[6] = { SP_EXEC_INTRO, SP_EXEC_ANTE, SP_EXEC_ENG,
+                             SP_EXEC_MAR, SP_EXEC_MED, SP_EXEC_CMD };
+    for (uint8_t id : IDS) {
+        const SpDef& d = SETPIECES[id];
+        for (int s = 0; s < d.sceneN; s++) if (d.scenes[s].combat) found++;
+    }
+    char m[96];
+    snprintf(m, sizeof m, "exactly %d combat scenes across the six tables (found %d)", N, found);
+    CHECK(found == N, m);
+    // Scene totals, second-sourced from the upstream scene keys.
+    CHECK(SETPIECES[SP_EXEC_INTRO].sceneN == 14 && SETPIECES[SP_EXEC_ANTE].sceneN == 1 &&
+          SETPIECES[SP_EXEC_ENG].sceneN == 21 && SETPIECES[SP_EXEC_MAR].sceneN == 27 &&
+          SETPIECES[SP_EXEC_MED].sceneN == 31 && SETPIECES[SP_EXEC_CMD].sceneN == 9,
+          "scene counts: 14 / 1 / 21 / 27 / 31 / 9 (103 total)");
+}
+
+static void layer7_blueprints() {
+    printf("== [L7] the five blueprints drop where upstream drops them ==\n");
+    struct BRow { uint8_t sp; uint8_t scene; uint8_t bp; bool combat; const char* sid; };
+    static const BRow EXPECT[] = {
+        { SP_EXEC_ENG, 17, BP_HYPO,           false, "engineering 6"  },
+        { SP_EXEC_ENG, 19, BP_KINETIC_ARMOUR, true,  "engineering 7"  },
+        { SP_EXEC_MAR, 14, BP_PLASMA_RIFLE,   false, "martial 6"      },
+        { SP_EXEC_MAR, 25, BP_DISRUPTOR,      true,  "martial 12"     },
+        { SP_EXEC_MED, 29, BP_STIM,           true,  "medical 16"     },
+    };
+    for (const BRow& r : EXPECT) {
+        const SpScene& s = SETPIECES[r.sp].scenes[r.scene];
+        char m[96];
+        snprintf(m, sizeof m, "%s carries %s", r.sid, BLUEPRINT_KEY[r.bp]);
+        CHECK(s.bp == (uint8_t)(r.bp + 1) && s.combat == r.combat, m);
+    }
+    // Nothing else carries one, and the count is five, not six: §12 Q8 cut the
+    // glow stone, so medical `8` — upstream's glowstone-blueprint drop — is bare.
+    int n = 0;
+    const uint8_t IDS[6] = { SP_EXEC_INTRO, SP_EXEC_ANTE, SP_EXEC_ENG,
+                             SP_EXEC_MAR, SP_EXEC_MED, SP_EXEC_CMD };
+    for (uint8_t id : IDS) {
+        const SpDef& d = SETPIECES[id];
+        for (int s = 0; s < d.sceneN; s++) if (d.scenes[s].bp) n++;
+    }
+    CHECK(n == BP_COUNT && BP_COUNT == 5, "exactly five blueprint drops in the ship");
+    CHECK(SETPIECES[SP_EXEC_MED].scenes[15].bp == 0 &&
+          exec_enemies[13].lootN == 0,
+          "medical 8 drops nothing — its only loot was the cut glowstone blueprint");
+}
+
+static void layer7_intro_and_landmark() {
+    printf("== [L7] the X tile: prologue once, then the elevator hall, forever ==\n");
+    GameState gs; WorldState w; plantExec(w, gs, 0xE1E1);
+    // Stand ON the battleship: drawRoad runs from wherever the wanderer is.
+    for (int y = 0; y < WORLD_DIM; y++)
+        for (int x = 0; x < WORLD_DIM; x++)
+            if (w.exTileAt(x, y) == T_EXECUTIONER) { w.ex.x = (int16_t)x; w.ex.y = (int16_t)y; }
+    CHECK(landmarkScene(T_EXECUTIONER) == SP_EXEC_INTRO,
+          "a fresh world routes the battleship tile to the prologue");
+    CHECK(setpiece::begin(SP_EXEC_INTRO), "the prologue opens");
+    CHECK(strcmp(setpiece::titleKey(), "A Ravaged Battleship") == 0, "titled upstream's way");
+    CHECK(setpiece::btnCount() == 2 && setpiece::btnCostSlot(0) == I_TORCH &&
+          setpiece::btnCostIsItem(0), "`enter` bills one torch");
+    w.ex.outfitItem[I_TORCH] = 0;
+    CHECK(!setpiece::btnAvailable(0), "with no torch the entrance is a dead band");
+    w.ex.outfitItem[I_TORCH] = 5;
+    CHECK(setpiece::btnAvailable(0), "a torch re-arms it");
+
+    driveWing(w, gs);
+    CHECK(!setpiece::active(), "the prologue plays to its end");
+    CHECK(w.ex.clearedExec, "and scene 7 records the battleship as boarded");
+    // drawRoad ran: the X tile is still X, but it is now connected.
+    int roads = 0;
+    for (int y = 0; y < WORLD_DIM; y++)
+        for (int x = 0; x < WORLD_DIM; x++)
+            if (w.exTileAt(x, y) == T_ROAD) roads++;
+    CHECK(roads > 0, "clearMine drew the road home");
+
+    CHECK(!gs.execEntered,
+          "nothing is banked mid-trip: die here and the prologue is due again");
+    w.goHome(gs);
+    CHECK(gs.execEntered, "walking home banks it for good");
+
+    // Second trip: the same tile now opens the elevator hall.
+    int16_t out[RES_COUNT] = { 0 }; out[R_CURED_MEAT] = 10;
+    gs.stores[R_CURED_MEAT] = 10 * FP;
+    CHECK(w.embark(gs, out, nullptr, 0xE2E2), "a second expedition sets out");
+    CHECK(w.ex.clearedExec, "which starts already knowing the battleship is open");
+}
+
+static void layer7_antechamber() {
+    printf("== [L7] the front hall: four hops, greying out as the wings fall ==\n");
+    GameState gs; WorldState w; plantExec(w, gs, 0xA1A1);
+    w.ex.clearedExec = true;
+    CHECK(setpiece::begin(SP_EXEC_ANTE), "the elevator hall opens");
+    CHECK(setpiece::btnCount() == 5, "five bands: three wings, the deck, and out");
+    CHECK(setpiece::btnAvailable(0) && setpiece::btnAvailable(1) &&
+          setpiece::btnAvailable(2), "all three wings start live");
+    CHECK(!setpiece::btnAvailable(3), "the command deck starts greyed out");
+    CHECK(setpiece::choose(3) == RC_ERR_LOCKED, "and pressing it anyway is refused");
+
+    w.ex.wingEngineering = true;
+    CHECK(!setpiece::btnAvailable(0), "a cleared wing greys out its own band");
+    CHECK(setpiece::choose(0) == RC_ERR_LOCKED, "which is not merely cosmetic");
+    CHECK(setpiece::btnAvailable(1) && setpiece::btnAvailable(2),
+          "the other two are untouched");
+    w.ex.wingMedical = true; w.ex.wingMartial = true;
+    CHECK(setpiece::btnAvailable(3), "all three cleared -> the command deck arms");
+
+    CHECK(setpiece::choose(3) == RC_OK, "the hop resolves");
+    CHECK(setpiece::active() && strcmp(setpiece::titleKey(), "Command Deck") == 0,
+          "and lands INSIDE the command deck, not back on the map");
+    CHECK(w.ex.active && w.ex.outfitRes[R_CURED_MEAT] > 0,
+          "the expedition and its bag ride through the hop untouched");
+    setpiece::end();
+
+    // Each wing button hops to its own event.
+    struct HRow { int btn; const char* title; bool eng, mar, med; };
+    static const HRow H[] = {
+        { 0, "Engineering Wing", false, false, false },
+        { 1, "Medical Wing",     false, false, false },
+        { 2, "Martial Wing",     false, false, false },
+    };
+    for (const HRow& h : H) {
+        GameState g2; WorldState w2; plantExec(w2, g2, 0xA2A2);
+        w2.ex.clearedExec = true;
+        setpiece::begin(SP_EXEC_ANTE);
+        char m[80]; snprintf(m, sizeof m, "band %d opens the %s", h.btn, h.title);
+        CHECK(setpiece::choose(h.btn) == RC_OK &&
+              strcmp(setpiece::titleKey(), h.title) == 0, m);
+        setpiece::end();
+    }
+    setpiece::bind(nullptr, nullptr);
+}
+
+// One wing, end to end: walk it, check the mark + blueprints landed on the trip,
+// then prove goHome banks them and die() does not.
+static void wingRun(uint8_t spId, const char* name, uint8_t wantBp,
+                    bool Expedition::*trip, bool GameState::*banked) {
+    char m[128];
+    {
+        GameState gs; WorldState w; plantExec(w, gs, 0x7001 + spId);
+        w.ex.clearedExec = true;
+        CHECK(setpiece::begin(spId),
+              (snprintf(m, sizeof m, "%s opens", name), m));
+        int steps = driveWing(w, gs);
+        CHECK(!setpiece::active() && steps < 300,
+              (snprintf(m, sizeof m, "%s plays to its terminal scene in %d steps",
+                        name, steps), m));
+        CHECK(w.ex.*trip,
+              (snprintf(m, sizeof m, "%s's last scene marks the wing cleared", name), m));
+        CHECK(w.ex.bpFound == wantBp,
+              (snprintf(m, sizeof m, "%s yields blueprint bits 0x%02x (got 0x%02x)",
+                        name, wantBp, w.ex.bpFound), m));
+        // Dying throws the whole wing away — upstream's World.state discard.
+        w.die();
+        CHECK(!(gs.*banked) && gs.blueprints == 0,
+              (snprintf(m, sizeof m, "%s: dying banks neither the wing nor its blueprints",
+                        name), m));
+    }
+    {
+        GameState gs; WorldState w; plantExec(w, gs, 0x7001 + spId);
+        w.ex.clearedExec = true;
+        setpiece::begin(spId);
+        driveWing(w, gs);
+        w.goHome(gs);
+        CHECK(gs.*banked,
+              (snprintf(m, sizeof m, "%s: walking home banks the wing", name), m));
+        CHECK(gs.blueprints == wantBp,
+              (snprintf(m, sizeof m, "%s: and redeems its blueprints into the save", name), m));
+    }
+    setpiece::bind(nullptr, nullptr);
+}
+
+static void layer7_wings() {
+    printf("== [L7] each wing: entrance -> clear -> mark -> bank (or lose it all) ==\n");
+    wingRun(SP_EXEC_ENG, "engineering",
+            (1 << BP_HYPO) | (1 << BP_KINETIC_ARMOUR),
+            &Expedition::wingEngineering, &GameState::wingEngineering);
+    wingRun(SP_EXEC_MAR, "martial",
+            (1 << BP_PLASMA_RIFLE) | (1 << BP_DISRUPTOR),
+            &Expedition::wingMartial, &GameState::wingMartial);
+    wingRun(SP_EXEC_MED, "medical", (1 << BP_STIM),
+            &Expedition::wingMedical, &GameState::wingMedical);
+}
+
+static void layer7_command_deck() {
+    printf("== [L7] the command deck: the boss, the beacon, and the cleared tile ==\n");
+    GameState gs; WorldState w; plantExec(w, gs, 0xC0DE01);
+    // Stand ON the battleship so clearDungeon has the right tile to convert.
+    int bx = -1, by = -1;
+    for (int y = 0; y < WORLD_DIM && bx < 0; y++)
+        for (int x = 0; x < WORLD_DIM; x++)
+            if (w.exTileAt(x, y) == T_EXECUTIONER) { bx = x; by = y; break; }
+    CHECK(bx >= 0, "the map placed a battleship");
+    w.ex.x = (int16_t)bx; w.ex.y = (int16_t)by;
+    w.ex.clearedExec = true;
+    w.ex.wingEngineering = w.ex.wingMartial = w.ex.wingMedical = true;
+
+    setpiece::begin(SP_EXEC_CMD);
+    int steps = driveWing(w, gs);
+    CHECK(!setpiece::active() && steps < 300, "the deck plays through to scene 7");
+    CHECK(w.ex.outfitRes[R_FLEET_BEACON] == 1, "the immortal wanderer left the beacon");
+    CHECK(w.exTileAt(bx, by) == T_OUTPOST,
+          "clearDungeon turned the battleship into an outpost — the X is spent");
+    w.goHome(gs);
+    CHECK(gs.whole(R_FLEET_BEACON) == 1, "the beacon is banked in the village stores");
+    CHECK(gs.savedOutfitRes[R_FLEET_BEACON] == 0,
+          "and STAYS there: it is not on World.leaveItAtHome's keep list");
+    CHECK(w.tileAt(bx, by) == T_OUTPOST, "the cleared tile is committed to the map");
+    setpiece::bind(nullptr, nullptr);
+}
+
+static void layer7_burning_corridor() {
+    printf("== [L7] engineering 1-3: water 5 or blood 10, and no way back out ==\n");
+    // Find the scene through the real graph rather than reaching into the table:
+    // start's 30/40/30 roll has to actually land on 1-3 for this to be reachable.
+    GameState gs; WorldState w;
+    bool found = false;
+    for (uint32_t seed = 1; seed <= 4000 && !found; seed++) {
+        plantExec(w, gs, seed);
+        w.ex.clearedExec = true;
+        setpiece::begin(SP_EXEC_ENG);
+        if (setpiece::choose(0) != RC_OK) { setpiece::end(); continue; }
+        if (setpiece::btnCount() == 2 && setpiece::btnCostSlot(0) == SP_COST_WATER)
+            found = true;
+        else setpiece::end();
+    }
+    CHECK(found, "the 30% branch really does reach the burning corridor");
+    if (!found) return;
+
+    CHECK(setpiece::btnCostAmt(0) == 5 && setpiece::btnCostSlot(1) == SP_COST_HP &&
+          setpiece::btnCostAmt(1) == 10, "the two prices are 5 water and 10 hp");
+    // No third band: this is the one scene in the game with no exit.
+    CHECK(setpiece::btnCount() == 2, "and there is no `leave` — upstream has none either");
+    CHECK(setpiece::defaultBtnIndex() == 0,
+          "the idle-timeout default is `extinguish`, not a leave that does not exist");
+
+    w.ex.water = 4; w.ex.hp = 9;
+    CHECK(!setpiece::btnAvailable(0) && !setpiece::btnAvailable(1),
+          "too little of both -> both bands dead (the upstream dead end, copied)");
+    // ... and the dead end is survivable on THIS device because the setpiece is
+    // RAM-only: the trek was committed at every scene, so a sleep drops the panel.
+    setpiece::end();
+    CHECK(w.ex.active && w.ex.hp == 9,
+          "abandoning the panel leaves the expedition standing where it was");
+
+    // Paying in blood is allowed down to exactly zero, and does not kill.
+    plantExec(w, gs, 0);
+    setpiece::beginTable(&SETPIECES[SP_EXEC_ENG]);
+    // Re-walk to the corridor is not needed: the affordability rule is the engine's,
+    // and layer 6 pins it on the throwaway table. Here we only assert the DATA.
+    setpiece::end();
+    const SpDef& eng = SETPIECES[SP_EXEC_ENG];
+    const SpScene& burn = eng.scenes[9];
+    CHECK(burn.btnCount == 2, "scene 9 of the engineering table is the corridor");
+    CHECK(eng.btns[burn.btnStart].costSlot == SP_COST_WATER &&
+          eng.btns[burn.btnStart].costAmt == 5 &&
+          eng.btns[burn.btnStart + 1].costSlot == SP_COST_HP &&
+          eng.btns[burn.btnStart + 1].costAmt == 10,
+          "its two bands are the game's ONLY water/hp prices");
+    int water = 0, hp = 0;
+    for (int id = 0; id < SETPIECE_COUNT; id++) {
+        if (!setpieceExists(id)) continue;
+        const SpDef& d = SETPIECES[id];
+        for (int s = 0; s < d.sceneN; s++)
+            for (int b = 0; b < d.scenes[s].btnCount; b++) {
+                uint8_t c = d.btns[d.scenes[s].btnStart + b].costSlot;
+                if (c == SP_COST_WATER) water++;
+                if (c == SP_COST_HP) hp++;
+            }
+    }
+    CHECK(water == 1 && hp == 1, "exactly one water price and one hp price in the game");
+    setpiece::bind(nullptr, nullptr);
+}
+
+static void layer7_heal_and_maps() {
+    printf("== [L7] the two `use machine` heals and `scavenge maps` ==\n");
+    // Both are BUTTON onChoose hooks upstream, so they must fire on the press.
+    struct HRow { uint8_t sp; uint8_t scene; uint8_t btn; const char* sid; };
+    static const HRow HEAL[] = {
+        { SP_EXEC_ENG, 13, 0, "engineering 4" },
+        { SP_EXEC_MAR, 23, 0, "martial 10" },
+    };
+    for (const HRow& h : HEAL) {
+        const SpDef& d = SETPIECES[h.sp];
+        const SpButton& b = d.btns[d.scenes[h.scene].btnStart + h.btn];
+        char m[96]; snprintf(m, sizeof m, "%s's `use machine` costs an alloy and heals", h.sid);
+        CHECK(b.costSlot == R_ALIEN_ALLOY && !b.costIsItem && b.effect == SPE_HEAL_FULL, m);
+    }
+    {
+        const SpDef& d = SETPIECES[SP_EXEC_MAR];
+        const SpButton& b = d.btns[d.scenes[15].btnStart];      // 7-1 'scavenge maps'
+        CHECK(b.effect == SPE_REVEAL_MAP3 && b.costSlot == SP_NO_COST,
+              "martial 7-1's `scavenge maps` is free and reveals three map chunks");
+    }
+    // Live: the heal really refills, and the maps really uncover the WORKING fog.
+    GameState gs; WorldState w; plantExec(w, gs, 0x4EA1);
+    gs.items[I_S_ARMOUR] = 1;                       // a 45-hp ceiling to heal back to
+    w.ex.maxHp = (int16_t)WorldState::maxHealth(gs);
+    w.ex.hp = 3;
+    w.spHealFull(gs);
+    CHECK(w.ex.hp == HEALTH_S_ARMOUR && w.ex.maxHp == HEALTH_S_ARMOUR,
+          "spHealFull refills to the armour ceiling, not to a stale snapshot");
+    int before = revealedCount(w.ex.revealed);
+    for (int i = 0; i < 3; i++) w.spApplyMap();
+    CHECK(revealedCount(w.ex.revealed) > before, "three applyMap calls uncover the trip's fog");
+    setpiece::bind(nullptr, nullptr);
+}
+
+// ===========================================================================
 
 int main() {
     printf("############ Layer 1: static data-table validation ############\n");
@@ -1939,6 +2504,17 @@ int main() {
     layer6_setpiece_seams();
     layer6_trek_v2();
     layer6_save_roundtrip();
+
+    printf("\n########## Layer 7: the Executioner content (Phase 3c-2) ##########\n");
+    layer7_enemies();
+    layer7_combat_scenes();
+    layer7_blueprints();
+    layer7_intro_and_landmark();
+    layer7_antechamber();
+    layer7_wings();
+    layer7_command_deck();
+    layer7_burning_corridor();
+    layer7_heal_and_maps();
 
     printf("\n==== %d passed, %d failed ====\n", g_pass, g_fail);
     return g_fail ? 1 : 0;

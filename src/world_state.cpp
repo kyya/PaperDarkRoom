@@ -60,17 +60,25 @@ constexpr size_t WORLD_BIN_SIZE_V1 =
 constexpr size_t WORLD_BIN_SIZE =
     12 + WORLD_CELLS + 3 * WORLD_MASK_BYTES;                       // 5131
 constexpr size_t TREK_HDR = 8 + 2 + 18 + 2 + 4 + 1 + 1 + 32;      // 68
+// v3 appends two bytes AFTER the map blob (the Executioner wing flags + the
+// blueprints found this trip), so v1/v2 offsets are all untouched.
+constexpr size_t TREK_TAIL_V3 = 2;
 constexpr size_t TREK_BIN_SIZE =
     TREK_HDR + RES_COUNT * 2 + ITEM_COUNT * 2 +
-    WORLD_CELLS + 2 * WORLD_MASK_BYTES;
-// v1 = the pre-Phase-3c enum widths. The outfit arrays are FIXED LENGTH and sit
+    WORLD_CELLS + 2 * WORLD_MASK_BYTES + TREK_TAIL_V3;
+// v1/v2 = the earlier enum widths. The outfit arrays are FIXED LENGTH and sit
 // ahead of the map blob, so growing Res/Item shifts everything after them — hence
-// TREK_VER 2 and this migration read (world_state.h). Frozen literals on purpose:
-// they describe a file on disk, not the current enums.
+// a TREK_VER bump per growth (world_state.h) and these migration reads. Frozen
+// literals on purpose: they describe files on disk, not the current enums.
 constexpr int    TREK_V1_RES  = 19;
 constexpr int    TREK_V1_ITEM = 18;
+constexpr int    TREK_V2_RES  = 21;      // 3c-1 added hypo + stim
+constexpr int    TREK_V2_ITEM = 22;      // ... and the four gear items
 constexpr size_t TREK_BIN_SIZE_V1 =
     TREK_HDR + TREK_V1_RES * 2 + TREK_V1_ITEM * 2 +
+    WORLD_CELLS + 2 * WORLD_MASK_BYTES;
+constexpr size_t TREK_BIN_SIZE_V2 =
+    TREK_HDR + TREK_V2_RES * 2 + TREK_V2_ITEM * 2 +
     WORLD_CELLS + 2 * WORLD_MASK_BYTES;
 
 // ===================== platform file I/O ==================================
@@ -304,6 +312,12 @@ bool WorldState::embark(GameState& gs, const int16_t* outfitRes,
     ex.maxHp = (int16_t)maxHealth(gs);   ex.hp = ex.maxHp;
     ex.maxWater = (int16_t)maxWater(gs); ex.water = ex.maxWater;  // onArrival fills
     ex.gastronome = gs.hasPerk(PK_GASTRONOME);   // meat heals x2 (persisted perk)
+    // world.js onArrival seeds World.state from the committed game.world, so the
+    // Executioner's four flags start each trip at whatever the last trip banked.
+    ex.clearedExec      = gs.execEntered;
+    ex.wingEngineering  = gs.wingEngineering;
+    ex.wingMartial      = gs.wingMartial;
+    ex.wingMedical      = gs.wingMedical;
     ex.rng = trekSeed ? trekSeed : 0x1a2b3c4du;
     memcpy(ex.tiles, tiles, sizeof tiles);
     memcpy(ex.revealed, revealed, sizeof revealed);
@@ -494,6 +508,11 @@ StepResult WorldState::move(GameState& gs, uint8_t dir) {
         } else {
             if (tile == T_OUTPOST) markOutpostUsed(nx, ny);
             res.kind = STEP_LANDMARK; res.scene = landmarkScene(tile);
+            // world.js doSpace:573-576 — the X tile is the one landmark with TWO
+            // setpieces behind it, and it is never markVisited'd: the prologue
+            // runs once, and every visit after that opens the elevator hall.
+            // Only the command deck's clearDungeon finally spends the tile.
+            if (tile == T_EXECUTIONER && ex.clearedExec) res.scene = SP_EXEC_ANTE;
         }
     } else {
         const char* supplyNotice = nullptr;
@@ -558,7 +577,23 @@ void WorldState::goHome(GameState& gs) {
     // landmark is still there to salvage again next trip. unlockShip() is
     // idempotent and seeds hull/thrusters, so a second cleared trip is a no-op.
     if (ex.clearedShip) gs.unlockShip();
-    // clearedExec unlocks the Fabricator (Phase 3c) — still deferred.
+    // world.js goHome's $SM.setM('game.world', World.state) — the Executioner's
+    // four flags are part of that committed blob, so they only survive a trip the
+    // wanderer WALKS HOME from. Dying with three wings cleared throws all three
+    // away (research-phase3.md §3.1 / §12 Q6 (a), copied rather than softened:
+    // the risk IS the content at 28 tiles from the village).
+    // Opening the Fabricator page off execEntered is 3c-3's job.
+    if (ex.clearedExec)     gs.execEntered = true;
+    if (ex.wingEngineering) gs.wingEngineering = true;
+    if (ex.wingMartial)     gs.wingMartial = true;
+    if (ex.wingMedical)     gs.wingMedical = true;
+    // world.js redeemBlueprints (world.js:989-1009) — runs BEFORE World.state is
+    // dropped, converting carried blueprints into permanent character flags. One
+    // notification for the whole batch, exactly like upstream's `redeemed` latch.
+    if (ex.bpFound & ~gs.blueprints) {
+        gs.blueprints |= ex.bpFound;
+        gs.pushLog("blueprints feed into the fabricator data port. possibilities grow.");
+    }
     // Bank the bag: EVERYTHING returns to the village stores (upstream returnOutfit
     // does $SM.add('stores[k]', outfit[k]) for every k). Then the leaveItAtHome
     // nicety writes the RETAINED slots into the persistent Path outfit so the next
@@ -1258,8 +1293,10 @@ bool WorldState::loadWorld() {
 //   [starving u8][thirsty u8][rng u32][clearedFlags u8][usedOutpostN u8]
 //   [usedOutpostX 16][usedOutpostY 16][outfitRes i16 x RES_COUNT]
 //   [outfitItem i16 x ITEM_COUNT][tiles CELLS][revealed MASK][visited MASK]
-// v1 is the same layout with the pre-Phase-3c array widths (19 Res / 18 Item) and
-// still loads — see TREK_BIN_SIZE_V1 and the migration branch in loadTrek.
+//   [wingFlags u8][bpFound u8]                                   <- v3 tail
+// v1 (19 Res / 18 Item) and v2 (21 / 22, no tail) are the same layout with the
+// array widths of their era and still load — see TREK_BIN_SIZE_V1/_V2 and the
+// migration branches in loadTrek.
 
 bool WorldState::saveTrek() const {
     static uint8_t buf[TREK_BIN_SIZE];
@@ -1289,6 +1326,9 @@ bool WorldState::saveTrek() const {
     memcpy(buf + o, ex.tiles, WORLD_CELLS);          o += WORLD_CELLS;
     memcpy(buf + o, ex.revealed, WORLD_MASK_BYTES);  o += WORLD_MASK_BYTES;
     memcpy(buf + o, ex.visited, WORLD_MASK_BYTES);   o += WORLD_MASK_BYTES;
+    buf[o++] = (uint8_t)((ex.wingEngineering ? 1 : 0) | (ex.wingMartial ? 2 : 0) |
+                         (ex.wingMedical ? 4 : 0));      // v3 tail
+    buf[o++] = ex.bpFound;
     return w_writeAtomic(ADR_TREK_PATH, buf, o);
 }
 
@@ -1299,12 +1339,14 @@ bool WorldState::loadTrek() {
     size_t o = 0;
     if (getU32(buf, o) != TREK_MAGIC) { ex.active = false; return false; }
     uint8_t ver = buf[o++]; o += 3;
-    if (ver != 1 && ver != TREK_VER) { ex.active = false; return false; }
+    if (ver != 1 && ver != 2 && ver != TREK_VER) { ex.active = false; return false; }
+    if (ver == 2 && n < (int)TREK_BIN_SIZE_V2)   { ex.active = false; return false; }
     if (ver == TREK_VER && n < (int)TREK_BIN_SIZE) { ex.active = false; return false; }
-    // A v1 file carries the OLD array widths; the new tail slots stay 0 (the memset
-    // below), which reads correctly as "this trip packed no hypo/stim/new gear".
-    const int resN  = (ver == 1) ? TREK_V1_RES  : RES_COUNT;
-    const int itemN = (ver == 1) ? TREK_V1_ITEM : ITEM_COUNT;
+    // An older file carries the array widths of ITS era; the slots it never had
+    // stay 0 (the memset below), which reads correctly as "this trip packed no
+    // hypo/stim/new gear" (v1) or "no fleet beacon" (v2).
+    const int resN  = (ver == 1) ? TREK_V1_RES  : (ver == 2 ? TREK_V2_RES  : RES_COUNT);
+    const int itemN = (ver == 1) ? TREK_V1_ITEM : (ver == 2 ? TREK_V2_ITEM : ITEM_COUNT);
     memset(&ex, 0, sizeof ex);
     ex.active = buf[o++] != 0;
     ex.dead   = buf[o++] != 0;
@@ -1329,6 +1371,11 @@ bool WorldState::loadTrek() {
     memcpy(ex.tiles, buf + o, WORLD_CELLS);          o += WORLD_CELLS;
     memcpy(ex.revealed, buf + o, WORLD_MASK_BYTES);  o += WORLD_MASK_BYTES;
     memcpy(ex.visited, buf + o, WORLD_MASK_BYTES);   o += WORLD_MASK_BYTES;
+    if (ver == TREK_VER) {                            // v3 tail; absent -> 0
+        uint8_t wf = buf[o++];
+        ex.wingEngineering = wf & 1; ex.wingMartial = wf & 2; ex.wingMedical = wf & 4;
+        ex.bpFound = buf[o++];
+    }
     return true;
 }
 
