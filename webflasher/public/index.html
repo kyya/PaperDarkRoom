@@ -68,7 +68,8 @@
         padding: 28px 20px 72px;
         transition: background-color 0.35s ease, color 0.35s ease;
       }
-      main { max-width: 660px; margin: 0 auto; }
+      /* Wide enough for the firmware master/detail panes; still readable on phone. */
+      main { max-width: 820px; margin: 0 auto; }
 
       .topbar { display: flex; justify-content: flex-end; margin-bottom: 20px; }
       #theme-toggle {
@@ -129,21 +130,99 @@
       .banner .msg { color: var(--fg); }
       .hint { color: var(--dim); font-size: 12px; margin: 0 0 4px; }
 
-      /* --- firmware list ---------------------------------------------- */
-      .fw-block {
+      /* --- firmware master / detail ----------------------------------- */
+      .fw-md {
+        display: grid;
+        grid-template-columns: minmax(9.5em, 11.5em) minmax(0, 1fr);
+        border: 1px solid var(--line);
+        min-height: 22em;
+      }
+      .fw-master {
+        border-right: 1px solid var(--line);
+        overflow-y: auto;
+        max-height: 32em;
+      }
+      .fw-item {
+        display: block;
+        width: 100%;
+        text-align: left;
+        font: inherit;
+        background: none;
+        color: var(--fg);
+        border: 0;
         border-bottom: 1px solid var(--line);
-        padding: 14px 0;
+        border-left: 2px solid transparent;
+        padding: 10px 10px 10px 12px;
+        cursor: pointer;
       }
-      .fw-block:first-of-type { border-top: 1px solid var(--line); }
-      .fw {
-        display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap;
+      .fw-item:last-child { border-bottom: 0; }
+      .fw-item:hover { color: var(--hot); }
+      .fw-item:focus-visible {
+        outline: 1px solid var(--hot);
+        outline-offset: -2px;
       }
-      .fw .ver { color: var(--hot); min-width: 5em; }
-      .fw .meta { color: var(--dim); font-size: 12px; flex: 1; min-width: 0; }
-      .fw .meta .title {
-        display: block; color: var(--fg); font-size: 13px; margin-top: 2px;
+      .fw-item.is-selected {
+        color: var(--hot);
+        border-left-color: var(--hot);
+        background: color-mix(in srgb, var(--fg) 6%, transparent);
       }
-      .fw .act { margin-left: auto; }
+      .fw-item .ver {
+        display: block;
+        letter-spacing: 0.04em;
+      }
+      .fw-item .tag {
+        display: inline-block;
+        margin-left: 6px;
+        color: var(--dim);
+        font-size: 11px;
+        letter-spacing: 0.12em;
+      }
+      .fw-item.is-selected .tag { color: var(--hot); opacity: 0.7; }
+      .fw-item .blurb {
+        display: block;
+        margin-top: 2px;
+        color: var(--dim);
+        font-size: 11px;
+        line-height: 1.4;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+      .fw-item.is-selected .blurb { color: var(--fg); opacity: 0.85; }
+
+      .fw-detail {
+        display: flex;
+        flex-direction: column;
+        min-width: 0;
+        min-height: 0;
+      }
+      .fw-detail-head {
+        display: flex;
+        align-items: flex-start;
+        gap: 12px;
+        flex-wrap: wrap;
+        padding: 12px 14px;
+        border-bottom: 1px solid var(--line);
+      }
+      .fw-detail-head .info { flex: 1; min-width: 0; }
+      .fw-detail-head .ver {
+        color: var(--hot);
+        font-size: 15px;
+        letter-spacing: 0.08em;
+      }
+      .fw-detail-head .title {
+        display: block;
+        margin-top: 2px;
+        color: var(--fg);
+        font-size: 13px;
+      }
+      .fw-detail-head .meta {
+        display: block;
+        margin-top: 4px;
+        color: var(--dim);
+        font-size: 12px;
+      }
+      .fw-detail-head .act { margin-left: auto; align-self: center; }
       button.flash {
         font: inherit; background: none; color: var(--fg);
         border: 1px solid var(--fg); padding: 2px 16px; cursor: pointer;
@@ -152,52 +231,52 @@
       button.flash:disabled {
         color: var(--dim); border-color: var(--line); cursor: not-allowed;
       }
-      /* Release notes: native <details>, same monospaced ink as the page. */
-      .notes {
-        margin: 8px 0 0;
-        color: var(--dim);
+      .fw-detail-body {
+        flex: 1;
+        overflow-y: auto;
+        max-height: 28em;
+        padding: 12px 14px 16px;
         font-size: 12px;
         line-height: 1.7;
-      }
-      .notes > summary {
-        cursor: pointer;
-        list-style: none;
-        color: var(--dim);
-        user-select: none;
-        letter-spacing: 0.08em;
-      }
-      .notes > summary::-webkit-details-marker { display: none; }
-      .notes > summary::before {
-        content: "▸ ";
-        color: var(--dim);
-      }
-      .notes[open] > summary::before { content: "▾ "; }
-      .notes > summary:hover { color: var(--hot); }
-      .notes-body {
-        margin-top: 8px;
-        padding: 10px 12px;
-        border: 1px solid var(--line);
         color: var(--fg);
         overflow-wrap: anywhere;
       }
-      .notes-body h3 {
-        font-size: 12px; font-weight: normal; letter-spacing: 0.12em;
-        color: var(--hot); margin: 12px 0 4px;
+      .fw-detail-body .empty {
+        color: var(--dim);
+        margin: 0;
       }
-      .notes-body h3:first-child { margin-top: 0; }
-      .notes-body p { margin: 0 0 8px; }
-      .notes-body p:last-child { margin-bottom: 0; }
-      .notes-body ul {
+      .fw-detail-body h3 {
+        font-size: 12px; font-weight: normal; letter-spacing: 0.12em;
+        color: var(--hot); margin: 14px 0 4px;
+      }
+      .fw-detail-body h3:first-child { margin-top: 0; }
+      .fw-detail-body p { margin: 0 0 8px; }
+      .fw-detail-body p:last-child { margin-bottom: 0; }
+      .fw-detail-body ul {
         padding-left: 1.2em; margin: 0 0 8px;
       }
-      .notes-body li { margin-bottom: 4px; }
-      .notes-body a { color: var(--dim); text-decoration: underline; }
-      .notes-body a:hover { color: var(--hot); }
-      .notes-body code {
+      .fw-detail-body li { margin-bottom: 4px; }
+      .fw-detail-body a { color: var(--dim); text-decoration: underline; }
+      .fw-detail-body a:hover { color: var(--hot); }
+      .fw-detail-body code {
         color: var(--hot);
         font: inherit;
         font-size: 0.95em;
       }
+
+      @media (max-width: 560px) {
+        .fw-md {
+          grid-template-columns: 1fr;
+          min-height: 0;
+        }
+        .fw-master {
+          border-right: 0;
+          border-bottom: 1px solid var(--line);
+          max-height: 11em;
+        }
+        .fw-detail-body { max-height: 22em; }
+      }
+
       .status { color: var(--dim); padding: 14px 0; }
 
       /* esp-web-tools' dialog is a self-contained light Material card, and it
@@ -601,6 +680,153 @@
         import("/vendor/esp-web-tools/install-button.js");
       }
 
+      function buildFlashAction(fw) {
+        const act = document.createElement("span");
+        act.className = "act";
+        if (supported) {
+          // `-merged.bin` -> `-merged`, matching the Worker's manifest route.
+          const stem = fw.name.replace(/\.bin$/, "");
+          act.innerHTML =
+            '<esp-web-install-button manifest="/manifest/' +
+            encodeURIComponent(stem) +
+            '.json"><button class="flash" slot="activate">刷入</button>' +
+            "</esp-web-install-button>";
+        } else {
+          const btn = document.createElement("button");
+          btn.className = "flash";
+          btn.type = "button";
+          btn.disabled = true;
+          btn.textContent = "刷入";
+          btn.title = problem;
+          act.append(btn);
+        }
+        return act;
+      }
+
+      function paintDetail(panel, fw, index) {
+        const head = document.createElement("div");
+        head.className = "fw-detail-head";
+
+        const info = document.createElement("div");
+        info.className = "info";
+
+        const ver = document.createElement("span");
+        ver.className = "ver";
+        ver.textContent = "v" + fw.version;
+        info.append(ver);
+
+        const subtitle = shortTitle(fw.title, fw.version);
+        if (subtitle) {
+          const t = document.createElement("span");
+          t.className = "title";
+          t.textContent = subtitle;
+          info.append(t);
+        }
+
+        const meta = document.createElement("span");
+        meta.className = "meta";
+        meta.textContent =
+          fmtSize(fw.size) +
+          " · " +
+          fw.uploaded.slice(0, 10) +
+          (index === 0 ? " · 最新" : "");
+        info.append(meta);
+
+        head.append(info, buildFlashAction(fw));
+
+        const body = document.createElement("div");
+        body.className = "fw-detail-body";
+        if (fw.notes) {
+          body.innerHTML = renderNotes(fw.notes);
+        } else {
+          const empty = document.createElement("p");
+          empty.className = "empty";
+          empty.textContent = "此版本没有更新日志。";
+          body.append(empty);
+        }
+
+        panel.replaceChildren(head, body);
+      }
+
+      function renderMasterDetail(firmwares) {
+        const shell = document.createElement("div");
+        shell.className = "fw-md";
+
+        const master = document.createElement("div");
+        master.className = "fw-master";
+        master.setAttribute("role", "listbox");
+        master.setAttribute("aria-label", "固件版本");
+
+        const detail = document.createElement("div");
+        detail.className = "fw-detail";
+        detail.setAttribute("role", "region");
+        detail.setAttribute("aria-live", "polite");
+        detail.setAttribute("aria-label", "版本详情");
+
+        let selected = 0;
+        const items = firmwares.map((fw, i) => {
+          const item = document.createElement("button");
+          item.type = "button";
+          item.className = "fw-item";
+          item.setAttribute("role", "option");
+          item.setAttribute("aria-selected", "false");
+          item.dataset.index = String(i);
+
+          const ver = document.createElement("span");
+          ver.className = "ver";
+          ver.textContent = "v" + fw.version;
+          if (i === 0) {
+            const tag = document.createElement("span");
+            tag.className = "tag";
+            tag.textContent = "最新";
+            ver.append(tag);
+          }
+          item.append(ver);
+
+          const blurb = shortTitle(fw.title, fw.version);
+          if (blurb) {
+            const b = document.createElement("span");
+            b.className = "blurb";
+            b.textContent = blurb;
+            item.append(b);
+          }
+
+          item.addEventListener("click", () => select(i));
+          return item;
+        });
+
+        function select(i) {
+          selected = i;
+          items.forEach((el, j) => {
+            const on = j === i;
+            el.classList.toggle("is-selected", on);
+            el.setAttribute("aria-selected", on ? "true" : "false");
+          });
+          paintDetail(detail, firmwares[i], i);
+          // Keep the selected row visible when navigating with keys.
+          items[i].scrollIntoView({ block: "nearest" });
+        }
+
+        master.addEventListener("keydown", (e) => {
+          let next = selected;
+          if (e.key === "ArrowDown" || e.key === "ArrowRight") next = selected + 1;
+          else if (e.key === "ArrowUp" || e.key === "ArrowLeft") next = selected - 1;
+          else if (e.key === "Home") next = 0;
+          else if (e.key === "End") next = firmwares.length - 1;
+          else return;
+          e.preventDefault();
+          if (next < 0 || next >= firmwares.length) return;
+          items[next].focus();
+          select(next);
+        });
+
+        master.append(...items);
+        shell.append(master, detail);
+        listEl.replaceChildren(shell);
+        // Land on the newest release; don't steal page focus on first paint.
+        select(0);
+      }
+
       fetch("/api/firmwares")
         .then((r) => {
           if (!r.ok) throw new Error("HTTP " + r.status);
@@ -611,75 +837,7 @@
             listEl.innerHTML = '<div class="status">暂无可刷入的固件。</div>';
             return;
           }
-          listEl.replaceChildren(
-            ...firmwares.map((fw, i) => {
-              const block = document.createElement("div");
-              block.className = "fw-block";
-
-              const row = document.createElement("div");
-              row.className = "fw";
-
-              const ver = document.createElement("span");
-              ver.className = "ver";
-              ver.textContent = "v" + fw.version;
-
-              const meta = document.createElement("span");
-              meta.className = "meta";
-              const bits =
-                fmtSize(fw.size) +
-                " · " +
-                fw.uploaded.slice(0, 10) +
-                (i === 0 ? " · 最新" : "");
-              meta.append(document.createTextNode(bits));
-              const subtitle = shortTitle(fw.title, fw.version);
-              if (subtitle) {
-                const t = document.createElement("span");
-                t.className = "title";
-                t.textContent = subtitle;
-                meta.append(t);
-              }
-
-              const act = document.createElement("span");
-              act.className = "act";
-              if (supported) {
-                // `-merged.bin` -> `-merged`, matching the Worker's manifest route.
-                const stem = fw.name.replace(/\.bin$/, "");
-                act.innerHTML =
-                  '<esp-web-install-button manifest="/manifest/' +
-                  encodeURIComponent(stem) +
-                  '.json"><button class="flash" slot="activate">刷入</button>' +
-                  "</esp-web-install-button>";
-              } else {
-                const btn = document.createElement("button");
-                btn.className = "flash";
-                btn.type = "button";
-                btn.disabled = true;
-                btn.textContent = "刷入";
-                btn.title = problem;
-                act.append(btn);
-              }
-
-              row.append(ver, meta, act);
-              block.append(row);
-
-              if (fw.notes) {
-                const details = document.createElement("details");
-                details.className = "notes";
-                // Open the newest release by default so the page lands with a
-                // changelog visible; older ones stay collapsed.
-                if (i === 0) details.open = true;
-                const summary = document.createElement("summary");
-                summary.textContent = "更新日志";
-                const body = document.createElement("div");
-                body.className = "notes-body";
-                body.innerHTML = renderNotes(fw.notes);
-                details.append(summary, body);
-                block.append(details);
-              }
-
-              return block;
-            }),
-          );
+          renderMasterDetail(firmwares);
         })
         .catch((err) => {
           listEl.innerHTML =
