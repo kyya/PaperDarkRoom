@@ -12,8 +12,10 @@
 // 12px gap): 工人 (READ-ONLY worker summary — 人口 X/Y line + every unlocked job
 // "名 xN" incl. x0, 3 cols) · 建筑 (non-zero buildings, 2 cols; HIDDEN when there
 // are none) · 库存 (the merged-in inventory, fw 0.2.2, 3 cols; row count clamped to
-// the space above the action area, tail-collapses to "…" on overflow). Sunk to the
-// BOTTOM is the 野外 action AREA (v0.4.5): 240px-column, 96px rows anchored so
+// the space above the action area — but unlike the old tail-collapse, overflow now
+// PAGES rather than hides: the whole fieldset is a tap target that cycles batches,
+// "…" marking the last cell of a page that has a next one, see outside_page.cpp).
+// Sunk to the BOTTOM is the 野外 action AREA (v0.4.5): 240px-column, 96px rows anchored so
 // the block's bottom hugs ~916. Since v0.14 the grid PACKS — the visible cells
 // are laid row-major with no holes, in the order
 //   伐木 · 科技树 · 查看陷阱 · 分工 · 漫漫尘途
@@ -43,8 +45,8 @@ public:
     bool draw(m5gfx::M5Canvas& canvas) override;
     bool available() const override;   // outsideUnlocked (see outside_page.cpp)
     const pages::Region* regions(int* n) const override;
-    void onLocalAction(uint8_t param, int x, int y) override;  // action row: x picks the verb column
-    pages::Rect pressRect(const pages::Region& rg, int x, int y) const override;  // exact verb cell
+    void onLocalAction(uint8_t param, int x, int y) override;  // action row: x picks the verb column; or a 库存 box tap (next batch)
+    pages::Rect pressRect(const pages::Region& rg, int x, int y) const override;  // exact verb cell; empty (no flash) for the 库存 box
     void tick(uint32_t nowMs) override;
     // wantsAwake stays false: the economy accrues offline via settle() on wake.
 
@@ -59,11 +61,21 @@ private:
     // outside_page.cpp for the geometry and the dynamic vertical budget.
     static constexpr int MAX_ACT_SLOTS = 5;
     static constexpr int MAX_ACT_ROWS  = 3;
-    mutable pages::Region m_regions[MAX_ACT_ROWS];
-    mutable int           m_regionCount = 0;    // 1..3 (the packed row count)
+    // +1: the 库存 fieldset's own whole-box tap region (only present once the
+    // inventory is actually paginated), appended right after the packed action
+    // rows — see appendInvRegion() in outside_page.cpp.
+    static constexpr int MAX_REGIONS   = MAX_ACT_ROWS + 1;
+    mutable pages::Region m_regions[MAX_REGIONS];
+    mutable int           m_regionCount = 0;    // 1..3 action rows (+1 if paged)
     mutable uint8_t       m_slotCodes[MAX_ACT_SLOTS] = {0};  // cell code per slot
     mutable int           m_slotCount = 0;      // packed cells on screen
     mutable int           m_areaTop   = 0;      // grid's top edge this draw
+    // Which batch of 库存 entries is on screen (fw 库存分页, 2026-08). A raw
+    // incrementing counter, same model as TradePage::m_page — always taken modulo
+    // the CURRENT page count at draw time (see invNumPages() in outside_page.cpp),
+    // so a shrinking inventory or a space-clamp change can never leave it pointing
+    // past the end; it just wraps back to a valid page.
+    int                    m_invPage = 0;
     uint32_t              m_lastSig = 0;   // tick()'s content baseline; onLocalAction
                                            // re-syncs it after its showPage so a
                                            // press doesn't force a second full
