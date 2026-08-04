@@ -638,10 +638,17 @@ int layoutCells(pages::Region* regionsOut, uint8_t* slotCodes, CellView* views,
 // the SAME table every second for the cooldown mask (see OutsidePage::tick),
 // so if only draw() appended it, a press landing more than a second after any
 // redraw would silently miss the box.
+// The region's top is pulled up by GLYPH/2 past `invY0` to meet the legend
+// text (drawFieldset draws it starting GLYPH/2 above invY0, same offset
+// invBoxRect's repaint rect uses for its top edge) — otherwise the top half
+// of "库存 (n/N)" sits outside the tap target and a press there falls through
+// to the pager as an unhandled click (page turn) instead of cycling the batch.
+// The gap above (FS_BOX_GAP=12px to the fieldset stacked above) fully absorbs
+// this, so it never encroaches on that box, which has no tap region of its own.
 int appendInvRegion(pages::Region* regionsOut, int rowCount, int invY0, int invY1,
                     int invPages) {
     if (invPages <= 1) return rowCount;
-    regionsOut[rowCount].y0    = (uint16_t)invY0;
+    regionsOut[rowCount].y0    = (uint16_t)(invY0 - GLYPH / 2);
     regionsOut[rowCount].y1    = (uint16_t)invY1;
     regionsOut[rowCount].type  = 1;                     // firmware-local
     regionsOut[rowCount].param = INV_REGION_PARAM;
