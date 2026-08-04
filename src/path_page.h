@@ -24,7 +24,11 @@
 //   the sole embark gate) · a 「返回」band (836). On open the selection is pre-filled
 //   from the persistent remembered outfit (game_state savedOutfit, written by
 //   world_state goHome) clamped to stock/capacity; embark() deducts it from the
-//   stores, fills hp/water from equipment, and writes trek.bin.
+//   stores, fills hp/water from equipment, and writes trek.bin. KEEPS its 返回
+//   band (unlike AssignPage, v0.10.3): the 80px it would free sits BELOW the
+//   item window, already spent on the fixed 护甲/水 row + 出发 band — reclaiming
+//   it doesn't buy back "fit one more item band" the way it does on AssignPage,
+//   which has nothing else on the page. See assign_page.h for that page's math.
 //
 // Carryables (path.js carryable ∪ the Room.Craftables tools/weapons, §1.3 order)
 // map onto the P1 stores: some are Res (cured meat / bullets / energy cell /

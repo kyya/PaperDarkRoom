@@ -219,6 +219,46 @@ int main() {
         CHECK((int)g3.workers[J_TRAPPER] == beforeZero, "-10 at 0 moves nobody");
     }
 
+    printf("== [v0.10.2] unlockedJobs() covers all 9 P2 jobs, not just the first 6 ==\n");
+    // AssignPage used to feed a MAX_JOBS=6 cap straight into unlockedJobs(),
+    // truncating the query itself once P2's 3 miner/steelworker/armourer jobs
+    // pushed the real total to 9 — steelworker (8th in enum order) and armourer
+    // (9th) fell off silently, even though the Outside page kept showing them
+    // (its buffer was always JOB_COUNT-sized). This pins the ENGINE contract a
+    // sufficiently-sized caller now relies on: with every non-gatherer job's
+    // building standing, unlockedJobs() must return all 9, in enum order, with
+    // NONE dropped — regardless of how many the caller's buffer can hold.
+    {
+        GameState g5; g5.init();
+        g5.buildings[B_LODGE]      = 1;   // hunter, trapper
+        g5.buildings[B_TANNERY]    = 1;   // tanner
+        g5.buildings[B_SMOKEHOUSE] = 1;   // charcutier
+        g5.buildings[B_IRON_MINE]    = 1; // iron miner
+        g5.buildings[B_COAL_MINE]    = 1; // coal miner
+        g5.buildings[B_SULPHUR_MINE] = 1; // sulphur miner
+        g5.buildings[B_STEELWORKS] = 1;   // steelworker
+        g5.buildings[B_ARMOURY]    = 1;   // armourer
+
+        uint8_t jobs[JOB_COUNT];
+        int n = g5.unlockedJobs(jobs, (int)sizeof(jobs));
+        CHECK(n == 9, "all 9 non-gatherer jobs unlocked");
+        bool sawSteelworker = false, sawArmourer = false;
+        for (int i = 0; i < n; i++) {
+            if (jobs[i] == J_STEELWORKER) sawSteelworker = true;
+            if (jobs[i] == J_ARMOURER)    sawArmourer    = true;
+        }
+        CHECK(sawSteelworker, "steelworker present (8th in enum order)");
+        CHECK(sawArmourer,    "armourer present (9th in enum order)");
+        CHECK(g5.hasUnlockedJob(), "hasUnlockedJob true with all 9 unlocked");
+
+        // A caller with a smaller page-sized buffer (AssignPage's per-page
+        // MAX_BANDS=8) must still see the query itself return the true total —
+        // pagination is the caller's job now, not a silent engine-level drop.
+        uint8_t page[8];
+        int n8 = g5.unlockedJobs(page, 8);
+        CHECK(n8 == 8, "a capped 8-slot caller still gets 8, not silently fewer");
+    }
+
     printf("== break-on-shortage (断料停产) ==\n");
     // A trapper consumes meat(-1) to make bait(+1). With no meat, it must make
     // NOTHING (all-or-nothing per source), not go negative.

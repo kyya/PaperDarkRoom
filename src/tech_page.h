@@ -29,7 +29,11 @@
 // name, and the right-aligned cost) · a one-line footnote just above the band
 // (the 前哨站 water tip — the fix for the "渴死" complaint) · the 「返回」band at
 // 836..916, clear of the 928 status bar. 4 headings + 14 rows fit one screen, so
-// unlike the Room grid this page needs no 更多 pagination.
+// unlike the Room grid this page needs no 更多 pagination. KEEPS its 返回 band
+// (unlike AssignPage, v0.10.3): the tree already fits with 12px to spare above
+// the status bar, so dropping 返回 would buy back a slot nothing here needs —
+// see assign_page.h for why THAT page's budget was different. Don't "fix" this
+// for consistency; there's nothing to fix.
 //
 // Naming (§8.3 glyph closure): the page is 科技树 — 科 and 技 are absent from
 // strings_zh.h (the upstream translation table the closure is normally scanned

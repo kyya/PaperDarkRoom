@@ -447,6 +447,26 @@ static bool dispatchRegion(int ring, int tx, int ty) {
     return false;
 }
 
+// Close every village sub-page's visibility latch (assign/path/tech) so its
+// ring slot re-hides. A sub-page's own regions never cover its FULL content
+// area — the tab header, an info/capacity row, and any blank space below the
+// last band are dead zones with no region — so BOTH routes that can leave the
+// current page for a DIFFERENT ring index need this: the tab header (jumping
+// straight to another tab) and the page-turn fallback in handleTouch (a short
+// tap that misses every on-page region falls through to a turn). Before
+// AssignPage dropped its 返回 band (v0.10.3), its own band covered that gap for
+// itself by being the only thing anyone tapped to leave the page; PathPage and
+// TechPage still ship a 返回 band, but it is a small region among a much larger
+// dead area, so a tap that misses everything (including 返回) turns the page
+// exactly the way it always could — with the latch left open until now. Both
+// call sites below must run this before actually turning, or a re-entered
+// ring wrap shows the sub-page again with no tap that opened it.
+static void closeSubPageLatches() {
+    if (assign_page::isOpen()) assign_page::close();
+    if (path_page::isOpen())   path_page::close();   // village sub-page: re-hide its slot
+    if (tech_page::isOpen())   tech_page::close();    // Room sub-page: ditto
+}
+
 bool handleTouch() {
     int tc = M5.Touch.getCount();
     uint32_t nowMs = millis();
@@ -613,17 +633,17 @@ bool handleTouch() {
     // short tap now ACTS, falling back to a page turn only when it hits nothing.
     // 1) Tab header (top band, on pages that draw tabs): jump straight to the
     //    tapped tab's page. hitTab returns the page name of the tab under x; map it
-    //    to a ring via ringIndexByName. Leaving the AssignPage (a village sub-page)
-    //    closes its latch so its ring slot re-hides. Re-tapping the current page's
-    //    own tab is a no-op (skip the needless refresh).
+    //    to a ring via ringIndexByName. Leaving a village sub-page (assign/path/
+    //    tech) closes its latch (closeSubPageLatches) so its ring slot re-hides —
+    //    step 3 below runs the identical call for the OTHER way to leave one.
+    //    Re-tapping the current page's own tab is a no-op (skip the needless
+    //    refresh).
     if (ty < page_tabs::TAB_H) {
         const char* tabName = page_tabs::hitTab(tx);
         if (tabName) {
             int ring = ringIndexByName(tabName);
             if (ring >= 0 && ring != currentRingIndex()) {
-                if (assign_page::isOpen()) assign_page::close();
-                if (path_page::isOpen()) path_page::close();   // village sub-page: re-hide its slot
-                if (tech_page::isOpen()) tech_page::close();   // Room sub-page: ditto
+                closeSubPageLatches();
                 showPage(ring, false);
             }
             s_lastActMs = nowMs;
@@ -637,7 +657,10 @@ bool handleTouch() {
         return true;
     }
     // 3) Nothing hit -> page-turn fallback (left half = prev, right half = next).
+    //    This leaves the current page too (see closeSubPageLatches) — a dead-
+    //    zone tap on a sub-page is exactly as much an exit as a tab tap is.
     if (n <= 1) return true;              // interaction, nothing to turn
+    closeSubPageLatches();
     int cur = currentRingIndex();
     bool left = tx < W / 2;
     int dir = left ? -1 : 1;
