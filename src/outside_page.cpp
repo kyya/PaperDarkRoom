@@ -57,11 +57,13 @@ constexpr int CONTENT_W = 540 - 2 * PAD;     // 492px usable (§9.2)
 //         9 non-gatherer jobs has a real unlock building (JOB_REQ_BLD), and
 //         Phase 2's World mines supply the last three, so nJobs<=9 -> <=1+4 = 5
 //         rows. (This used to read "nJobs<=6 (P1)"; the mines outdated it.)
-//   建筑: ceil(nzBuildings/2) rows; HIDDEN ENTIRELY when nzBuildings==0 — a
+//   建筑: ceil(nzBuildings/3) rows; HIDDEN ENTIRELY when nzBuildings==0 — a
 //         freshly-unlocked village has no buildings, and an empty box reads as a
 //         bug; the section appears with its first building (the same "unlocks into
 //         view" feel the Outside tab/page itself has). BLD_COUNT is 13 (10
-//         craftable + 3 World mines) -> <=7 rows.
+//         craftable + 3 World mines) -> <=5 rows. (Was 2 columns / <=7 rows until
+//         2026-08: the box now reuses the SAME 3-column geometry 库存/工人 use —
+//         see the BLD/INV column note below.)
 //   库存: ceil(nzEntries/3) rows, min 1 (for the "空" empty state), CLAMPED to the
 //         space left above the action area (see overflow protection).
 //
@@ -73,16 +75,17 @@ constexpr int CONTENT_W = 540 - 2 * PAD;     // 492px usable (§9.2)
 //       2     714          702          + 查看陷阱 and/or 分工
 //       3     608          596          + 漫漫尘途 (everything unlocked)
 // Taking the tallest possible fieldset stack (工人 1 pop line + 4 grid rows ->
-// 96..266; 建筑 13 buildings -> 7 rows -> 290..516; 库存 rowTop 564) against each:
-//       1 row  -> floor((808-564-6)/28) = 8 库存 rows (24 cells)
-//       2 rows -> floor((702-564-6)/28) = 4 库存 rows (12 cells)
-//       3 rows -> floor((596-564-6)/28) = 0 -> the `availRows < 1 -> 1` floor
-//                 gives 1 row (3 cells); the box then ends at 598, overshooting
-//                 INV_MAX_BOTTOM by 2px but still clearing the grid by 10px.
-// So the third action row shrinks the inventory box to a single 3-cell row at
-// the very worst — and only once the compass is bought, by which point the
-// player has amassed the most stuff. Early on the grid is a single row and
-// 库存 gets the space back.
+// 96..266; 建筑 13 buildings -> 5 rows -> 290..460; 库存 rowTop 508) against each:
+//       1 row  -> floor((808-508-6)/28) = 10 库存 rows (30 cells)
+//       2 rows -> floor((702-508-6)/28) =  6 库存 rows (18 cells)
+//       3 rows -> floor((596-508-6)/28) =  2 库存 rows (6 cells)
+// So the third action row shrinks the inventory box to two 3-cell rows at the
+// very worst — and only once the compass is bought, by which point the player
+// has amassed the most stuff. Early on the grid is a single row and 库存 gets
+// the space back. (Before 建筑 went 3-wide the worst case was 1 row / 3 cells,
+// reached through the `availRows < 1 -> 1` floor, and the box then overshot
+// INV_MAX_BOTTOM by 2px; the two rows 建筑 gives back retire that case — the
+// floor is now unreachable and FS_MIN_ROWS=2 is honoured in every state.)
 // Max 库存 entries = RES_COUNT(19) + ITEM_COUNT(14) = 33, so any clamp below 11
 // rows can't show everything on one screen. FIXED IN THIS PASS (2026-08, user
 // report: "库存被隐藏不可见"): a box too small to fit every non-zero entry used
@@ -96,16 +99,18 @@ constexpr int CONTENT_W = 540 - 2 * PAD;     // 492px usable (§9.2)
 // whole fieldset becomes a tap target (see appendInvRegion/onLocalAction) that
 // cycles fixed-size batches of `invRows*INV_COLS` cells, reserving the LAST cell
 // for "…" only on a batch that has a follow-up (see drawInventory) — so "…" now
-// means "tap for more" instead of "the rest is gone". FS_MIN_ROWS=2 is
-// deliberately NOT honoured in the 3-row worst case: the space clamp outranks
-// the min-height floor, which is the pre-existing precedence and the only way to
-// guarantee no overlap.
+// means "tap for more" instead of "the rest is gone". Where the space clamp and
+// the FS_MIN_ROWS=2 floor disagree the CLAMP wins (that precedence is what
+// guarantees no overlap); as of the 3-wide 建筑 they never disagree — the
+// tightest state still affords 2 rows.
 // Verified exhaustively over every reachable combination of the three gates
-// (trap / job / compass) crossed with nJobs 0..9 and nzBuildings 0..13, skipping
-// states the gates make impossible: NO collision in any of them, and the minimum
-// clearance between the 库存 box and the grid is 278px at 1 row, 88px at 2 rows
-// and 10px at 3 rows. All region y's and the cooldown-refresh rects are derived
-// from the same packing, so nothing needs a separate recompute.
+// (trap / job / compass) crossed with nJobs 0..9, nzBuildings 0..13 and
+// nzEntries 0..33, skipping states the gates make impossible: NO collision in
+// any of them, and the minimum clearance between the 库存 box's bottom border
+// and the grid is 26px at 1 action row, 32px at 2 rows and 38px at 3 rows (the
+// 3-row figure was 10px while 建筑 was 2-wide). All region y's and the
+// cooldown-refresh rects are derived from the same packing, so nothing needs a
+// separate recompute.
 // 建筑/工人 are NOT space-clamped the way 库存 is (computeLayout gives them
 // ceil(nz/cols) rows unconditionally) — but they cannot silently overflow
 // either: both are bounded by a compile-time enum ceiling (BLD_COUNT=13,
@@ -147,12 +152,14 @@ constexpr int FS_MIN_ROWS    = 2;
 // Fixed top anchor: the 工人 fieldset's legend baseline, just under the tab header.
 constexpr int WRK_LEGEND_Y  = 84;
 
-// ---- 建筑 fieldset x geometry: 2 columns ("名 数量").
-constexpr int BLD_COL_GAP   = 12;
-constexpr int BLD_COL_W     = (FS_CONTENT_X1 - FS_CONTENT_X0 - BLD_COL_GAP) / 2;  // 228
-constexpr int BLD_COLX[2]   = { FS_CONTENT_X0, FS_CONTENT_X0 + BLD_COL_W + BLD_COL_GAP };  // {36,276}
+// ---- 库存 / 工人 / 建筑 grid x geometry: 3 columns, two-ends (name-left /
+// qty-right). 建筑 used to run its own 2-column ("名 数量", 228px) geometry and
+// moved onto this one in 2026-08 (user, after the 库存分页 pass: "建筑一行放三
+// 个"). It FITS: the longest building name is 狩猎小屋 at 4x24 = 96px and
+// buildings[] is a uint8_t, so the widest possible cell is "狩猎小屋 255" =
+// 96 + 3x12 = 132px inside a 148px column — 16px of gutter to spare, no
+// narrow-cell font shrink needed anywhere.
 
-// ---- 库存 / 工人 grid x geometry: 3 columns, two-ends (name-left / qty-right).
 constexpr int INV_COLS      = 3;
 constexpr int INV_COL_GAP   = 12;
 constexpr int INV_COL_W     = (FS_CONTENT_X1 - FS_CONTENT_X0
@@ -343,12 +350,12 @@ Layout computeLayout() {
 
     int prevBottom = L.wrkBoxY1;
 
-    // 建筑: hidden when empty (see the budget note); else ceil(nz/2) rows.
+    // 建筑: hidden when empty (see the budget note); else ceil(nz/3) rows.
     int nzB = 0;
     for (int b = 0; b < BLD_COUNT; b++) if (g_game.buildings[b] > 0) nzB++;
     L.bldShown = nzB > 0;
     if (L.bldShown) {
-        L.bldRows  = ceilDiv(nzB, 2);                          // nz<=10 -> <=5 rows
+        L.bldRows  = ceilDiv(nzB, INV_COLS);                   // nz<=13 -> <=5 rows
         if (L.bldRows < FS_MIN_ROWS) L.bldRows = FS_MIN_ROWS;  // min-height floor
         int legendY = prevBottom + FS_BOX_GAP;
         L.bldBoxY0  = legendY + GLYPH / 2;
@@ -417,22 +424,35 @@ void drawFieldset(m5gfx::M5Canvas& c, int y0, int y1, const char* legend) {
     c.drawFastHLine(FS_BOX_X0, y1,     FS_BOX_X1 - FS_BOX_X0 + 1, TFT_BLACK);
 }
 
-// 建筑 fieldset: the box + every non-zero building as "名 数量", 2 columns. The
-// box height already grew to fit every non-zero building (ceil(nz/2) rows), so
-// the whole set always shows — no tail-collapse. Never called when nz==0 (the
-// section is hidden then; see computeLayout / draw()).
+// One two-ends grid cell: name left-aligned at the column's left edge, quantity
+// right-aligned at the column's right edge. Row-major over the shared 3-col
+// grid: idx -> row idx/INV_COLS, column idx%INV_COLS, from rowTop. Shared by the
+// 库存 and 建筑 boxes (both list "名 数量" pairs and read the same geometry).
+void drawGridCell(m5gfx::M5Canvas& c, int rowTop, int idx, const char* name, long qty) {
+    int col = idx % INV_COLS, row = idx / INV_COLS;
+    int x0 = INV_COLX[col];
+    int y  = rowTop + row * ROWH;
+    cjk::drawText(c, x0, y, name, SCALE);
+
+    char qtyStr[8];
+    fmtAmount((int32_t)qty, qtyStr, sizeof(qtyStr));   // v0.3.3: 1.2K/56K/1.2M
+    int qw = cjk::textWidth(qtyStr, SCALE);
+    cjk::drawText(c, x0 + INV_COL_W - qw, y, qtyStr, SCALE);
+}
+
+// 建筑 fieldset: the box + every non-zero building as "名 数量", 3 columns (the
+// shared 库存/工人 grid — see the column geometry note). The box height already
+// grew to fit every non-zero building (ceil(nz/3) rows), so the whole set always
+// shows — no tail-collapse. Never called when nz==0 (the section is hidden then;
+// see computeLayout / draw()).
 void drawBuildings(m5gfx::M5Canvas& c, const Layout& L) {
     drawFieldset(c, L.bldBoxY0, L.bldBoxY1, "建筑");   // 建/筑 closure-safe
 
     int shown = 0;
     for (int b = 0; b < BLD_COUNT; b++) {
         if (g_game.buildings[b] == 0) continue;
-        int col = shown % 2, row = shown / 2;
-        char line[48];
-        snprintf(line, sizeof(line), "%s %u",
-                 tr(BLD_KEY[b]), (unsigned)g_game.buildings[b]);
-        cjk::drawText(c, BLD_COLX[col], L.bldRowTop + row * ROWH, line, SCALE);
-        shown++;
+        drawGridCell(c, L.bldRowTop, shown++, tr(BLD_KEY[b]),
+                     (long)g_game.buildings[b]);
     }
 }
 
@@ -473,21 +493,6 @@ void drawWorkerSummary(m5gfx::M5Canvas& c, const Layout& L) {
                        (unsigned)g_game.workers[jobs[i]]);
 }
 
-// One inventory cell: name left-aligned at the column's left edge, quantity
-// right-aligned at the column's right edge (two-ends alignment). Row-major:
-// idx -> row idx/INV_COLS, column idx%INV_COLS, from rowTop.
-void drawInvCell(m5gfx::M5Canvas& c, int rowTop, int idx, const char* name, long qty) {
-    int col = idx % INV_COLS, row = idx / INV_COLS;
-    int x0 = INV_COLX[col];
-    int y  = rowTop + row * ROWH;
-    cjk::drawText(c, x0, y, name, SCALE);
-
-    char qtyStr[8];
-    fmtAmount((int32_t)qty, qtyStr, sizeof(qtyStr));   // v0.3.3: 1.2K/56K/1.2M
-    int qw = cjk::textWidth(qtyStr, SCALE);
-    cjk::drawText(c, x0 + INV_COL_W - qw, y, qtyStr, SCALE);
-}
-
 // 库存 fieldset: the box + every non-zero resource (whole units) followed by
 // every non-zero crafted item, three columns, name-left/qty-right. The box
 // holds L.invRows*3 cells (space-clamped by computeLayout); past that capacity
@@ -524,12 +529,12 @@ void drawInventory(m5gfx::M5Canvas& c, const Layout& L, int page) {
         long q = (long)g_game.whole((uint8_t)r);
         if (q <= 0) continue;
         if (logicalIdx++ < startIdx) continue;
-        drawInvCell(c, L.invRowTop, shown++, tr(RES_KEY[r]), q);
+        drawGridCell(c, L.invRowTop, shown++, tr(RES_KEY[r]), q);
     }
     for (int i = 0; i < ITEM_COUNT && shown < take; i++) {
         if (g_game.items[i] <= 0) continue;
         if (logicalIdx++ < startIdx) continue;
-        drawInvCell(c, L.invRowTop, shown++, tr(ITEM_KEY[i]), (long)g_game.items[i]);
+        drawGridCell(c, L.invRowTop, shown++, tr(ITEM_KEY[i]), (long)g_game.items[i]);
     }
 
     if (hasMore) {
