@@ -246,6 +246,11 @@ async function fetchListing(env) {
         // Assets are uploaded once and never rewritten, so these agree; prefer
         // updated_at so a re-uploaded asset reports when it actually landed.
         uploaded: asset.updated_at || asset.created_at,
+        // Release name (often "vX.Y.Z — 一句话") and the markdown body the
+        // flasher page renders as 更新日志. Empty string when the release has
+        // none — the page hides the notes block rather than showing a blank.
+        title: release.name || "",
+        notes: (release.body || "").trim(),
       });
     }
   }
