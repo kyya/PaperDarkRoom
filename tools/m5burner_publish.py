@@ -64,7 +64,7 @@ except ImportError:
 
 ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_NAME = "PaperDarkRoom"
-DEFAULT_API = "http://m5burner-api.m5stack.com"
+DEFAULT_API = "https://m5burner-api.m5stack.com"
 LOGIN_URL = "https://uiflow2.m5stack.com/api/v1/account/login"
 
 # ESP32 partition-table entry magic, at the fixed 0x8000 flash offset. Present
