@@ -42,6 +42,24 @@ python tools/make_dist.py            # 已构建过可加 --skip-build 跳过构
 
 `tools/make_dist.py` 会先跑一遍构建（已构建过可加 `--skip-build` 跳过），再用 esptool `merge_bin` 把 bootloader、分区表、`boot_app0`、`firmware.bin` 按各自的 flash 偏移拼成一份完整镜像 `dist/adarkroom-<版本>-merged.bin`（版本号取自 `platformio.ini` 的 `-DCARD_VERSION`），并自动校验产物合法性。M5Burner/烧录时该文件整体写入 **0x0**，无需再分四份地址烧录。
 
+### 发布到 M5Burner
+
+`gh release create` 传完 GitHub Release 附件后，用 `tools/m5burner_publish.py` 把同一份 merged 镜像推成 M5Burner 上 `PaperDarkRoom` 条目的新版本（脚本改编自 [bmorcelli/Launcher](https://github.com/bmorcelli/Launcher) 的 `support_files/m5burner_post.py`，MIT）：
+
+```powershell
+pip install requests
+$env:M5BURNER_USER = "<M5Burner 账号邮箱>"
+$env:M5BURNER_PWD  = "<密码>"
+python tools\m5burner_publish.py --tag v0.15.0 --dry-run   # 先干跑确认条目与产物
+python tools\m5burner_publish.py --tag v0.15.0
+```
+
+凭据只从环境变量 `M5BURNER_USER` / `M5BURNER_PWD` 读（也可用 `--user` / `--password` 覆盖），绝不入库；`--output` 写的 HTTP 日志会把密码与 token 脱敏。`--tag` 会自动去掉前导 `v`（M5Burner 上的版本号形如 `0.15.0`），省略时从 `platformio.ini` 的 `-DCARD_VERSION` 读；默认上传 `dist/adarkroom-<版本>-merged.bin`。
+
+**上传的必须是 merged 镜像，不是 launcher 镜像。** M5Burner 桌面端把条目的 `.bin` 整体写到 **0x0**，所以它必须自带 bootloader + 分区表；而 Launcher 的设备端 OTA 从 M5Burner CDN 上这同一份 merged 镜像里按 Range 请求取 `0x10000` 起的 app 切片写进自己的 OTA 槽（见 Launcher `src/onlineLauncher.cpp` 的 `installFirmwareDynamic`），一份 merged 同时喂饱两边——Launcher 自己上架 M5Burner 的也是 merged。app-only 的 `dist/adarkroom-<版本>-launcher.bin` 只用于拷 SD 卡走 Launcher 安装，**不要**传到 M5Burner。脚本会校验待上传镜像在 `0x8000` 处有分区表魔数，传错产物直接拒绝。
+
+前提：M5Burner 的固件条目（名称、分类、封面、简介）只能在 M5Burner GUI 里手工建一次，API 建不了。条目已建好（名称 `PaperDarkRoom`，分类 `paper`），脚本默认按这个名字查 fid；改过名就用 `--name`，或直接 `--fid` 指定。
+
 ## 刷机
 
 ### 网页刷机（推荐）
