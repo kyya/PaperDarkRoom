@@ -282,6 +282,23 @@ static const uint8_t JOB_REQ_BLD[JOB_COUNT] = {
 // Builder wood income once Helping (level 4): +2 wood / 10s (room.js onArrival).
 constexpr int32_t BUILDER_WOOD_DFP = 2 * FP;
 
+// ---- Idle-crew notice: packed log arg ------------------------------------
+// When a shortage truncates a crew (applyIncomeSource above), the log line has
+// to name three things — WHICH job, WHICH input ran short, HOW MANY idled — but
+// a LogEntry carries a single int32 arg. Pack all three into it and let the
+// renderer (room_page logText) splice tr(JOB_KEY[job]) / tr(RES_KEY[res]) /
+// the count into the template. Same "the arg is an index, not a number" trick
+// "the fire is {0}" already uses for its Fire enum, just three fields wide.
+// The recovery line only needs the job, so it packs res/idle as 0.
+inline int32_t packIdleArg(uint8_t job, uint8_t res, int idle) {
+    if (idle < 0) idle = 0;
+    if (idle > 0xFFFF) idle = 0xFFFF;
+    return (int32_t)job | ((int32_t)res << 8) | ((int32_t)idle << 16);
+}
+inline uint8_t idleArgJob(int32_t a)  { return (uint8_t)(a & 0xFF); }
+inline uint8_t idleArgRes(int32_t a)  { return (uint8_t)((a >> 8) & 0xFF); }
+inline int     idleArgIdle(int32_t a) { return (int)((a >> 16) & 0xFFFF); }
+
 // ---- Compact quantity formatter (v0.3.3) ----------------------------------
 // Real play stockpiles wood/fur into the thousands, and the Outside inventory
 // box's 3-column grid + the Trade balance row have no room for a 5-6 digit run.

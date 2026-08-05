@@ -8,7 +8,7 @@
 // binary search in tr(). zh values are UTF-8, rendered by the CJK font
 // (src/cjk_font12.h). Include this header from exactly ONE .cpp
 // (cjk_text.cpp) — it carries the whole table.
-// 797 entries · 6669 zh chars · 19679 UTF-8 bytes of translation text.
+// 799 entries · 6690 zh chars · 19718 UTF-8 bytes of translation text.
 #pragma once
 #include <stddef.h>
 
@@ -812,7 +812,9 @@ static const AdrString ADR_STRINGS[] = {
     { "worth killing for, it seems.", "看来这次杀戮是值得的" },
     { "yes", "是" },
     { "your are connected to dropbox with account / email ", "您已用此账户/电子邮件连接到dropbox: " },
+    { "{0} back to work", "{0}重新开工" },
     { "{0} per {1}s", "{0} /{1}秒" },
+    { "{0} short of {1}, {2} idle", "{0}缺{1}，{2}人停工" },
 };
 static const size_t ADR_STRINGS_COUNT = sizeof(ADR_STRINGS) / sizeof(ADR_STRINGS[0]);
 

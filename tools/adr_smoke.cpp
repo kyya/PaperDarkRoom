@@ -35,6 +35,24 @@ static void advance(GameState& gs, uint32_t& now, uint32_t secs) {
     gs.settle(now);
 }
 
+// The two idle-crew notice keys (game_state applyIncomeSource).
+static const char* const K_IDLE = "{0} short of {1}, {2} idle";
+static const char* const K_BACK = "{0} back to work";
+
+// How many entries in the log ring carry `key`, and the newest one. The
+// anti-flood checks need the COUNT (a sighting says nothing about repeats).
+static int countLog(const GameState& gs, const char* key) {
+    int n = 0;
+    for (int i = 0; i < gs.logCount; i++)
+        if (strcmp(gs.log[i].enKey, key) == 0) n++;
+    return n;
+}
+static const LogEntry* findLog(const GameState& gs, const char* key) {
+    for (int i = gs.logCount - 1; i >= 0; i--)
+        if (strcmp(gs.log[i].enKey, key) == 0) return &gs.log[i];
+    return nullptr;
+}
+
 int main() {
     GameState gs;
     gs.init();
@@ -320,6 +338,80 @@ int main() {
               "multi-input: scarcest input (wood, 3) caps the crew at 3");
         CHECK(g5b.stores[R_MEAT] == 15 * FP && g5b.stores[R_WOOD] == 0,
               "multi-input: 3 workers' worth of BOTH inputs consumed");
+    }
+
+    printf("== idle-worker log (缺料停工提示) ==\n");
+    // Passive income was the one system that never wrote a log line, so a player
+    // who staffed a job past its supply just saw the extra workers produce
+    // nothing, with no hint of the bottleneck. It now reports WHICH job idled,
+    // on WHICH missing input, and HOW MANY — once per transition, never per tick.
+    {
+        GameState g7; g7.init(); uint32_t t7 = 900; g7.settle(t7);
+        g7.buildings[B_IRON_MINE] = 1;         // unlock iron miner
+        g7.population = 4;
+        g7.craftablesUnlocked = true;
+        CHECK(g7.assignWorker(J_IRON_MINER, 4) == RC_OK, "4 iron miners assigned");
+        g7.stores[R_CURED_MEAT] = 3 * FP;      // feeds only 3 of the 4
+        int before = g7.logCount;
+        t7 += INCOME_TICK_S; g7.settle(t7);
+        CHECK(g7.logCount == before + 1 && countLog(g7, K_IDLE) == 1,
+              "a starved crew pushes exactly one idle notice");
+        const LogEntry* e7 = findLog(g7, K_IDLE);
+        CHECK(e7 && e7->hasArg && idleArgJob(e7->arg) == J_IRON_MINER,
+              "idle notice names the job (iron miner)");
+        CHECK(e7 && idleArgRes(e7->arg) == R_CURED_MEAT,
+              "idle notice names the input that ran short (cured meat)");
+        CHECK(e7 && idleArgIdle(e7->arg) == 1, "idle notice carries the headcount (1)");
+
+        // The anti-flood core: the shortage now DEEPENS (the store emptied, so
+        // all 4 idle) and 20 more 10s ticks run. Not one further line — a moving
+        // idle headcount is deliberately silent while the crew stays short, and
+        // it must not sneak in as a collapsed "xN" repeat counter either.
+        for (int i = 0; i < 20; i++) { t7 += INCOME_TICK_S; g7.settle(t7); }
+        CHECK(g7.logCount == before + 1 && countLog(g7, K_IDLE) == 1,
+              "20 more starved ticks add no further idle notice");
+        e7 = findLog(g7, K_IDLE);
+        CHECK(e7 && e7->count == 1,
+              "a sustained shortage does not tick the repeat counter either");
+
+        // Restock the whole crew -> exactly one recovery line, then silence.
+        g7.stores[R_CURED_MEAT] = 100 * FP;
+        t7 += INCOME_TICK_S; g7.settle(t7);
+        CHECK(countLog(g7, K_BACK) == 1, "supply restored -> one back-to-work notice");
+        const LogEntry* b7 = findLog(g7, K_BACK);
+        CHECK(b7 && b7->hasArg && idleArgJob(b7->arg) == J_IRON_MINER,
+              "back-to-work notice names the job");
+        for (int i = 0; i < 5; i++) { t7 += INCOME_TICK_S; g7.settle(t7); }
+        CHECK(countLog(g7, K_BACK) == 1, "a fed crew stays silent afterwards");
+
+        // A FRESH shortage re-arms the notice (the latch cleared on recovery).
+        g7.stores[R_CURED_MEAT] = 0;
+        t7 += INCOME_TICK_S; g7.settle(t7);
+        CHECK(countLog(g7, K_IDLE) == 2, "a new shortage is announced again");
+        e7 = findLog(g7, K_IDLE);
+        CHECK(e7 && idleArgIdle(e7->arg) == 4,
+              "the re-announcement carries the CURRENT headcount (all 4)");
+    }
+    // Offline catch-up stays silent: settle() replays up to 8640 ticks on a
+    // cold-boot wake, and even one line per transition per job is noise the
+    // player never lived through. The latch is left untouched offline, so the
+    // first AWAKE tick still announces a shortage that is still standing.
+    {
+        GameState g8; g8.init(); uint32_t t8 = 2000; g8.settle(t8);
+        g8.buildings[B_IRON_MINE] = 1;
+        g8.population = 4;
+        g8.craftablesUnlocked = true;
+        CHECK(g8.assignWorker(J_IRON_MINER, 4) == RC_OK,
+              "4 iron miners assigned (offline case)");
+        g8.stores[R_CURED_MEAT] = 0;           // starved from the very first tick
+        t8 += SETTLE_MAX_S;                    // a full day asleep
+        uint32_t steps = g8.settle(t8, /*offline=*/true);
+        CHECK(steps == (uint32_t)(SETTLE_MAX_S / INCOME_TICK_S),
+              "offline settle ran the full 8640 ticks");
+        CHECK(g8.logCount == 0, "offline catch-up writes no idle notices at all");
+        t8 += INCOME_TICK_S; g8.settle(t8);    // first awake tick after the wake
+        CHECK(countLog(g8, K_IDLE) == 1,
+              "the first awake tick after a wake announces it once");
     }
 
     printf("== [feedback 2] cost-insufficient build/craft pushes \"not enough X\" ==\n");

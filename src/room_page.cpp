@@ -124,6 +124,24 @@ void fmt1(char* out, size_t cap, const char* tmpl, const char* arg) {
     snprintf(out, cap, "%.*s%s%s", pre, tmpl, arg, h + 3);
 }
 
+// Splice up to three args into a "{0}/{1}/{2}" template, in placeholder order
+// (the idle-crew notice is the only line that needs more than one slot). A
+// missing slot simply leaves the rest of the template as-is.
+void fmtN(char* out, size_t cap, const char* tmpl, const char* const* args, int n) {
+    size_t o = 0;
+    for (const char* p = tmpl; *p && o + 1 < cap; ) {
+        int idx = -1;
+        if (p[0] == '{' && p[1] >= '0' && p[1] <= '9' && p[2] == '}') idx = p[1] - '0';
+        if (idx >= 0 && idx < n) {
+            o += (size_t)snprintf(out + o, cap - o, "%s", args[idx]);
+            p += 3;
+        } else {
+            out[o++] = *p++;
+        }
+    }
+    out[o < cap ? o : cap - 1] = 0;
+}
+
 // RTC -> Unix epoch, mirroring main.cpp's epochNow (only differences matter to
 // settle()/cooldownLeft, so the mktime timezone is irrelevant if consistent).
 uint32_t epochNow() {
@@ -215,6 +233,16 @@ void logText(const LogEntry& e, char* out, size_t cap) {
     } else if (e.hasArg && strcmp(e.enKey, "the room is {0}") == 0) {
         uint8_t idx = (e.arg >= 0 && e.arg < 5) ? (uint8_t)e.arg : 0;
         fmt1(base, sizeof(base), zh, tr(TEMP_TEXT[idx]));
+    } else if (e.hasArg && (strcmp(e.enKey, "{0} short of {1}, {2} idle") == 0 ||
+                            strcmp(e.enKey, "{0} back to work") == 0)) {
+        // Idle-crew notice (game_state applyIncomeSource): the arg is a packed
+        // job / short input / idle headcount triple, spliced from the official
+        // job + resource name strings rather than a per-job sentence.
+        uint8_t job = idleArgJob(e.arg), res = idleArgRes(e.arg);
+        char num[16]; snprintf(num, sizeof(num), "%d", idleArgIdle(e.arg));
+        const char* a[3] = { tr(JOB_KEY[job < JOB_COUNT ? job : 0]),
+                             tr(RES_KEY[res < RES_COUNT ? res : 0]), num };
+        fmtN(base, sizeof(base), zh, a, 3);
     } else if (e.hasArg && strstr(zh, "{0}")) {
         char num[16]; snprintf(num, sizeof(num), "%ld", (long)e.arg);
         fmt1(base, sizeof(base), zh, num);

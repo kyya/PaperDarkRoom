@@ -82,6 +82,13 @@ STRING_OVERRIDES = {
 #      matching setpiece TITLE already in zh_cn (The Iron Mine -> 铁矿, etc.).
 #   2) The Two-Headed Creature encounter's 3 strings — the sole Phase-2 random
 #      enemy absent from the official zh_cn set (research-phase2.md §7.2).
+#   3) The 2 idle-crew notices. Upstream settles income all-or-nothing and never
+#      reports it, so there is no upstream line to inherit; this port truncates
+#      the crew to what the inputs feed (部分产出) and tells the player which job
+#      idled on which shortage. Templates: {0} job (JOB_KEY), {1} the short input
+#      (RES_KEY), {2} the idle headcount — all spliced by room_page logText from
+#      already-official name strings, so no per-job wording is duplicated here.
+#      Every glyph is already inside the closure (no cjk_font12.h growth).
 LOCAL_STRINGS = {
     "Iron Mine":            "铁矿",
     "Coal Mine":            "煤矿",
@@ -95,6 +102,8 @@ LOCAL_STRINGS = {
     "a two-headed creature appears, the smaller head trembling":
         "一只双头怪出现了，较小的那颗头在颤抖",
     "the two creatures are dead": "两只怪物都倒下了",
+    "{0} short of {1}, {2} idle": "{0}缺{1}，{2}人停工",
+    "{0} back to work":           "{0}重新开工",
 }
 
 

@@ -156,6 +156,19 @@ public:
     uint8_t  logCount;               // linear: [0..logCount), newest last,
                                      // oldest dropped on overflow
 
+    // ---- runtime only — deliberately NOT persisted ----
+    // Bit j set while job j has already been TOLD about (its inputs could not
+    // feed the whole crew). The idle notice fires on TRANSITION only: a 10s
+    // production tick that logged every idle tick would bury the 8-line ring and
+    // thrash the e-ink, and the idle HEADCOUNT changing while still short is
+    // deliberately silent too (a wobbling supply chain must not re-announce).
+    // Not written by toJson / not read by fromJson and no SAVE_VER bump — the
+    // save is a hand-written field list, so a runtime member is simply absent
+    // from it, and re-announcing a shortage that still stands once after a
+    // reboot is the better behavior anyway. init() (which fromJson calls first)
+    // clears it, so a loaded game always starts from "nobody told yet".
+    uint16_t idleJobs;
+
     // ---- lifecycle ----
     void init();                         // fresh new game (dark room, fire dead)
     bool load();                         // read save; false -> caller inits new
@@ -265,7 +278,9 @@ private:
     Result makeCraftable(uint8_t craftId);   // shared build/craft core
     void   onFireChange();
     void   stepOnce(bool offline);           // one 10s passive tick
-    void   applyIncomeSource(uint8_t job, int count);
+    // offline: a deep-sleep catch-up runs this up to 8640 times, so it carries
+    // the flag through purely to suppress the idle-crew log (see stepOnce).
+    void   applyIncomeSource(uint8_t job, int count, bool offline);
     void   adjustTemp();
     void   advanceBuilder();
     void   increasePopulation();
