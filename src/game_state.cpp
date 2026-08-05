@@ -47,6 +47,7 @@ void GameState::init() {
     echoDueEpoch = 0;
     logCount = 0;
     memset(log, 0, sizeof log);
+    idleJobs = 0;                     // runtime only: nobody has been told yet
 }
 
 // ===================== log ring ===========================================
@@ -208,9 +209,9 @@ void GameState::stepOnce(bool offline) {
 
     // -- worker income (every 10s tick), per source truncated to what the
     //    inputs on hand can actually feed (see applyIncomeSource) --
-    applyIncomeSource(J_GATHERER, numGatherers());
+    applyIncomeSource(J_GATHERER, numGatherers(), offline);
     for (int j = J_HUNTER; j < JOB_COUNT; j++)
-        applyIncomeSource(j, (int)workers[j]);
+        applyIncomeSource(j, (int)workers[j], offline);
     if (builderLevel >= 4) {           // builder Helping: +2 wood / tick
         stores[R_WOOD] += BUILDER_WOOD_DFP;
         markSeen(R_WOOD);
@@ -223,8 +224,15 @@ void GameState::stepOnce(bool offline) {
     }
 }
 
-void GameState::applyIncomeSource(uint8_t job, int count) {
-    if (count <= 0) return;
+void GameState::applyIncomeSource(uint8_t job, int count, bool offline) {
+    const uint16_t idleBit = (uint16_t)(1u << job);
+    if (count <= 0) {
+        // Unstaffed source: with no crew nobody can idle, so drop the notice
+        // latch silently (a "back to work" line for a job nobody works would be
+        // nonsense) — and re-staffing into the same shortage announces afresh.
+        idleJobs &= (uint16_t)~idleBit;
+        return;
+    }
     const IncomeDef& d = INCOME[job];
     // Partial-crew settlement (部分产出): every consumed input can only feed so
     // many of this job's workers on this tick, and the SCARCEST one sets the
@@ -233,6 +241,7 @@ void GameState::applyIncomeSource(uint8_t job, int count) {
     // (Upstream outside.js settles all-or-nothing, which made a 4th miner cut
     // output from 3/tick to 0/tick; deliberate divergence.)
     int effective = count;
+    uint8_t shortRes = RES_COUNT;            // the input that BOUND the crew
     for (int i = 0; i < d.n; i++) {
         int32_t dfp = d.items[i].dfp;
         if (dfp >= 0) continue;                        // a product never limits the crew
@@ -240,7 +249,27 @@ void GameState::applyIncomeSource(uint8_t job, int count) {
         // floor division; a non-positive store feeds nobody (and must not turn
         // into a negative crew size that would then be settled as if positive)
         int32_t fed = have > 0 ? have / -dfp : 0;
-        if (fed < effective) effective = (int)fed;
+        if (fed < effective) { effective = (int)fed; shortRes = d.items[i].res; }
+    }
+    // Idle-crew notice: passive income is the ONE thing that never wrote a log
+    // line, so a player who over-staffed a job past its supply saw the workers
+    // simply produce nothing, with no hint of the bottleneck. Report it — but
+    // ONLY on a state transition (idleJobs, see game_state.h): a 10s tick that
+    // spoke every time would flood the ring and thrash the e-ink, so a crew that
+    // stays short stays silent even as the idle headcount moves. Skipped whole
+    // while offline: settle() runs up to 8640 of these on a cold-boot wake, and
+    // because this branch leaves the latch alone too, the first awake tick
+    // re-derives the transition — the shortage is still announced exactly once.
+    if (!offline) {
+        int idle = count - effective;
+        if (idle > 0 && !(idleJobs & idleBit)) {
+            idleJobs |= idleBit;
+            pushLog("{0} short of {1}, {2} idle",
+                    packIdleArg(job, shortRes, idle), true);
+        } else if (idle <= 0 && (idleJobs & idleBit)) {
+            idleJobs &= (uint16_t)~idleBit;
+            pushLog("{0} back to work", packIdleArg(job, 0, 0), true);
+        }
     }
     if (effective <= 0) return;              // nothing affordable -> stores untouched
     for (int i = 0; i < d.n; i++) {
