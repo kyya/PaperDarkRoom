@@ -4,8 +4,8 @@
 //
 // A Dark Room — Phase 1 game state engine (Room + Outside core loop). Ports the
 // upstream room.js / outside.js / state_manager.js logic: fire/temperature/
-// builder state machines, the 10-job worker economy with break-on-shortage
-// (断料停产), craftables/buildings/trade, and — the deep-sleep centerpiece — a
+// builder state machines, the 10-job worker economy with partial-crew income
+// (部分产出), craftables/buildings/trade, and — the deep-sleep centerpiece — a
 // fixed-point, 10s-step offline settle() shared by the awake tick and the
 // cold-boot wake (research.md §5). Stores are integer × adr::FP so fractional
 // income (hunter +0.5/tick) never drifts across 8640 offline steps.

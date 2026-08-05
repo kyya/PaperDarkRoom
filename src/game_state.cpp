@@ -206,7 +206,8 @@ void GameState::stepOnce(bool offline) {
         }
     }
 
-    // -- worker income (every 10s tick), all-or-nothing per source --
+    // -- worker income (every 10s tick), per source truncated to what the
+    //    inputs on hand can actually feed (see applyIncomeSource) --
     applyIncomeSource(J_GATHERER, numGatherers());
     for (int j = J_HUNTER; j < JOB_COUNT; j++)
         applyIncomeSource(j, (int)workers[j]);
@@ -225,12 +226,25 @@ void GameState::stepOnce(bool offline) {
 void GameState::applyIncomeSource(uint8_t job, int count) {
     if (count <= 0) return;
     const IncomeDef& d = INCOME[job];
-    for (int i = 0; i < d.n; i++) {          // break-on-shortage (断料停产):
-        int32_t delta = d.items[i].dfp * count;
-        if (stores[d.items[i].res] + delta < 0) return;   // ANY input short -> skip all
-    }
+    // Partial-crew settlement (部分产出): every consumed input can only feed so
+    // many of this job's workers on this tick, and the SCARCEST one sets the
+    // crew size. A shortage truncates the crew, it never zeroes the source —
+    // 4 iron miners with 3 cured meat banked still mine 3 iron, the 4th idles.
+    // (Upstream outside.js settles all-or-nothing, which made a 4th miner cut
+    // output from 3/tick to 0/tick; deliberate divergence.)
+    int effective = count;
     for (int i = 0; i < d.n; i++) {
-        stores[d.items[i].res] += d.items[i].dfp * count;
+        int32_t dfp = d.items[i].dfp;
+        if (dfp >= 0) continue;                        // a product never limits the crew
+        int32_t have = stores[d.items[i].res];
+        // floor division; a non-positive store feeds nobody (and must not turn
+        // into a negative crew size that would then be settled as if positive)
+        int32_t fed = have > 0 ? have / -dfp : 0;
+        if (fed < effective) effective = (int)fed;
+    }
+    if (effective <= 0) return;              // nothing affordable -> stores untouched
+    for (int i = 0; i < d.n; i++) {
+        stores[d.items[i].res] += d.items[i].dfp * effective;
         if (d.items[i].dfp > 0) markSeen(d.items[i].res);   // a produced resource is "seen"
     }
 }

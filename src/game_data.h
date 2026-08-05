@@ -238,7 +238,8 @@ static const TradeGood TRADE[TRADE_COUNT] = {
 // ---- Worker income (outside.js _INCOME) -----------------------------------
 // 10 jobs. Values are PER WORKER PER 10s tick, in fixed point (×FP). gatherer's
 // count is derived (population − assigned); the rest are the assignable jobs in
-// game.workers. Applied all-or-nothing per source (see game_state settle).
+// game.workers. Per source, only as many workers as the inputs on hand can feed
+// are settled — the rest idle (see game_state applyIncomeSource).
 enum Job : uint8_t {
     J_GATHERER = 0, J_HUNTER, J_TRAPPER, J_TANNER, J_CHARCUTIER,
     J_IRON_MINER, J_COAL_MINER, J_SULPHUR_MINER, J_STEELWORKER, J_ARMOURER,

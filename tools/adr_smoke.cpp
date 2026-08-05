@@ -260,8 +260,9 @@ int main() {
     }
 
     printf("== break-on-shortage (断料停产) ==\n");
-    // A trapper consumes meat(-1) to make bait(+1). With no meat, it must make
-    // NOTHING (all-or-nothing per source), not go negative.
+    // A trapper consumes meat(-1) to make bait(+1). With NO meat at all the crew
+    // that can be fed is empty, so it must make NOTHING, not go negative. (The
+    // partial-crew rule below covers the "some but not enough" middle ground.)
     GameState g2;
     g2.init();
     uint32_t t2 = 500;
@@ -281,6 +282,45 @@ int main() {
     t2 += 300; g2.settle(t2);              // 30 ticks
     CHECK(g2.stores[R_BAIT] > baitC && g2.stores[R_MEAT] < meatC,
           "with meat -> trapper makes bait, consumes meat");
+
+    printf("== partial-crew income (材料只够部分工人) ==\n");
+    // Shortage truncates the CREW, it does not zero the whole source. 4 iron
+    // miners each eat 1 cured meat to make 1 iron; with only 3 cured meat
+    // banked, exactly 3 of them work this tick. Regression guard: the old
+    // all-or-nothing rule paid 0 iron here, so adding a 4th miner to a working
+    // 3-miner mine dropped output from 3/tick to 0/tick.
+    {
+        GameState g5; g5.init(); uint32_t t5 = 700; g5.settle(t5);
+        g5.buildings[B_IRON_MINE] = 1;         // unlock iron miner
+        g5.population = 4;
+        g5.craftablesUnlocked = true;
+        CHECK(g5.assignWorker(J_IRON_MINER, 4) == RC_OK, "4 iron miners assigned");
+        CHECK(g5.numGatherers() == 0, "no gatherers left to muddy the ledger");
+        g5.stores[R_CURED_MEAT] = 3 * FP;      // feeds only 3 of the 4 miners
+        g5.stores[R_IRON]       = 0;
+        t5 += INCOME_TICK_S; g5.settle(t5);    // exactly one income tick
+        CHECK(g5.stores[R_IRON] == 3 * FP,
+              "4 miners + 3 cured meat -> exactly 3 iron (partial crew, not 0)");
+        CHECK(g5.stores[R_CURED_MEAT] == 0,
+              "4 miners + 3 cured meat -> exactly 3 consumed, none stranded");
+    }
+    // Multi-input truncation: a charcutier burns 5 meat AND 5 wood per head, so
+    // the SCARCEST input sets the crew size. Meat feeds 6, wood feeds 3 -> 3.
+    {
+        GameState g5b; g5b.init(); uint32_t t5b = 800; g5b.settle(t5b);
+        g5b.buildings[B_SMOKEHOUSE] = 1;       // unlock charcutier
+        g5b.population = 4;
+        g5b.craftablesUnlocked = true;
+        CHECK(g5b.assignWorker(J_CHARCUTIER, 4) == RC_OK, "4 charcutiers assigned");
+        g5b.stores[R_MEAT]       = 30 * FP;    // feeds 6
+        g5b.stores[R_WOOD]       = 15 * FP;    // feeds 3  <- the binding input
+        g5b.stores[R_CURED_MEAT] = 0;
+        t5b += INCOME_TICK_S; g5b.settle(t5b);
+        CHECK(g5b.stores[R_CURED_MEAT] == 3 * FP,
+              "multi-input: scarcest input (wood, 3) caps the crew at 3");
+        CHECK(g5b.stores[R_MEAT] == 15 * FP && g5b.stores[R_WOOD] == 0,
+              "multi-input: 3 workers' worth of BOTH inputs consumed");
+    }
 
     printf("== [feedback 2] cost-insufficient build/craft pushes \"not enough X\" ==\n");
     // room.js build()/craft(): notify "not enough " + the first short cost key.
