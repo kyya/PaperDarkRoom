@@ -428,13 +428,29 @@ Result GameState::checkTraps(uint32_t now) {
     }
     stores[R_BAIT] -= baited * FP;
     cdTraps = now;
-    // "the traps contain " is an intro key, not a full sentence (see
-    // strings_zh.h "陷阱捕获到") — the actual catch has to follow as its own
-    // log line(s), one per distinct resource type this round, or the intro
-    // renders with nothing after it (the reported "陷阱捕获到XXX后面缺失" bug).
-    pushLog("the traps contain ");
-    for (int j = 0; j < 6; j++)
-        if (caught[j]) pushLog(TRAP_DROPS[j].msg);
+    // outside.js prints ONE sentence — "the traps contain X, Y and Z" — and
+    // "the traps contain " is only its intro key (strings_zh.h "陷阱捕获到"),
+    // never a standalone line. Emitting the intro and each catch as separate
+    // pushLog calls put the loot ABOVE its own intro in the newest-on-top log,
+    // so the whole catch travels as one COMPOUND key instead: intro key, then
+    // one drop key per resource type caught, joined by LOG_KEY_SEP for
+    // room_page logText() to split and translate.
+    // A drop that would push the key past LOG_KEY_MAX is left out rather than
+    // truncated mid-key (half a key tr()s to nothing) — the intro plus all six
+    // keys is 112 bytes, so only an all-six round drops its tail; the resources
+    // themselves are credited above either way.
+    char key[LOG_KEY_MAX];
+    size_t n = (size_t)snprintf(key, sizeof key, "%s", "the traps contain ");
+    for (int j = 0; j < 6; j++) {
+        if (!caught[j]) continue;
+        size_t len = strlen(TRAP_DROPS[j].msg);
+        if (n + 1 + len + 1 > sizeof key) break;
+        key[n++] = LOG_KEY_SEP;
+        memcpy(key + n, TRAP_DROPS[j].msg, len);
+        n += len;
+        key[n] = 0;
+    }
+    pushLog(key);
     return RC_OK;
 }
 

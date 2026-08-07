@@ -298,7 +298,27 @@ int wrapLineCount(const char* utf8, int w, int scale) {
 void logText(const LogEntry& e, char* out, size_t cap) {
     const char* zh = tr(e.enKey);
     char base[160];
-    if (e.hasArg && strcmp(e.enKey, "the fire is {0}") == 0) {
+    if (strchr(e.enKey, LOG_KEY_SEP)) {
+        // Compound key (game_state checkTraps): an intro key followed by one key
+        // per listed item. tr() each segment on its own — the table has no entry
+        // for the joined form — then re-join: the intro runs straight into the
+        // first item ("陷阱捕获到皮毛碎片") and the rest hang off the Chinese
+        // enumeration comma, standing in for upstream's "X, Y and Z".
+        char seg[LOG_KEY_MAX];
+        size_t o = 0;
+        int idx = 0;
+        for (const char* p = e.enKey; ; idx++) {
+            const char* q = strchr(p, LOG_KEY_SEP);
+            size_t len = q ? (size_t)(q - p) : strlen(p);
+            if (len >= sizeof(seg)) len = sizeof(seg) - 1;
+            memcpy(seg, p, len); seg[len] = 0;
+            int w = snprintf(base + o, sizeof(base) - o, "%s%s",
+                             idx > 1 ? "、" : "", tr(seg));
+            if (w > 0) o += (size_t)w;
+            if (!q || o >= sizeof(base)) break;
+            p = q + 1;
+        }
+    } else if (e.hasArg && strcmp(e.enKey, "the fire is {0}") == 0) {
         uint8_t idx = (e.arg >= 0 && e.arg < 5) ? (uint8_t)e.arg : 0;
         fmt1(base, sizeof(base), zh, tr(FIRE_TEXT[idx]));
     } else if (e.hasArg && strcmp(e.enKey, "the room is {0}") == 0) {

@@ -49,6 +49,14 @@ enum Result : uint8_t {
 // — e.g. repeatedly long-pressing a cost-disabled band no longer floods the
 // log with "not enough wood", it becomes one line ticking up to "...x3".
 constexpr int LOG_KEY_MAX = 96;
+// Joiner for a COMPOUND key — one entry whose text is several en_keys strung
+// together (game_state.cpp checkTraps: the "the traps contain " intro plus one
+// key per drop caught this round). Storing the pieces rather than a baked
+// sentence keeps the §8.3 glyph closure intact; room_page.cpp logText() splits
+// here and tr()s each segment. '|' is the joiner because no en_key in
+// strings_zh.h contains it and it needs no escaping in the toJson/fromJson
+// string codec (which only escapes '"' and '\\').
+constexpr char LOG_KEY_SEP = '|';
 struct LogEntry {
     char    enKey[LOG_KEY_MAX];
     int32_t arg;
