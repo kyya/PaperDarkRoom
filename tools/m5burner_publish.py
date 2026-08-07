@@ -64,8 +64,16 @@ WHICH ARTIFACT: the merged image, `dist/adarkroom-<version>-merged.bin`.
 Credentials come from the environment, never from the repo:
     M5BURNER_USER / M5BURNER_PWD   (or --user / --password to override)
 
+TOKEN CACHE: step 1's `m5_auth_token` is cached outside the repo, at
+~/.config/m5burner/token.json, so a normal run does not need the password at
+all — only M5BURNER_USER, to key the cache. The password is read on a cache
+miss (no file, different account, expired, or the server rejecting the cached
+token with 401/403) and is never written anywhere: the cache file holds the
+token, the account it belongs to, and its expiry, and nothing else.
+
 Usage:
-    export M5BURNER_USER=... M5BURNER_PWD=...
+    export M5BURNER_USER=...                 # always
+    export M5BURNER_PWD=...                  # first run / after expiry
     python tools/m5burner_publish.py --tag v0.15.0 --dry-run   # verify first
     python tools/m5burner_publish.py --tag v0.15.0
 
@@ -73,10 +81,12 @@ Requirements: Python 3.8+, `pip install requests`.
 """
 from __future__ import annotations
 import argparse
+import base64
 import json
 import os
 import re
 import sys
+import time
 from pathlib import Path
 
 try:
@@ -94,6 +104,66 @@ LOGIN_URL = "https://uiflow2.m5stack.com/api/v1/account/login"
 # in a merged image, absent in an app-only one -- see the WHICH ARTIFACT note.
 PART_TABLE_OFFSET = 0x8000
 PART_TABLE_MAGIC = b"\xaa\x50"
+
+# Outside the repo, deliberately: this file holds a live session token, and a
+# path under ROOT would sooner or later be `git add -A`'d into a public repo.
+TOKEN_CACHE = Path.home() / ".config" / "m5burner" / "token.json"
+# Treat a token as spent this long before its stated expiry, so a publish that
+# takes a few minutes cannot have it lapse halfway through the upload.
+TOKEN_SKEW_S = 300
+
+
+class AuthError(RuntimeError):
+    """The server rejected our credentials/token (401/403) — retry with a login."""
+
+
+def _token_expiry(token):
+    """`exp` (epoch seconds) out of a JWT payload, or None if it isn't one.
+
+    Decode only, never verify: the signature is the server's business. This
+    exists so an obviously-stale cache is skipped without a round trip; a token
+    that is not a JWT, or carries no exp, simply falls back to the 401 path.
+    """
+    try:
+        payload = token.split(".")[1]
+        payload += "=" * (-len(payload) % 4)
+        exp = json.loads(base64.urlsafe_b64decode(payload)).get("exp")
+        return int(exp) if exp else None
+    except Exception:
+        return None
+
+
+def load_cached_token(user):
+    """The cached token for `user`, or None if there is no usable one."""
+    try:
+        data = json.loads(TOKEN_CACHE.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if data.get("user") != user:
+        return None          # cache belongs to a different account
+    expires_at = data.get("expires_at")
+    if expires_at and time.time() > expires_at - TOKEN_SKEW_S:
+        return None
+    return data.get("token") or None
+
+
+def save_cached_token(user, token):
+    """Persist the token (never the password) so the next run can skip login."""
+    TOKEN_CACHE.parent.mkdir(parents=True, exist_ok=True)
+    TOKEN_CACHE.write_text(json.dumps({
+        "user": user,
+        "token": token,
+        "saved_at": int(time.time()),
+        "expires_at": _token_expiry(token),
+    }, indent=2), encoding="utf-8")
+    print(f"[auth] token cached -> {TOKEN_CACHE}")
+
+
+def clear_cached_token():
+    try:
+        TOKEN_CACHE.unlink()
+    except OSError:
+        pass
 
 
 def read_version(ini_path: Path) -> str:
@@ -204,13 +274,24 @@ class M5BurnerClient:
         token = self.session.cookies.get("m5_auth_token")
         if not token:
             raise RuntimeError("login returned 200 but no m5_auth_token cookie")
-        # The admin API lives on another host, where the cookie is not sent.
-        self.session.headers.update({"m5_auth_token": token})
+        self.use_token(token)
         print("[login] ok")
+        return token
+
+    def use_token(self, token):
+        """Authenticate with an already-issued token instead of credentials.
+
+        The admin API lives on another host, where the login cookie is not sent,
+        so the token rides as a header there — which is also the whole reason a
+        cached token is enough to skip step 1 entirely.
+        """
+        self.session.headers.update({"m5_auth_token": token})
 
     def list_firmware(self):
         url = f"{self.api_base_url}/api/admin/firmware"
         response = self.session.get(url, timeout=(10, 60))
+        if response.status_code in (401, 403):
+            raise AuthError(f"token rejected: HTTP {response.status_code}")
         if response.status_code != 200:
             raise RuntimeError(f"listing firmware failed: HTTP {response.status_code} - {response.text}")
         return response.json()
@@ -273,7 +354,11 @@ def main() -> int:
     parser.add_argument("--user", default=os.environ.get("M5BURNER_USER"),
                         help="M5Burner account email (default: $M5BURNER_USER)")
     parser.add_argument("--password", default=os.environ.get("M5BURNER_PWD"),
-                        help="M5Burner account password (default: $M5BURNER_PWD)")
+                        help="M5Burner account password (default: $M5BURNER_PWD). "
+                             "Only needed when there is no usable cached token.")
+    parser.add_argument("--no-token-cache", action="store_true",
+                        help=f"ignore and do not write {TOKEN_CACHE}; log in with "
+                             "credentials every time")
     parser.add_argument("--tag", help="release tag, e.g. v0.15.0; a leading 'v' is "
                                       "stripped so the M5Burner version reads 0.15.0. "
                                       "Default: -DCARD_VERSION from platformio.ini")
@@ -300,8 +385,8 @@ def main() -> int:
                         help="write a redacted HTTP request/response log here")
     args = parser.parse_args()
 
-    if not args.user or not args.password:
-        print("[auth] set M5BURNER_USER and M5BURNER_PWD (or pass --user/--password)")
+    if not args.user:
+        print("[auth] set M5BURNER_USER (or pass --user) — it keys the token cache")
         return 2
 
     version = (args.tag or read_version(ROOT / "platformio.ini")).lstrip("vV")
@@ -332,8 +417,28 @@ def main() -> int:
 
     client = M5BurnerClient(args.api_base_url, logger=logger)
     try:
-        client.login(args.user, args.password)
-        firmware = client.find_firmware(name=args.name, fid=args.fid)
+        # Cached token first; the credential login is the fallback, not the norm.
+        # find_firmware is the probe because it is the first call we have to make
+        # anyway — a stale token costs one extra round trip, never a wasted upload.
+        firmware = None
+        cached = None if args.no_token_cache else load_cached_token(args.user)
+        if cached:
+            client.use_token(cached)
+            try:
+                firmware = client.find_firmware(name=args.name, fid=args.fid)
+                print("[auth] using cached token")
+            except AuthError as e:
+                print(f"[auth] cached token unusable ({e}) — logging in again")
+                clear_cached_token()
+        if firmware is None:
+            if not args.password:
+                print("[auth] no usable cached token; set M5BURNER_PWD "
+                      "(or pass --password) to log in")
+                return 2
+            token = client.login(args.user, args.password)
+            if not args.no_token_cache:
+                save_cached_token(args.user, token)
+            firmware = client.find_firmware(name=args.name, fid=args.fid)
         fid = firmware["fid"]
         existing = [v.get("version") for v in firmware.get("versions") or []]
         print(f"[entry] {firmware.get('name')} fid={fid} category={firmware.get('category')} "
