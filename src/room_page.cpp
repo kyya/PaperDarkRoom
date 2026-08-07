@@ -27,8 +27,22 @@ extern M5Canvas canvas;
 using namespace adr;
 
 namespace {
-constexpr int SCALE     = 2;                 // 12px grid x2 = 24px CJK (log stream)
-constexpr int GLYPH     = 12 * SCALE;        // 24px line box (log)
+// Log-stream type size. These two belong to the LOG AND NOTHING ELSE — every
+// button, cost line and tab label sizes itself inside action_band / page_tabs —
+// so the names carry the LOG_ prefix to keep it that way.
+//
+// v0.16 first answered "生火间的日志字太小" by bumping the face one notch,
+// x2 -> x3. cjk_text.cpp renders the 12px bitmap face at an INTEGER scale (a
+// per-pixel fillRect blit), so there is no 28px or 30px step in between — the
+// next size up is 36px, and a 36px face fits only 6 entries in the band that
+// held 9 at 24px. On device that read as strictly worse: the log is a scrolling
+// history, and losing a third of it costs more than the legibility gained. So
+// the face stays at x2/24px, and the missing rows are bought a different way —
+// the button grid is BOTTOM-anchored and the log band grows into whatever
+// vertical space the grid does not need (see the budget below). Early game,
+// with one or two action rows, that is 20+ log lines instead of 9.
+constexpr int LOG_SCALE = 2;                 // 12px grid x2 = 24px CJK (log stream)
+constexpr int LOG_GLYPH = 12 * LOG_SCALE;    // 24px line box (log)
 constexpr int CONTENT_W = 540 - 2 * PAD;     // 492px usable (§9.2)
 constexpr int MAX_ROWS  = 5;                 // matches RoomPage::MAX_BANDS (rows)
 constexpr int MAX_COLS  = 2;                 // two-column button grid
@@ -56,10 +70,19 @@ constexpr int MAX_SLOTS = MAX_ROWS * MAX_COLS;   // 10 action cells / page
 // clears the cooldown bar only because the band is 96 (the full derivation lives
 // in action_band.cpp draw(); it is what pins this height at 96 rather than the
 // §9.3 floor of 80).
-// MAX_ROWS stays 5 and LOG_LINES stays 9 — unchanged from v0.10.0. 5 rows x 96 +
-// 4x10 gaps = 520, landing BTN_AREA_BOTTOM at 886 (< 928 status bar, 42px
-// margin — matches the original v0.10.0 number). Resource/inventory summary
-// lives on the Outside page's lower band.
+// MAX_ROWS stays 5, but v0.16 flips which END of the grid is fixed. Up to
+// v0.15 the grid grew DOWNWARD from a fixed BTN_TOP=366, so an early-game page
+// with one action row put a lone button under the log and left ~420px of white
+// between it and the status bar, while the log sat capped at 9 lines two thirds
+// of a screen above the empty space it could have used. Now BTN_AREA_BOTTOM is
+// the anchor and the grid hangs UP from it (btnTopForRows below): the buttons
+// always sit where the thumb already is, the amount of chrome that moves when a
+// craftable unlocks is one row rather than the whole page, and the log band
+// simply ends 20px above whatever row the grid starts on (logBandBottom /
+// logLines). A full 5-row grid reproduces the old layout to the pixel — top
+// 366, band 76..346, 9 lines — so the "grid is full" case is not a new design,
+// it is the same one, reached from the other side.
+// Resource/inventory summary lives on the Outside page's lower band.
 // v0.3.1 feedback 1 ("火堆熊熊燃烧 房间很热不应该常驻 原作也没有常驻"): the
 // persistent fire/temp state line that used to open this band (STATE_Y, 76..
 // 116) is gone — upstream never shows it as a fixed header either, only as a
@@ -67,29 +90,75 @@ constexpr int MAX_SLOTS = MAX_ROWS * MAX_COLS;   // 10 action cells / page
 // now push "the fire is {0}" / "the room is {0}" into the log on every
 // change). The log reclaims that band: it moves up to LOG_TOP=76. ------------
 constexpr int LOG_TOP   = page_tabs::CONTENT_TOP + 4;   // log stream top (76)
-constexpr int LOG_LINEH = 30;
-constexpr int LOG_LINES = 9;                 // 9 x 30 = 270px band -> ends 346,
-                                             // 20px clear of BTN_TOP
-constexpr int BTN_TOP   = 366;               // first action row top
+constexpr int LOG_LINEH = LOG_GLYPH + LOG_GLYPH / 4;    // 30 = 24px glyph + 6px
+                                             // leading (the 1.25 advance ratio
+                                             // this face has always used)
+constexpr int LOG_GAP   = 20;                // clear space between the log band's
+                                             // last line and the first button row
+// Log fade — the e-ink reproduction of upstream's notifyGradient. A Dark Room
+// runs a CSS gradient down its notification column so older messages dim toward
+// nothing; the 16-grey panel does the same with flat grey tiers (the bitmap face
+// draws solid, unantialiased strokes, so a tier is exactly the tone asked for).
+// Greys are explicit RGB565 rather than TFT_DARKGREY / TFT_LIGHTGREY: the canvas
+// is grayscale_8bit so the value collapses to its luma, and TFT_LIGHTGREY's ~210
+// is far too faint for a 24px glyph here. 0x4208 ~ luma 66 and 0x8410 ~ luma 132
+// are grey levels 4 and 8 of the panel's 16 — visibly apart, both still legible.
+// KNOWN TRADEOFF: how grey text GHOSTS under lut_fast is unmeasured, and this
+// band only ever pushes FAST (see pushLogBand). If it ghosts badly on device the
+// revert is one line — set every LOG_FADE entry to TFT_BLACK.
+//
+// On-device feedback ("虚化内容所占行数比例太高"): an even three-way split
+// across LOG_CAP=16 (8/4/4) read as HALF the log washed out, which is too much
+// of a 9-23 line band to spend on hard-to-read text. The gradient's real job is
+// signalling "these entries are about to fall out of the ring buffer", not
+// decorating the whole list — so only the tail actually near eviction fades now.
+constexpr uint16_t LOG_FADE[] = { TFT_BLACK, 0x4208, 0x8410 };
+constexpr int LOG_FADE_TIERS  = (int)(sizeof LOG_FADE / sizeof LOG_FADE[0]);
+constexpr int LOG_FADE_BLACK  = 12;          // newest 12 of the 16-entry cap stay
+                                             // solid black — 75% of the ring
+constexpr int LOG_FADE_STEP   = 2;           // remaining 4 split 2/2 (entries
+                                             // 13-14 dark grey, 15-16 light grey,
+                                             // the two about to be evicted)
 constexpr int ROOM_BTN_H = 96;               // long-press band (§9.3 floor is 80;
                                              // grown for the cost sub-row, see above)
 constexpr int BTN_GAP   = 10;                // vertical gap between rows
 // Two columns of 240px with a 12px gutter fill the 492px content width. Re-
 // measured for 变体 B (v0.14), where a priced cell's 36px title now has to share
 // its row with a right-aligned cost column instead of owning the full width:
-// 224px is usable (240 - 2*action_band::EDGE_PAD), and title + MID_GAP + the
-// widest cost entry must fit in it. Three craft titles and one Outside verb do
-// not and are auto-shrunk to 24px by the renderer's narrow-cell guard —
-// 狩猎小屋, 炼钢坊, 军械坊 here plus 查看陷阱 next door; every other cell keeps
-// its 36px title. Free cells (更多) have no cost column at all and simply centre.
+// 208px is usable (240 - 2*action_band::EDGE_PAD, which grew 8 -> 16 to stop the
+// titles crowding the rounded frame), and title + MID_GAP + the widest cost entry
+// must fit in it. Seven craft titles and one Outside verb do not and are
+// auto-shrunk to 24px by the renderer's narrow-cell guard — 狩猎小屋, 贸易站,
+// 制革屋, 熏肉房, 双肩包, 炼钢坊, 军械坊 here plus 查看陷阱 next door; every
+// other cell keeps its 36px title (the full arithmetic is in action_band.cpp).
+// Free cells (更多) have no cost column at all and simply centre.
 // The grid still needs no full-width exception. x < COL_MID picks the left
 // column (onLocalAction).
 constexpr int COL_GAP   = 12;
 constexpr int COL_W     = (CONTENT_W - COL_GAP) / 2;         // 240
 constexpr int COL_X0[MAX_COLS] = { PAD, PAD + COL_W + COL_GAP };   // {24, 276}
 constexpr int COL_MID   = 540 / 2;           // 270: x < MID => left column
-constexpr int BTN_AREA_BOTTOM = BTN_TOP + (MAX_ROWS - 1) * (ROOM_BTN_H + BTN_GAP)
-                                + ROOM_BTN_H;   // 886 (5 rows, clears status bar)
+// The grid's fixed edge (see the budget note above): 886 leaves the 928 status
+// bar a 42px margin, and a full MAX_ROWS grid (5*96 + 4*10 = 520) reaches back
+// up to 366 — the same first-row top the layout was hard-coded to before v0.16.
+constexpr int BTN_AREA_BOTTOM = 886;
+
+// ---- bottom-anchored derivations. `rows` is how many grid rows the CURRENT
+// page actually fills, so every number below moves with an unlock or a "更多"
+// page flip. All three are pure functions of rows/btnTop: the ONE stored copy of the
+// result is RoomPage::m_btnTop, written on the full-redraw path (see draw()) and
+// read by every partial-refresh path, so a cooldown push can never place a cell
+// against a top the screen is not actually showing.
+int btnTopForRows(int rows) {
+    if (rows < 1) rows = 1;                  // buildActions always yields >=1
+    return BTN_AREA_BOTTOM - (rows * ROOM_BTN_H + (rows - 1) * BTN_GAP);
+}
+// Where the log stream stops: LOG_GAP clear of the first button row.
+int logBandBottom(int btnTop) { return btnTop - LOG_GAP; }
+// How many whole 30px lines fit between LOG_TOP and that edge. 5 rows -> 346,
+// (346-76)/30 = 9, the pre-v0.16 count; 1 row -> 770, (770-76)/30 = 23. drawLog
+// only ever has LOG_CAP entries to show, so a tall band simply runs short.
+int logLines(int btnTop) { return (logBandBottom(btnTop) - LOG_TOP) / LOG_LINEH; }
 
 // Action codes carried in a Region param (uint8). 0..5 are the fixed verbs;
 // A_CRAFT_BASE+craftId means "build/craft that craftable". Craft ids run
@@ -154,22 +223,24 @@ uint32_t epochNow() {
     return e > 0 ? (uint32_t)e : 0;
 }
 
-pages::Rect buttonAreaRect() {
-    return pages::Rect{ 0, BTN_TOP - 2, 540, BTN_AREA_BOTTOM - (BTN_TOP - 2) };
+pages::Rect buttonAreaRect(int btnTop) {
+    return pages::Rect{ 0, btnTop - 2, 540, BTN_AREA_BOTTOM - (btnTop - 2) };
 }
 
 // The rect of grid cell (row, col) — the ONE description of where a button is.
 // paintButtons draws through it and pressRect flashes through it, so the frame
 // the player sees and the rect that inverts under a press cannot drift apart.
-pages::Rect cellRect(int row, int col) {
-    return pages::Rect{ COL_X0[col], BTN_TOP + row * (ROOM_BTN_H + BTN_GAP),
+// `btnTop` is the grid's live top (RoomPage::m_btnTop); both callers pass the
+// value the current screen was drawn from, never a freshly recomputed one.
+pages::Rect cellRect(int btnTop, int row, int col) {
+    return pages::Rect{ COL_X0[col], btnTop + row * (ROOM_BTN_H + BTN_GAP),
                         COL_W, ROOM_BTN_H };
 }
 
 // Count the lines cjk::drawWrapped would emit for `utf8` at width w — same
 // greedy CJK/space wrap, no drawing — so the log stream can pick how many
-// recent entries fit its 5-line band before painting (nothing spills onto the
-// buttons).
+// recent entries fit its band (logLines) before painting (nothing spills onto
+// the buttons).
 int wrapLineCount(const char* utf8, int w, int scale) {
     constexpr int MAX = 256;
     static uint32_t cps[MAX];
@@ -414,8 +485,12 @@ void labelFor(uint8_t code, int page, int numPages, char* out, size_t cap) {
 // the column from the press x (COL_MID). Batches of 7 real actions + a trailing
 // "more" cell once the full list exceeds MAX_SLOTS. *slotCountOut receives the
 // filled cell count; the return value is the ROW count (== region count).
+// *btnTopOut receives the bottom-anchored grid top this row count implies — the
+// single point where m_btnTop is produced, so the row bands handed to the pager
+// and the cells paintButtons draws are derived from the same number by
+// construction.
 int layoutBands(pages::Region* regionsOut, uint8_t* slotCodes, BandView* views,
-                int page, uint32_t now, int* slotCountOut) {
+                int page, uint32_t now, int* slotCountOut, int* btnTopOut) {
     uint8_t all[64];
     int total = buildActions(all, (int)sizeof(all));
 
@@ -448,52 +523,99 @@ int layoutBands(pages::Region* regionsOut, uint8_t* slotCodes, BandView* views,
         views[s].coolLeft  = (ch >= 0) ? g_game.cooldownLeft(ch, now) : 0;
     }
 
-    int rows = (slotCount + MAX_COLS - 1) / MAX_COLS;
+    int rows   = (slotCount + MAX_COLS - 1) / MAX_COLS;
+    int btnTop = btnTopForRows(rows);
     for (int r = 0; r < rows; r++) {
-        int top = BTN_TOP + r * (ROOM_BTN_H + BTN_GAP);
+        int top = btnTop + r * (ROOM_BTN_H + BTN_GAP);
         regionsOut[r].y0 = (uint16_t)top;
         regionsOut[r].y1 = (uint16_t)(top + ROOM_BTN_H);
         regionsOut[r].type = 1;                      // firmware-local
         regionsOut[r].param = (uint8_t)r;            // row; onLocalAction adds col from x
     }
     *slotCountOut = slotCount;
+    *btnTopOut    = btnTop;
     return rows;
 }
 
 // ---- drawing pieces --------------------------------------------------------
 
-// Log stream: newest on top, wrapped, filling the 11-line band. Picks how many
-// recent entries fit (via wrapLineCount) before drawing so nothing overruns.
-void drawLog(m5gfx::M5Canvas& c) {
+// Log stream: newest on top, wrapped, filling the band that ends LOG_GAP above
+// the grid. Picks how many recent entries fit (via wrapLineCount) before drawing
+// so nothing overruns. The budget is logLines(btnTop), so a page with few action
+// rows shows deeper history for free; with only LOG_CAP entries to draw, the
+// tallest bands still run out of log before they run out of room.
+//
+// Older lines fade to grey (LOG_FADE — upstream notifyGradient). The tier is
+// picked from the entry's AGE (its distance from the newest entry), never from
+// its screen row, so a message that wraps to three lines keeps ONE tone and the
+// gradient reads as "messages sinking into the dark" rather than a striped band.
+void drawLog(m5gfx::M5Canvas& c, int btnTop) {
+    const int budget = logLines(btnTop);
     int start = g_game.logCount;   // lowest index that still fits
     int usedLines = 0;
     for (int i = g_game.logCount - 1; i >= 0; i--) {
         char t[160]; logText(g_game.log[i], t, sizeof(t));
-        int lines = wrapLineCount(t, CONTENT_W, SCALE);
-        if (usedLines + lines > LOG_LINES) break;
+        int lines = wrapLineCount(t, CONTENT_W, LOG_SCALE);
+        if (usedLines + lines > budget) break;
         usedLines += lines;
         start = i;
     }
     int y = LOG_TOP;
     for (int i = g_game.logCount - 1; i >= start; i--) {
         char t[160]; logText(g_game.log[i], t, sizeof(t));
-        y = cjk::drawWrapped(c, PAD, y, CONTENT_W, t, SCALE, LOG_LINEH);
+        int age  = g_game.logCount - 1 - i;
+        int tier = (age < LOG_FADE_BLACK) ? 0 : 1 + (age - LOG_FADE_BLACK) / LOG_FADE_STEP;
+        if (tier >= LOG_FADE_TIERS) tier = LOG_FADE_TIERS - 1;
+        y = cjk::drawWrapped(c, PAD, y, CONTENT_W, t, LOG_SCALE, LOG_LINEH,
+                             LOG_FADE[tier]);
     }
 }
 
 // The log band's partial-refresh target (buttonAreaRect parity): the whole log
-// rect plus a 2px bleed. Used to surface a failed long-press's reason (v0.3.1
-// feedback 2) immediately, instead of waiting up to 1s for the next tick.
-pages::Rect logAreaRect() {
-    return pages::Rect{ 0, LOG_TOP - 2, 540, LOG_LINES * LOG_LINEH + 4 };
+// rect plus a 2px bleed. It runs to logBandBottom rather than to the last line
+// drawLog could fill, so the clear/repaint/push trio covers every pixel between
+// the header and the grid whatever the current line budget rounds to. Used to
+// surface a failed long-press's reason (v0.3.1 feedback 2) immediately, instead
+// of waiting up to 1s for the next tick.
+pages::Rect logAreaRect(int btnTop) {
+    return pages::Rect{ 0, LOG_TOP - 2, 540, logBandBottom(btnTop) - LOG_TOP + 4 };
 }
 
 // Clear the log rect and repaint it into `c` (for the partial-refresh path —
 // the surrounding full-page pixels already sit in the canvas).
-void repaintLog(m5gfx::M5Canvas& c) {
-    pages::Rect r = logAreaRect();
+void repaintLog(m5gfx::M5Canvas& c, int btnTop) {
+    pages::Rect r = logAreaRect(btnTop);
     c.fillRect(r.x, r.y, r.w, r.h, TFT_WHITE);
-    drawLog(c);
+    drawLog(c, btnTop);
+}
+
+// Ship the freshly repainted log band to the panel. This is the ONE exit for
+// every log-only update — tick()'s "only the log moved" path and onLocalAction's
+// immediate failure-reason line both come through here — so the two share a
+// single push policy instead of each inventing its own.
+//
+// ALWAYS FAST. A periodic "clean just this band with QUALITY" ration used to live
+// here (every 4th push) and it was WRONG — it is what the player reported as
+// "每隔一段时间整个屏幕全刷一下":
+//   * Panel_EPD's per-pixel diff compares values that carry the EPD MODE in the
+//     low bits, so a rect pushed under a DIFFERENT mode than the one already on
+//     the panel diffs as "everything changed": the whole clip rect is re-driven
+//     unconditionally. A local QUALITY push is therefore not a quiet touch-up of
+//     the changed glyphs — it is the entire band inverted by the eraser pass and
+//     then re-driven black/white over ~36 GC16 frames (~400ms).
+//   * The band is not small. Since the grid became bottom-anchored the log grows
+//     into whatever the button rows do not need — up to 698px of a 960px panel
+//     (73%). A "strip flash" at that size reads as a full-screen flash.
+//   * It also POISONS what follows: the rect keeps the quality mode marker, so the
+//     next whole-page epd_fast redraw sees a mode change over that region and
+//     re-drives it again (lut_fast inverts on its first two frames) — one ration
+//     buys two flashes.
+// The ghosting this band accrues is real, but it is settled where nobody is
+// looking, never mid-session: at sleep entry (pager::payGhostDebtIfDue) on
+// battery, and by the idle deep-clean (pager::idleDeepCleanIfDue) while on USB,
+// where the device never sleeps.
+void pushLogBand(int btnTop) {
+    pager::partialRefresh(logAreaRect(btnTop), pages::RefreshMode::FAST);
 }
 
 // Paint the whole button area (clears it first) from the given slot views,
@@ -502,11 +624,11 @@ void repaintLog(m5gfx::M5Canvas& c) {
 // a LEFT column and its costs, one entry per line, in a RIGHT column; a free one
 // (更多) centres its lone title. Both land the title on the SAME y, so a mixed
 // row is level — see action_band.h "LEFT TITLE / RIGHT COSTS".
-void paintButtons(m5gfx::M5Canvas& c, const BandView* views, int slotCount) {
-    pages::Rect r = buttonAreaRect();
+void paintButtons(m5gfx::M5Canvas& c, int btnTop, const BandView* views, int slotCount) {
+    pages::Rect r = buttonAreaRect(btnTop);
     c.fillRect(r.x, r.y, r.w, r.h, TFT_WHITE);
     for (int s = 0; s < slotCount; s++) {
-        action_band::draw(c, cellRect(s / MAX_COLS, s % MAX_COLS),
+        action_band::draw(c, cellRect(btnTop, s / MAX_COLS, s % MAX_COLS),
                           views[s].label,
                           views[s].hasCost ? views[s].cost : nullptr,
                           views[s].enabled,
@@ -514,18 +636,24 @@ void paintButtons(m5gfx::M5Canvas& c, const BandView* views, int slotCount) {
     }
 }
 
-// Content signature — a hash of every live value that alters a painted number or
-// label (fire/temp, builder level, population, log count, unlock flags, whole
-// resource units, buildings). tick() compares it each second to decide a full
-// redraw; onLocalAction re-baselines it right after its own showPage so the same
-// action's state change doesn't force a SECOND full redraw on the next tick (see
-// onLocalAction). Reads only g_game, never mutates.
+// Content signature — a hash of every live value OUTSIDE THE LOG that alters a
+// painted number or label (fire/temp, builder level, population, unlock flags,
+// whole resource units, buildings). tick() compares it each second to decide a
+// full redraw; onLocalAction re-baselines it right after its own showPage so the
+// same action's state change doesn't force a SECOND full redraw on the next tick
+// (see onLocalAction). Reads only g_game, never mutates.
+//
+// The log is DELIBERATELY not in here (it used to contribute g_game.logCount).
+// The log band is the busiest thing on the page and the only one that can repaint
+// alone, so tick() tracks it through logSig() and repaints just its strip — a new
+// event line no longer drags the whole 540x960 page (and its ghosting) along with
+// it. See tick().
 uint32_t contentSig() {
     uint32_t sig = 2166136261u;
     auto mix = [&](uint32_t v) { sig = (sig ^ v) * 16777619u; };
     mix(g_game.fire); mix(g_game.temp);
     mix((uint32_t)(uint8_t)g_game.builderLevel);
-    mix(g_game.population); mix(g_game.logCount);
+    mix(g_game.population);
     mix((g_game.outsideUnlocked ? 1u : 0u) | (g_game.craftablesUnlocked ? 2u : 0u)
         | (g_game.woodSeen ? 4u : 0u));
     for (int i = 0; i < RES_COUNT; i++) mix((uint32_t)g_game.whole((uint8_t)i));
@@ -533,17 +661,44 @@ uint32_t contentSig() {
     return sig;
 }
 
+// Log signature — a hash of exactly what drawLog would print, held separately
+// from contentSig so tick() can tell "only the log moved" (repaint one strip)
+// from "the world moved" (redraw the page).
+//
+// It hashes the ring's CONTENTS, not g_game.logCount, because logCount is not a
+// change detector at all: game_state::pushLog drops the oldest entry and pins
+// logCount at LOG_CAP once the ring saturates, and a repeat of the newest line
+// collapses into that entry's counter ("...x3") without touching logCount even
+// before saturation. A logCount baseline therefore goes permanently blind a
+// handful of lines into a session — which is why the old contentSig could miss a
+// log change outright whenever no resource happened to move with it.
+uint32_t logSig() {
+    uint32_t sig = 2166136261u;
+    auto mix = [&](uint32_t v) { sig = (sig ^ v) * 16777619u; };
+    mix(g_game.logCount);
+    for (int i = 0; i < g_game.logCount; i++) {
+        const LogEntry& e = g_game.log[i];
+        for (const char* p = e.enKey; *p; p++) mix((uint32_t)(uint8_t)*p);
+        mix((uint32_t)e.arg);
+        mix((uint32_t)e.count | (e.hasArg ? 0x100u : 0u));
+    }
+    return sig;
+}
+
 // Bounding rect (2px bleed) of the grid cells named in `mask` (bit s = slot s):
 // each cell is COL_X0[col], its row top, COL_W x ROOM_BTN_H. The cooldown tick
-// pushes just this union — never the 540x442 button area — so only the cell whose
+// pushes just this union — never the whole button area — so only the cell whose
 // progress bar is draining (Room has at most one, the fire verb) flips on screen.
+// `btnTop` must be the top the screen was last DRAWN from (m_btnTop), not one
+// recomputed here: a row-count change never reaches this path (it moves
+// contentSig, which redraws the page and returns before any cooldown push).
 // Empty mask -> zero rect (the caller gates on mask, so an empty rect never ships).
-pages::Rect coolingRect(uint16_t mask) {
-    int x0 = 540, y0 = BTN_AREA_BOTTOM, x1 = 0, y1 = BTN_TOP;
+pages::Rect coolingRect(int btnTop, uint16_t mask) {
+    int x0 = 540, y0 = BTN_AREA_BOTTOM, x1 = 0, y1 = btnTop;
     for (int s = 0; s < MAX_SLOTS; s++) {
         if (!(mask & (1u << s))) continue;
         int col = s % MAX_COLS;
-        int top = BTN_TOP + (s / MAX_COLS) * (ROOM_BTN_H + BTN_GAP);
+        int top = btnTop + (s / MAX_COLS) * (ROOM_BTN_H + BTN_GAP);
         if (COL_X0[col] < x0)         x0 = COL_X0[col];
         if (COL_X0[col] + COL_W > x1) x1 = COL_X0[col] + COL_W;
         if (top < y0)                 y0 = top;
@@ -571,17 +726,25 @@ pages::Rect RoomPage::pressRect(const pages::Region& rg, int x, int y) const {
     int col  = (x < COL_MID) ? 0 : 1;
     int slot = row * MAX_COLS + col;
     if (slot < 0 || slot >= m_slotCount) return pages::Rect{ 0, rg.y0, 0, 0 };
-    return cellRect(row, col);          // the exact rect paintButtons framed
+    return cellRect(m_btnTop, row, col);   // the exact rect paintButtons framed
 }
 
+// Full-page paint, and the ONLY writer of m_btnTop — every partial path reads
+// the value this left behind, so it is also the only place the log band's height
+// can change. layoutBands therefore runs FIRST, before a single pixel is laid
+// down: it is what settles the row count, and the log below it cannot pick a
+// line budget until the grid has claimed its share of the column. (Running it
+// first also means a craftUnlocked latch fired from craftOfferable pushes its
+// availableMsg into the log in time for THIS frame to show it, instead of one
+// tick later.)
 bool RoomPage::draw(m5gfx::M5Canvas& c) {
     c.fillSprite(TFT_WHITE);
     page_tabs::draw(c, 0);           // shared tab header, Room active
-    drawLog(c);                      // log stream, reflowed up into the header gap
     BandView views[MAX_SLOTS];
     m_regionCount = layoutBands(m_regions, m_slotCodes, views, m_page, epochNow(),
-                                &m_slotCount);
-    paintButtons(c, views, m_slotCount);
+                                &m_slotCount, &m_btnTop);
+    drawLog(c, m_btnTop);            // log stream, from the header gap down to the grid
+    paintButtons(c, m_btnTop, views, m_slotCount);
     return true;
 }
 
@@ -645,44 +808,87 @@ void RoomPage::onLocalAction(uint8_t param, int x, int y) {
         M5.Speaker.tone(1800, 80);
         g_game.save();
         pager::showPage(pager::currentRingIndex(), false);
-        m_lastSig = contentSig();
+        m_lastSig    = contentSig();
+        m_lastLogSig = logSig();     // the full redraw repainted the log too
     } else if (r == RC_ERR_COST || r == RC_ERR_COLD) {
         M5.Speaker.tone(600, 120);
-        repaintLog(canvas);
-        pager::partialRefresh(logAreaRect(), pages::RefreshMode::FAST);
+        // m_btnTop, not a fresh layout: a rejected action changes no row count,
+        // and the band being repainted is the one already on the panel.
+        repaintLog(canvas, m_btnTop);
+        pushLogBand(m_btnTop);       // same single FAST exit as tick's
         // The engine already pushed the reason (game_state lightFire/stokeFire/
-        // makeCraftable) and the partial above already put it on screen, so sync the
-        // tick baseline to it. Without this the +1 logCount makes the next tick see
-        // contentSig() != m_lastSig and run a whole redundant full-page showPage.
-        // That showPage would not even visibly re-flash the log — the M5GFX Panel_EPD
-        // driver diffs per-pixel (task_update compares _step_framebuf vs _buf, only a
-        // changed pixel gets a drive step), so the already-drawn line is not re-driven
+        // makeCraftable) and the partial above already put it on screen, so sync BOTH
+        // tick baselines to it. Without the log one the next tick would see
+        // logSig() != m_lastLogSig and repaint + re-push the very band we just
+        // pushed — a second flash of the same unchanged pixels, and one more slab of
+        // ghosting debt, for nothing. contentSig() is
+        // re-synced for symmetry with the RC_OK branch: a rejected action moves
+        // nothing outside the log, so this is a no-op today, but it keeps the two
+        // baselines from drifting if the engine ever starts touching state on a
+        // rejection.
+        //
+        // (What a redundant showPage costs, for the record: it would NOT visibly
+        // re-flash the log — the M5GFX Panel_EPD driver diffs per-pixel, task_update
+        // compares _step_framebuf vs _buf and only a changed pixel gets a drive step
         // — but it still burns a full 540x960 draw() + a full-panel scanline sweep +
-        // status-bar rebuild for nothing. (Same reason a SMALLER push never saves
+        // status-bar rebuild for nothing. Same reason a SMALLER push never saves
         // flicker: shrinking the rect changes no driven pixels. Do not reintroduce a
         // "narrow the rect / point-refresh to reduce flicker" design — it was tried
-        // in 0.5.4 and reverted once the driver diff was confirmed.)
-        m_lastSig = contentSig();
+        // in 0.5.4 and reverted once the driver diff was confirmed.
+        // IMPORTANT LIMIT on that diff, learned the hard way (see pushLogBand): it
+        // only holds while the EPD MODE STAYS THE SAME. The compared byte carries the
+        // mode in its low bits, so a push under a different mode than the panel last
+        // saw over that area diffs as all-changed and re-drives the ENTIRE clip rect,
+        // unchanged pixels included. "Unchanged pixels are free" is a same-mode rule,
+        // and this branch stays free only because everything here pushes epd_fast.)
+        m_lastSig    = contentSig();
+        m_lastLogSig = logSig();
     } else {
         M5.Speaker.tone(600, 120);   // cooldown / locked / max — unchanged, silent
     }
 }
 
-// Time axis (awake only). Settle the economy each second, then repaint what
-// changed: a content change (fire/temp/stores/log/unlocks — which also flips a
-// button's available/dashed state) redraws the whole page. Otherwise, while an
-// action cools its bar drains — so paint every button into the canvas as before
-// but push ONLY the cooling cell(s) (coolingRect), and on the tick a cooldown
-// hits zero push just the cell that JUST cleared. Both use FASTEST (DU), never
-// QUALITY: a full-area grayscale wipe to chase the bar/dashed-frame ghost is
-// exactly the "jarring when it fires while the user is looking" flash (pager.cpp)
-// the user reported as a big black block. That ghost is instead cleaned at sleep
-// entry by pager::payGhostDebtIfDue, when nobody is watching. onLocalAction
-// re-baselines m_lastSig after its own showPage, so a press no longer forces a
-// second full redraw here. Mirrors the outside_page cadence.
+// Time axis (awake only). Settle the economy each second, then repaint the
+// SMALLEST region that actually changed. Three tiers, cheapest last:
+//
+//   1. A content change (fire/temp/stores/unlocks — which also flips a button's
+//      available/dashed state) redraws the whole page.
+//   2. Otherwise a LOG-ONLY change repaints just the log strip (repaintLog +
+//      pushLogBand). This tier is why contentSig() no longer carries the log: an
+//      event stream used to make every single line a full-page epd_fast redraw,
+//      so the buttons, tabs and status bar all sat there collecting ghosting they
+//      had no reason to collect — the "生火间日志区残影严重" report. A page-wide
+//      redraw is now reserved for a page-wide change, and the log strip pays only
+//      for itself. Its own ghosting is never cleaned in place (a local QUALITY push
+//      re-drives the whole band — see pushLogBand); it is settled off-screen by
+//      pager's sleep-entry / USB-idle deep-cleans.
+//   3. While an action cools its bar drains — paint every button into the canvas
+//      as before but push ONLY the cell(s) whose bar actually MOVED.
+//
+// Tiers 2 and 3 are not exclusive: a second can both log a line and move a bar,
+// and each pushes its own rect. Tier 1 subsumes both and returns early.
+//
+// The tick still runs every second, but a push no longer does: the bar is
+// quantized to action_band::BAR_LEVELS steps, so most seconds redraw the cell
+// identically and pushing them was pure ghosting for no visible change. A cell
+// is pushed only when its quantized level differs from the one this tick's
+// predecessor left on screen — which is also exactly how the "cooldown just hit
+// zero" repaint (level >0 -> 0, the cell losing its bar and its dashed frame)
+// still ships. For the 60s traps cooldown that is 16 pushes instead of 60.
+//
+// Those pushes are FAST (GC16-lite), never QUALITY: a full-area grayscale wipe to
+// chase the bar/dashed-frame ghost is exactly the "jarring when it fires while
+// the user is looking" flash (pager.cpp) the user reported as a big black block.
+// FAST charges pager's s_fastCount, so the ghost it leaves is on the books and
+// gets cleaned at sleep entry by pager::payGhostDebtIfDue, when nobody is
+// watching. onLocalAction re-baselines m_lastSig after its own showPage, so a
+// press no longer forces a second full redraw here. Mirrors the outside_page
+// cadence.
 void RoomPage::tick(uint32_t nowMs) {
-    static uint32_t s_lastTick     = 0;
-    static uint16_t s_lastCoolMask = 0;   // cooling cells the previous tick pushed
+    static uint32_t s_lastTick = 0;
+    // Quantized bar level per slot as the screen currently shows it — the
+    // baseline a push is decided against. Zero = that cell has no bar on screen.
+    static uint8_t  s_lastLevel[MAX_SLOTS] = { 0 };
 
     if (s_lastTick != 0 && nowMs - s_lastTick < 1000) return;
     s_lastTick = nowMs;
@@ -690,34 +896,58 @@ void RoomPage::tick(uint32_t nowMs) {
     uint32_t now = epochNow();
     g_game.settle(now);
 
-    uint32_t sig = contentSig();
+    uint32_t sig  = contentSig();
+    uint32_t lsig = logSig();
 
-    // Which drawn slots carry a live cooldown right now (bit s = slot s) — only
-    // these cells change on a cooldown tick (a draining bar in one grid cell).
-    uint16_t coolMask = 0;
+    // Quantized bar level of every drawn slot right now — the SAME expression
+    // action_band::draw uses to pick the fill width, so "level unchanged" really
+    // does mean "the cell would be repainted pixel-identically".
+    uint8_t level[MAX_SLOTS] = { 0 };
     for (int s = 0; s < m_slotCount; s++) {
         int ch, tot; cooldownFor(m_slotCodes[s], ch, tot);
-        if (ch >= 0 && g_game.cooldownLeft(ch, now) > 0)
-            coolMask |= (uint16_t)(1u << s);
+        if (ch < 0) continue;
+        level[s] = (uint8_t)action_band::barLevel(g_game.cooldownLeft(ch, now), tot);
     }
 
     if (sig != m_lastSig) {
         m_lastSig = sig;
         pager::showPage(pager::currentRingIndex(), false);   // recomputes bands
-        s_lastCoolMask = coolMask;
+        // A full redraw repaints the log band as part of the page, so re-baseline
+        // the log too — otherwise the tier-2 branch below would repaint and push
+        // that same strip again on the very next tick.
+        m_lastLogSig = lsig;
+        // The full redraw just put THIS tick's levels on screen; re-baseline or the
+        // next tick would read a stale level and push a cell for nothing.
+        memcpy(s_lastLevel, level, sizeof(s_lastLevel));
         return;
     }
 
-    if (coolMask || s_lastCoolMask) {
-        BandView views[MAX_SLOTS];
-        m_regionCount = layoutBands(m_regions, m_slotCodes, views, m_page, now,
-                                    &m_slotCount);
-        paintButtons(canvas, views, m_slotCount);
-        // Union of the cells cooling now and the ones that just cleared this tick
-        // (were cooling last tick) — never the whole button area. FASTEST; the
-        // ghost cleanup is deferred to sleep (see the function note).
-        pager::partialRefresh(coolingRect((uint16_t)(coolMask | s_lastCoolMask)),
-                              pages::RefreshMode::FASTEST);
+    // Tier 2: nothing outside the log moved, so repaint the strip alone. Reaching
+    // here means contentSig() is unchanged, hence the offered action set — and so
+    // the row count and m_btnTop — are exactly what the last full draw() left on
+    // screen. Both the clear and the push therefore use m_btnTop as-is.
+    if (lsig != m_lastLogSig) {
+        m_lastLogSig = lsig;
+        repaintLog(canvas, m_btnTop);
+        pushLogBand(m_btnTop);
     }
-    s_lastCoolMask = coolMask;
+
+    uint16_t pushMask = 0;
+    for (int s = 0; s < MAX_SLOTS; s++)
+        if (level[s] != s_lastLevel[s]) pushMask |= (uint16_t)(1u << s);
+
+    if (pushMask) {
+        BandView views[MAX_SLOTS];
+        // Re-layout only to refresh the bar values; the row count cannot have moved
+        // (tier 1 returned above), so this rewrites m_btnTop with the same number
+        // draw() put there — and paintButtons/coolingRect below read it back rather
+        // than each deriving a top of their own.
+        m_regionCount = layoutBands(m_regions, m_slotCodes, views, m_page, now,
+                                    &m_slotCount, &m_btnTop);
+        paintButtons(canvas, m_btnTop, views, m_slotCount);
+        // Only the cells whose level moved — never the whole button area. FAST; the
+        // ghost cleanup is deferred to sleep (see the function note).
+        pager::partialRefresh(coolingRect(m_btnTop, pushMask), pages::RefreshMode::FAST);
+    }
+    memcpy(s_lastLevel, level, sizeof(s_lastLevel));
 }

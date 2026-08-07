@@ -668,7 +668,7 @@ int main() {
         for (int i = 0; i < JOB_COUNT; i++) gs.workers[i] = 9999;
         gs.population = 65535;
         gs.seen = 0xFFFFFFFF; gs.craftShown = 0xFFFFFFFF;
-        // 8 DISTINCT long entries so the log ring is genuinely full (pushLog
+        // LOG_CAP DISTINCT long entries so the log ring is genuinely full (pushLog
         // collapses repeats of the newest key, so identical pushes wouldn't
         // stress it) — an honest worst case for the byte measurement.
         for (int i = 0; i < LOG_CAP; i++) {
