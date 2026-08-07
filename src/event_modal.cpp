@@ -8,9 +8,14 @@
 // CJK face (§8.3 glyph-closure iron law); layout obeys §9 (title 36px, narrative
 // 24px, <=20 汉字/行, >=80px long-press bands, content clears y=928). The choice
 // bands are the shared action_band (36px label over a 24px cost line, v0.12).
+//
+// v0.17: each of the 13 events carries an illustration (event_art_data.h) drawn
+// between the title rule and the narrative — see the ART_/NARR_TOP block below
+// for how big it is allowed to be and why.
 #include "event_modal.h"
 #include "action_band.h"         // the app-wide button band (shared with every page)
 #include "event_engine.h"        // events:: queries/commands (+ game_data RES_KEY)
+#include "event_art_data.h"      // EVENT_ART[] — this is its ONE includer
 #include "game_state.h"          // adr::Result, GameState (save)
 #include "cjk_text.h"            // cjk::drawText/drawWrapped/textWidth, tr()
 #include "status_bar.h"
@@ -31,12 +36,44 @@ constexpr int CONTENT_W   = 540 - 2 * PAD;      // 492 usable (§9.2)
 constexpr int SCALE_TITLE = 3;                  // 12px grid x3 = 36px title
 constexpr int SCALE_BODY  = 2;                  // 12px grid x2 = 24px narrative
 
-// Vertical budget: title band up top, a rule, the narrative reflowing below it,
-// and the button column bottom-anchored so the last band clears the status bar.
+// Vertical budget: title band up top, a rule, the event illustration, the
+// narrative reflowing below it, and the button column bottom-anchored so the
+// last band clears the status bar.
 constexpr int TITLE_Y   = 20;                   // 36px title -> [20, 56]
 constexpr int RULE_Y    = 72;                   // 2px separator under the title
-constexpr int NARR_TOP  = 92;                   // narrative first line box top
+constexpr int ART_X     = PAD;                  // flush with the rule and the bands
+constexpr int ART_Y     = 88;                   // 14px of air under the 2px rule
+constexpr int ART_GAP   = 16;                   // air between the art and the text
+constexpr int NARR_TOP  = ART_Y + EVENT_ART_H + ART_GAP;   // 88+276+16 = 380
 constexpr int NARR_LINEH = 34;                  // 24px glyph + 10 leading
+
+// ---- why the art is 492x276 ------------------------------------------------
+// The source plates are 1376x768 (aspect 1.792). Width is the easy axis: the art
+// takes the full CONTENT_W column at ART_X == PAD, so it lines up pixel-exact
+// with the title rule above it and the choice bands below it — 492px, no side
+// margin of its own. At the source aspect that wants 492/1.792 = 274.6px of
+// height; 276 is the nearest even row count (4bpp packs two pixels per byte, and
+// an even height keeps the preview/packing arithmetic boring), a 0.5% vertical
+// stretch that nobody can see.
+//
+// Height is the axis with a real ceiling, so it was checked against every scene
+// rather than eyeballed. Replaying cjk::drawWrapped's exact greedy wrap over the
+// official zh translation of all 37 scenes in events_data.h, at CONTENT_W=492 /
+// SCALE_BODY=2 / NARR_LINEH=34, the narrative is at most 3 lines (102px). The
+// button column is bottom-anchored at BTN_BOTTOM, so more choices means a lower
+// ceiling for the text: 4 bands (the worst case in the game — The Nomad's three
+// buys plus goodbye) put btnTop at 912 - (4*84 + 3*12) = 540.
+//
+// The Nomad is therefore the binding constraint, and it is also a 3-line scene:
+//   narrative bottom = NARR_TOP + 3*34 = 380 + 102 = 482
+//   button column top                                = 540
+//   slack                                            =  58px
+// Every other scene has >=160px. 58px is ~1.7 spare lines, which is the margin a
+// future retranslation gets to spend before this needs revisiting. Growing the
+// art is what eats that margin, and at 492 wide the source aspect has already
+// capped the height at 276 anyway — a taller plate would mean cropping the sides
+// of the drawing, which is not worth 58px.
+// -----------------------------------------------------------------------------
 
 constexpr int BTN_X      = PAD;                 // full-width single column
 constexpr int BTN_W      = CONTENT_W;           // 492
@@ -117,12 +154,79 @@ void drawButton(m5gfx::M5Canvas& c, int i, int n) {
                       hasCost ? cost : nullptr, events::btnAvailable(i), 0, 0);
 }
 
-// Compose the whole panel into the shared canvas (no push).
-void render() {
-    canvas.fillSprite(TFT_WHITE);
-    const char* title = tr(events::eventTitleKey());
-    if (title) cjk::drawText(canvas, PAD, TITLE_Y, title, SCALE_TITLE);
-    canvas.fillRect(PAD, RULE_Y, CONTENT_W, 2, TFT_BLACK);
+static_assert(sizeof(EVENT_ART) / sizeof(EVENT_ART[0]) == (size_t)adr::EVENT_COUNT,
+              "event art table must have one entry per adr::EventId");
+
+// Blit event `eventId`'s illustration into the canvas at (ART_X, ART_Y).
+//
+// The stored form is RLE over a 4bpp pixel stream (format in event_art_data.h),
+// and both layers are unpacked in ONE forward pass straight into the canvas —
+// no intermediate buffer. An 8bpp copy of a plate would be 492*276 = 133KB of
+// PSRAM to allocate, memset and free on every event just to memcpy it away
+// again; there is no reason to touch the heap when the destination rows are
+// already sitting there. The canvas is grayscale_8bit (main.cpp), i.e. one byte
+// of luma per pixel with a row stride of canvas.width(), so a nibble expands
+// with a *17 (15 -> 255 paper white, 0 -> ink black) and lands directly.
+//
+// The cursor is kept in PACKED bytes: `bx` counts byte-pairs across the row and
+// wraps into the next canvas row at rowPack, so a single run can span rows the
+// way it does in the stream. A missing plate (nullptr / out-of-range id) just
+// leaves the area white — the modal still works, it is only unillustrated.
+void drawArt(int eventId) {
+    if (eventId < 0 || eventId >= (int)adr::EVENT_COUNT) return;
+    const uint8_t* p = EVENT_ART[eventId];
+    if (!p) return;
+    uint8_t* buf = (uint8_t*)canvas.getBuffer();
+    if (!buf) return;
+
+    const int stride  = canvas.width();
+    const int rowPack = EVENT_ART_W / 2;        // 246 packed bytes per row
+    uint8_t* row = buf + (size_t)ART_Y * stride + ART_X;
+    int bx = 0, by = 0;
+    while (by < EVENT_ART_H) {
+        uint8_t head = *p++;
+        const uint8_t* lit = nullptr;
+        uint8_t val = 0;
+        int n;
+        if (head == 0) { n = *p++; lit = p; p += n; }   // literal packet
+        else           { n = head; val = *p++; }        // run packet
+        for (int i = 0; i < n; i++) {
+            uint8_t b = lit ? lit[i] : val;
+            row[bx * 2]     = (uint8_t)((b >> 4) * 17);
+            row[bx * 2 + 1] = (uint8_t)((b & 0x0F) * 17);
+            if (++bx == rowPack) {
+                bx = 0;
+                if (++by == EVENT_ART_H) return;        // last row consumed
+                row += stride;
+            }
+        }
+    }
+}
+
+// Compose the panel into the shared canvas (no push).
+//
+// `full` distinguishes the two callers. show() passes true: clear everything and
+// paint the header, the rule and the illustration as well. repaint() passes
+// false, and then ONLY the rows below the art are cleared and redrawn. That is
+// not just a speed trick — the title is per-EVENT (events::eventTitleKey), so
+// nothing above NARR_TOP can change while an event is on screen, and leaving the
+// decoded plate untouched in the canvas is what lets the FAST same-scene repaint
+// (a repeat trade) stay quiet: the panel's per-pixel diff sees an identical art
+// region and drives none of it. A full fillSprite here would blank the plate and
+// then have to re-drive all 492x276 of it on every single trade.
+void render(bool full) {
+    if (full) {
+        canvas.fillSprite(TFT_WHITE);
+        const char* title = tr(events::eventTitleKey());
+        if (title) cjk::drawText(canvas, PAD, TITLE_Y, title, SCALE_TITLE);
+        canvas.fillRect(PAD, RULE_Y, CONTENT_W, 2, TFT_BLACK);
+        drawArt(events::currentEventId());
+    } else {
+        // Everything the narrative or the choice bands could occupy. The status
+        // bar clears its own band, so running to the canvas bottom is harmless.
+        canvas.fillRect(0, NARR_TOP, canvas.width(), canvas.height() - NARR_TOP,
+                        TFT_WHITE);
+    }
 
     int y = NARR_TOP;
     int nt = events::sceneTextCount();
@@ -147,7 +251,7 @@ void repaint() {
     int sc = events::currentScene();
     bool sceneChanged = (sc != s_scene);
     s_scene = sc;
-    render();
+    render(false);   // header + illustration stay as show() left them
     auto& disp = M5.Display;
     disp.setEpdMode(sceneChanged ? epd_mode_t::epd_quality : epd_mode_t::epd_fast);
     canvas.pushSprite(0, 0);
@@ -173,7 +277,7 @@ void show(uint32_t nowMs) {
     s_scene  = events::currentScene();
     s_openMs = nowMs;
     s_lastMs = nowMs;
-    render();
+    render(true);
     auto& disp = M5.Display;
     disp.setEpdMode(epd_mode_t::epd_quality);   // one deliberate flash on entry
     canvas.pushSprite(0, 0);

@@ -12,3 +12,10 @@ __pycache__/
 *.log
 *.tmp
 dist/
+
+# Event-illustration working directory: the prompt sheet, the 1376x768 source
+# plates and the greyscale previews (~20MB). tools/gen_event_art.py bakes them
+# into src/event_art_data.h, and THAT is what ships — nothing at runtime reads
+# the originals, so they stay out of the repo.
+docs/event-art/
+docs/event-art-prompts.html
