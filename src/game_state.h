@@ -56,7 +56,14 @@ struct LogEntry {
     uint8_t count;    // 1 for a fresh entry; capped at 99
 };
 
-constexpr int   LOG_CAP    = 8;
+// 8 -> 16 (v0.16): the bottom-anchored button grid gave the log band up to 23
+// lines early game, so an 8-entry ring ran out of history long before it ran out
+// of room — the opposite of upstream, whose notification column scrolls a deep
+// backlog. No SAVE_VER bump: toJson writes the ring as a variable-length "log"
+// array and fromJson reads entries until the array closes OR the cap is hit, so
+// an 8-entry save loads into a 16-slot ring untouched (and a 16-entry save read
+// by older firmware simply truncates at 8).
+constexpr int   LOG_CAP    = 16;
 constexpr int   SAVE_VER   = 3;    // v2 adds the random-event fields (nextEventAt,
                                    // delayed-echo slot); v3 adds the craft-unlock
                                    // bitsets (seen / craftShown). v1 & v2 saves
@@ -159,7 +166,7 @@ public:
     // ---- runtime only — deliberately NOT persisted ----
     // Bit j set while job j has already been TOLD about (its inputs could not
     // feed the whole crew). The idle notice fires on TRANSITION only: a 10s
-    // production tick that logged every idle tick would bury the 8-line ring and
+    // production tick that logged every idle tick would bury the log ring and
     // thrash the e-ink, and the idle HEADCOUNT changing while still short is
     // deliberately silent too (a wobbling supply chain must not re-announce).
     // Not written by toJson / not read by fromJson and no SAVE_VER bump — the

@@ -1,4 +1,5 @@
 #include "pager.h"
+#include "action_band.h"   // CORNER_R — the press flash masks to the drawn button's arcs
 #include "frame_store.h"
 #include "status_bar.h"
 #include "page.h"
@@ -19,16 +20,36 @@ extern M5Canvas canvas;   // main.cpp owns the full-screen sprite
 namespace pager {
 
 // The full (epd_quality) refresh flashes the whole panel black — jarring when
-// it fires while the user is looking. Policy: every visible redraw (background
-// push AND user page turn) is epd_fast; the ghosting debt they accumulate is
-// normally paid off at SLEEP ENTRY (payGhostDebtIfDue) — a quality redraw of
-// the current page right before timerSleep, when nobody is watching. Escape
-// valve: a marathon interactive session that piles past HIGH_WATER fast
-// refreshes without sleeping pays on the next turn, so ghosting can't grow
-// unbounded. Boot restore also uses quality (power-button = user action).
+// it fires while the user is looking, so it is RATIONED rather than banned, on
+// two independent schedules:
+//   * USER PAGE TURNS run a fixed three-turn cycle — two epd_fast turns, then a
+//     third epd_quality turn that wipes the ghosting the pair left behind. A
+//     turn already replaces the whole screen, so the flash rides along with a
+//     repaint the user asked for, and paying every third turn keeps ghosting
+//     from building up across a long browsing session. (This replaced a
+//     HIGH_WATER escape valve that only fired after 24 fast refreshes, i.e.
+//     almost never within one session — the ghosting the user reported had
+//     already accumulated by then.)
+//   * EVERY OTHER visible redraw (background BLE push, the per-second
+//     cooldown-bar partials, the Room log band) stays epd_fast and
+//     charges s_fastCount. That debt is settled at SLEEP ENTRY
+//     (payGhostDebtIfDue) — a quality redraw of the current page right before
+//     timerSleep, when nobody is watching.
+//   * ON USB the device never sleeps (main.cpp skips the whole sleep branch), so
+//     that debt would otherwise accrue forever — the state a player testing on a
+//     cable actually sees. idleDeepCleanIfDue is the same settlement on an idle
+//     timer instead of a sleep edge: main.cpp calls it once the user has been idle
+//     as long as a battery sleep would have waited.
+// Boot restore also uses quality (power-button = user action).
 static int s_fastCount = 0;
 static const int QUALITY_EVERY = 8;    // fast-refresh debt that a sleep deep-clean settles
-static const int HIGH_WATER   = 24;    // in-session escape valve: pay on the next turn past this
+
+// Page turns since the last quality turn — the three-turn cycle's counter. It
+// counts ONLY deliberate user turns (onTap's pager fallback): a background sync
+// redraw or a cooldown partialRefresh must not be able to spend the user's
+// ghost-clearing turn, or the flash lands on a screen nobody asked to change.
+static int s_turnCount = 0;
+static const int TURNS_PER_QUALITY = 3;   // 2 fast turns, then 1 quality turn
 
 // Generic tap regions: any page can have a table of (y0,y1) rows pushed for
 // it; the device only ever does geometry (which row did y land in) — what a
@@ -255,7 +276,7 @@ const char* currentName() {
 
 bool showPage(int ring, bool quality) {
     // A modal owns the panel while it's up: refuse every redraw (background BLE
-    // push, auto-rotate, pomo phase flip) so none can clobber it. The event modal
+    // push, pomo phase flip) so none can clobber it. The event modal
     // (research.md §4.1) first: while a random event is on screen no background
     // push / tick can repaint the page under it.
     // event_modal::closeAndRestore() clears the flag before its own showPage.
@@ -294,8 +315,16 @@ bool showPage(int ring, bool quality) {
 // the client-page repaint primitive (a seconds counter blits ~10x14px, not
 // the whole panel). The caller draws its updated pixels into `canvas` first;
 // this clips the display to `r`, pushes, and restores. FAST charges the rect
-// to the ghosting debt (settled at sleep by payGhostDebtIfDue); QUALITY is a
-// grayscale-clean rect that clears local ghosting and resets the debt.
+// to the ghosting debt (settled off-screen by payGhostDebtIfDue /
+// idleDeepCleanIfDue).
+//
+// QUALITY is supported but HAS NO CALLERS, on purpose: a partial under a mode the
+// panel does not already hold over that rect re-drives the WHOLE rect (Panel_EPD's
+// diff byte carries the mode), so it flashes the full band rather than cleaning a
+// few glyphs, and leaves a mode marker that makes the next full epd_fast redraw
+// flash it a second time. room_page's log band shipped one for a while and that is
+// exactly the "every so often the whole screen flashes" report. Deep-clean whole
+// pages off-screen instead.
 void partialRefresh(const pages::Rect& r, pages::RefreshMode mode) {
     auto& disp = M5.Display;
     epd_mode_t prev = disp.getEpdMode();
@@ -316,9 +345,35 @@ void partialRefresh(const pages::Rect& r, pages::RefreshMode mode) {
             if (s_fastCount < INT_MAX) s_fastCount++;
             break;
         case pages::RefreshMode::QUALITY:
-            s_fastCount = 0;
+            // Deliberately NOT `s_fastCount = 0`. s_fastCount is a WHOLE-PANEL
+            // ghosting debt — the deep-cleans settle it with a full-screen quality
+            // redraw — but this call cleaned one clipped RECT. Wiping a band says
+            // nothing about the ghosting the button grid, tabs and status bar still
+            // owe. Zeroing here would let a busy caller cancel the whole-screen debt
+            // over and over, and the rest of the panel would never get its deep
+            // clean. (Kept correct rather than deleted along with the last caller —
+            // see the mode-marker warning above before adding a new one.)
+            // Not discounting it either (no s_fastCount--): the FAST push that
+            // originally dirtied this rect was already charged, so leaving the count
+            // untouched over-estimates the debt slightly. That is the safe
+            // direction — worst case sleep runs one quality redraw sooner than
+            // strictly needed, with nobody watching.
             break;
     }
+}
+
+// How far the CORNER_R arc pulls a row in from the rect's left/right edge, `dy`
+// rows in from the nearer of its top/bottom edges. Integer quarter-circle:
+// inset = R - floor(sqrt(R^2 - (R-dy)^2)), i.e. {8,5,3,2,2,1,1,1} at R=8. It does
+// NOT have to match LGFX's midpoint arc pixel for pixel — the flash sits under the
+// frame the user is looking at, so lining the two up at arm's length is the whole
+// requirement — and 8 iterations of an integer loop keep it off the float path.
+static int cornerInset(int dy) {
+    const int R = action_band::CORNER_R;
+    if (dy >= R || dy < 0) return 0;
+    int e = R - dy, q = R * R - e * e, s = 0;
+    while ((s + 1) * (s + 1) <= q) s++;
+    return R - s;
 }
 
 // Invert-flash a button rect as press feedback: XOR-invert the canvas's
@@ -328,6 +383,15 @@ void partialRefresh(const pages::Rect& r, pages::RefreshMode mode) {
 // in reverse video. The caller either repaints over it (any showPage) or rebounds
 // it with a second partialRefresh of the now-restored rect. Rect is clamped to the
 // panel; an empty rect (pressRect's "don't flash" signal) never reaches here.
+//
+// The inverted area is ROUNDED, not the raw rect: every button this can flash is
+// drawn by action_band, whose frame has been a CORNER_R round-rect since v0.16, and
+// a square invert flashed four sharp black nubs outside the arcs on every press.
+// The top and bottom CORNER_R rows therefore invert only [x0+inset, x1-inset) —
+// the middle rows, i.e. almost all of them, are untouched, so this costs nothing.
+// (Pages with no override still flash the default full-width y-band; nicking 8px
+// off its corners is invisible at 540px wide.) The PUSHED rect stays the full `r`
+// so the corner pixels — unchanged in the canvas — still get driven back cleanly.
 void flashPressRect(const pages::Rect& r) {
     const int W = canvas.width(), H = canvas.height();
     int x0 = r.x < 0 ? 0 : r.x, y0 = r.y < 0 ? 0 : r.y;
@@ -339,8 +403,14 @@ void flashPressRect(const pages::Rect& r) {
     if (!buf) return;
     for (int pass = 0; pass < 2; pass++) {           // invert -> push -> invert back
         for (int y = y0; y < y1; y++) {
+            // Insets are measured from the RECT's own edges, never the clamped
+            // ones, so an off-panel rect keeps the arc where the frame drew it.
+            int dTop = y - r.y, dBot = (r.y + r.h - 1) - y;
+            int in   = cornerInset(dTop < dBot ? dTop : dBot);
+            int lx   = r.x + in;         if (lx < x0) lx = x0;
+            int rx   = r.x + r.w - in;   if (rx > x1) rx = x1;
             uint8_t* row = buf + (size_t)y * W;
-            for (int x = x0; x < x1; x++) row[x] = (uint8_t)(255 - row[x]);
+            for (int x = lx; x < rx; x++) row[x] = (uint8_t)(255 - row[x]);
         }
         if (pass == 0) partialRefresh(r, pages::RefreshMode::FASTEST);
     }
@@ -380,6 +450,40 @@ void payGhostDebtIfDue() {
     int before = s_fastCount;
     if (showPage(currentRingIndex(), true))
         Serial.printf("[pager] ghost debt paid (%d fast)\n", before);
+}
+
+// The same settlement for a device that never sleeps. On USB main.cpp skips the
+// whole sleep branch, so payGhostDebtIfDue is never reached and the fast-refresh
+// debt (the Room log band above all) just keeps growing — the exact setup a player
+// testing on a cable is looking at. main.cpp calls this once the user has been idle
+// as long as a battery sleep would have waited, i.e. with nobody watching.
+//
+// Two pushes, and the second one is the point:
+//   1. quality — the full-panel deep-clean (~450ms), which zeroes s_fastCount.
+//   2. fast — the SAME page again (~130ms), purely to wash the whole-screen mode
+//      marker back to fast. Without it the panel sits in quality mode, and the next
+//      content change (a log line, a page turn) is a fast redraw over a
+//      quality-marked screen: mode changed, so Panel_EPD re-drives every pixel and
+//      lut_fast's first two frames invert — a full-screen flash landing while the
+//      user IS watching. Paying it here costs one extra flash nobody sees.
+// That second push charges the debt back up to 1, which is fine (the threshold is
+// QUALITY_EVERY) and not worth special-casing.
+//
+// Rate-limited independently of the debt: even a very chatty page can only buy one
+// deep-clean per DEEP_CLEAN_MIN_GAP_MS, so this can never turn into a periodic
+// full-screen blink of its own.
+static const uint32_t DEEP_CLEAN_MIN_GAP_MS = 10UL * 60 * 1000;   // 10 min
+
+void idleDeepCleanIfDue(uint32_t nowMs) {
+    static uint32_t s_lastCleanMs = 0;
+    if (s_fastCount < QUALITY_EVERY) return;
+    if (ringCount() <= 0) return;
+    if (s_lastCleanMs != 0 && nowMs - s_lastCleanMs < DEEP_CLEAN_MIN_GAP_MS) return;
+    int before = s_fastCount;
+    if (!showPage(currentRingIndex(), true)) return;   // modal up / page can't draw
+    showPage(currentRingIndex(), false);               // wash the mode marker back to fast
+    s_lastCleanMs = nowMs;
+    Serial.printf("[pager] idle deep-clean (%d fast)\n", before);
 }
 
 // Grip-graze mechanism (2026-07-17 investigation): the GT911 tracks up to 5
@@ -664,14 +768,20 @@ bool handleTouch() {
     int cur = currentRingIndex();
     bool left = tx < W / 2;
     int dir = left ? -1 : 1;
-    // Turns are epd_fast so the flash never lands on the user's own action — the
-    // debt is normally settled at sleep instead (payGhostDebtIfDue). Escape valve:
-    // past HIGH_WATER a marathon in-session run pays on this turn so ghosting can't
-    // grow unbounded. showPage repaints the bar itself. Scan for the nearest
-    // available page in the tapped direction (showPageOrNext) rather than one fixed
-    // target — a missing/corrupt neighbour used to soft-lock this direction. If
-    // nothing in that direction can be shown, leave the screen as-is.
-    if (!showPageOrNext(cur, dir, s_fastCount >= HIGH_WATER))
+    // The three-turn cycle (see s_turnCount): this turn is epd_quality when it is
+    // the third since the last one, otherwise epd_fast. Advance the counter only
+    // on a turn that actually SHOWED something — showPageOrNext returns false when
+    // no page in this direction can be drawn, and a turn that never reached the
+    // panel must not consume a slot in the cycle (nor should the quality slot be
+    // silently burned on a redraw that did not happen). showPage repaints the bar
+    // itself. Scan for the nearest available page in the tapped direction
+    // (showPageOrNext) rather than one fixed target — a missing/corrupt neighbour
+    // used to soft-lock this direction. If nothing in that direction can be shown,
+    // leave the screen as-is.
+    bool quality = (s_turnCount + 1 >= TURNS_PER_QUALITY);
+    if (showPageOrNext(cur, dir, quality))
+        s_turnCount = quality ? 0 : s_turnCount + 1;
+    else
         Serial.println("[pager] no displayable page");
     s_lastActMs = nowMs;
     return true;

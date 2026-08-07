@@ -72,7 +72,7 @@ int main() {
     // v0.3.1 feedback 1: the fire/temp state used to be a persistent header
     // line; now it only reaches the user as a log notification on change
     // (room.js onFireChange parity). Check right here, before the log ring
-    // (LOG_CAP=8) evicts this entry under the builder-chain's later pushes.
+    // (LOG_CAP) evicts this entry under the builder-chain's later pushes.
     {
         bool sawFireLog = false;
         for (int i = 0; i < gs.logCount; i++)

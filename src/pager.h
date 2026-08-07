@@ -65,6 +65,17 @@ void restore(bool quality);
 // No-op otherwise, so it adds ~1s awake time only when debt is actually due.
 void payGhostDebtIfDue();
 
+// The same debt settlement for a device that never sleeps: on USB main.cpp skips
+// the sleep branch entirely, so payGhostDebtIfDue never runs and the fast-refresh
+// ghosting just accumulates. Call this from loop() when on USB, nothing wants the
+// screen, and the user has been idle as long as a battery sleep would have waited.
+// If the debt is due (and at least 10 minutes since the last one) it deep-cleans
+// the current page with epd_quality and then immediately redraws it with epd_fast —
+// the second pass costs ~130ms and washes the panel's mode marker back to fast, so
+// the next real content change isn't a full-screen mode-change flash. Both flashes
+// happen inside the idle window, with nobody watching. No-op otherwise.
+void idleDeepCleanIfDue(uint32_t nowMs);
+
 // Push just `r` of the current canvas under FAST (fast/DU, ghosting accrues to
 // the debt) or QUALITY (grayscale-clean, clears local ghosting + resets debt).
 // The caller must have drawn the new pixels into the canvas first. See
