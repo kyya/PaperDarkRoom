@@ -199,7 +199,7 @@ constexpr uint8_t INV_REGION_PARAM = 0xFF;
 // the height is no longer driven by a stacked block; 96 stays because it is what
 // lets a 3-entry cost column clear the cooldown bar (see action_band.cpp). The
 // widest label here, 查看陷阱 / 漫漫尘途 at 4x36 = 144px, does NOT fit beside a
-// cost line in a 240px cell — 查看陷阱 is one of the four titles the narrow-cell
+// cost line in a 240px cell — 查看陷阱 is one of the eight titles the narrow-cell
 // guard shrinks to 24px; 漫漫尘途 carries no cost, so it stays 36px and centred.
 constexpr int ACT_H        = 96;             // long-press band (§9.3: >=80px floor)
 constexpr int ACT_ROW_GAP  = 10;
@@ -672,8 +672,8 @@ pages::Rect actionAreaRect(int areaTop) {
     return pages::Rect{ 0, areaTop - 2, 540, (ACT_BOTTOM - areaTop) + 4 };
 }
 
-// Bounding rect (2px bleed) of the packed cells currently draining a bar (bit i
-// = slot i). Slot-indexed rather than hardcoded to a row, so it follows the
+// Bounding rect (2px bleed) of the packed cells the cooldown tick decided to push
+// (bit i = slot i). Slot-indexed rather than hardcoded to a row, so it follows the
 // packing wherever 查看陷阱 lands. Empty mask -> zero rect (the caller gates).
 pages::Rect coolingRect(uint16_t mask, int areaTop) {
     int x0 = 540, y0 = 960, x1 = 0, y1 = 0;
@@ -868,12 +868,20 @@ void OutsidePage::onLocalAction(uint8_t param, int x, int y) {
 // still repaints the worker summary here. onLocalAction re-baselines m_lastSig after
 // its own showPage, so a 伐木/查看陷阱 press no longer forces a second full redraw
 // here. The bottom action-row cooldowns drain a bar: paint both rows into the canvas
-// but push ONLY the cooling cell(s) (coolingRect), FASTEST — never QUALITY, whose
-// full-row grayscale flash is the "big black block" the user reported; that ghost is
-// cleaned at sleep by pager::payGhostDebtIfDue instead. Mirrors the Room page.
+// but push ONLY the cell(s) whose bar actually MOVED. The tick still runs every
+// second, but a push no longer does — the bar is quantized to
+// action_band::BAR_LEVELS steps, so most seconds would repaint a cell identically,
+// and a cell ships only when its quantized level differs from what the screen
+// already shows (which is also how the "cooldown just hit zero" repaint, level >0
+// -> 0, still gets out). Those pushes are FAST — never QUALITY, whose full-row
+// grayscale flash is the "big black block" the user reported; FAST charges pager's
+// s_fastCount so that ghost is on the books and gets cleaned at sleep by
+// pager::payGhostDebtIfDue instead. Mirrors the Room page.
 void OutsidePage::tick(uint32_t nowMs) {
-    static uint32_t s_lastTick     = 0;
-    static uint16_t s_lastCoolMask = 0;   // cooling slots the previous tick pushed
+    static uint32_t s_lastTick = 0;
+    // Quantized bar level per slot as the screen currently shows it — the baseline
+    // a push is decided against. Zero = that cell has no bar on screen.
+    static uint8_t  s_lastLevel[AC_MAX] = { 0 };
 
     if (s_lastTick != 0 && nowMs - s_lastTick < 1000) return;
     s_lastTick = nowMs;
@@ -885,9 +893,10 @@ void OutsidePage::tick(uint32_t nowMs) {
 
     // 野外 cooldowns drain a bar, but — unlike the content above — they are NOT in
     // the signature: the wood/meat they yield is banked at press time, so nothing
-    // else changes while they cool. The mask is over PACKED SLOT indices now, not
-    // fixed rows, so it is built from the same layoutCells() result the painter
-    // uses — 查看陷阱's slot moves depending on which cells exist.
+    // else changes while they cool. The level array (and the push mask built from
+    // it) is over PACKED SLOT indices, not fixed rows, so it comes from the same
+    // layoutCells() result the painter uses — 查看陷阱's slot moves depending on
+    // which cells exist.
     CellView views[AC_MAX];
     int rows = layoutCells(m_regions, m_slotCodes, views, now,
                            &m_slotCount, &m_areaTop);
@@ -898,30 +907,37 @@ void OutsidePage::tick(uint32_t nowMs) {
     Layout L = computeLayout();
     int invPages = invNumPages(L.invRows * INV_COLS, invNonZeroCount());
     m_regionCount = appendInvRegion(m_regions, rows, L.invBoxY0, L.invBoxY1, invPages);
-    uint16_t coolMask = 0;
+    // Quantized bar level of every packed slot right now — the SAME expression
+    // action_band::draw uses to pick the fill width, so "level unchanged" really
+    // does mean "the cell would be repainted pixel-identically".
+    uint8_t level[AC_MAX] = { 0 };
     for (int i = 0; i < m_slotCount; i++)
-        if (views[i].coolTotal > 0 && views[i].coolLeft > 0)
-            coolMask |= (uint16_t)(1u << i);
+        level[i] = (uint8_t)action_band::barLevel(views[i].coolLeft, views[i].coolTotal);
 
     if (sig != m_lastSig) {
         m_lastSig = sig;
         pager::showPage(pager::currentRingIndex(), false);   // recomputes the page
-        s_lastCoolMask = coolMask;
+        // The full redraw just put THIS tick's levels on screen; re-baseline or the
+        // next tick would read a stale level and push a cell for nothing.
+        memcpy(s_lastLevel, level, sizeof(s_lastLevel));
         return;
     }
 
-    if (coolMask || s_lastCoolMask) {
+    uint16_t pushMask = 0;
+    for (int i = 0; i < AC_MAX; i++)
+        if (level[i] != s_lastLevel[i]) pushMask |= (uint16_t)(1u << i);
+
+    if (pushMask) {
         // Clear the whole (dynamic) area and repaint every cell into the canvas...
         pages::Rect area = actionAreaRect(m_areaTop);
         canvas.fillRect(area.x, area.y, area.w, area.h, TFT_WHITE);
         drawActionArea(canvas, views, m_slotCount, m_areaTop);
-        // ...but PUSH only the union of the cells cooling now and the ones that
-        // just cleared this tick. FASTEST; the ghost cleanup is deferred to sleep
-        // (see the function note). A row-count change cannot sneak through here:
-        // it can only come from a gate flip, which moves contentSig and takes the
-        // full-redraw branch above.
-        pager::partialRefresh(coolingRect((uint16_t)(coolMask | s_lastCoolMask), m_areaTop),
-                              pages::RefreshMode::FASTEST);
+        // ...but PUSH only the cells whose level moved. FAST; the ghost cleanup is
+        // deferred to sleep (see the function note). A row-count change cannot sneak
+        // through here: it can only come from a gate flip, which moves contentSig and
+        // takes the full-redraw branch above.
+        pager::partialRefresh(coolingRect(pushMask, m_areaTop),
+                              pages::RefreshMode::FAST);
     }
-    s_lastCoolMask = coolMask;
+    memcpy(s_lastLevel, level, sizeof(s_lastLevel));
 }
