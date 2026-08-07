@@ -276,7 +276,7 @@ const char* currentName() {
 
 bool showPage(int ring, bool quality) {
     // A modal owns the panel while it's up: refuse every redraw (background BLE
-    // push, auto-rotate, pomo phase flip) so none can clobber it. The event modal
+    // push, pomo phase flip) so none can clobber it. The event modal
     // (research.md §4.1) first: while a random event is on screen no background
     // push / tick can repaint the page under it.
     // event_modal::closeAndRestore() clears the flag before its own showPage.

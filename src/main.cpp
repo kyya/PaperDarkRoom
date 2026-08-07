@@ -75,7 +75,9 @@ bool            g_lowBattery      = false;   // pomo.cpp reads it (extern) — t
                                              // start gate; kept for link parity.
 bool            g_onUsb           = false;   // status_bar.cpp reads it (extern)
                                              // for the charge glyph.
-static int      g_rot             = 2;
+static int      g_rot             = 2;   // fixed portrait; no auto-rotate — kept
+                                             // as a variable only because ble_link's
+                                             // sendStatus/otaPollFinish take it.
 bool            g_sdOk            = false;   // ble_link.cpp reads it (extern) for
                                              // STATUS's sd= token.
 static uint32_t g_bootMs          = 0;
@@ -356,16 +358,6 @@ static void sleepNow(const char* reason) {
     esp_restart();
 }
 
-// Absolute display rotation from the accelerometer. X is this board's
-// discriminating axis: ax<0 = upright (rotation 2), ax>0 = flipped 180.
-static int rotForAccel() {
-    float ax = 0, ay = 0, az = 0;
-    if (!M5.Imu.isEnabled() || !M5.Imu.getAccel(&ax, &ay, &az)) return g_rot;
-    if (ax < -0.35f) return 2;
-    if (ax >  0.35f) return 0;
-    return g_rot;
-}
-
 // USB SOF activity on the OTG controller — a live host sends a Start-Of-Frame
 // every 1ms and the device latches the frame number. Diagnostic candidate.
 static bool usbSofActive() {
@@ -445,8 +437,7 @@ void setup() {
                   g_onUsb ? 1 : 0, bat,
                   (int)M5.Power.getBatteryVoltage(), g_lowBattery ? 1 : 0);
 
-    g_rot = rotForAccel();
-    M5.Display.setRotation(g_rot);
+    M5.Display.setRotation(2);
     Serial.printf("[boot] rotation=%d\n", g_rot);
 
     g_sdOk = sdInit();
@@ -532,20 +523,6 @@ void loop() {
     if (pager::handleTouch()) {
         g_lastInteraction = now;
         enterInteractive("tap");
-    }
-
-    // Continuous auto-rotate (~700ms cadence): on flip, redraw the current page.
-    static uint32_t s_lastRot = 0;
-    if (M5.Imu.isEnabled() && now - s_lastRot > 700) {
-        s_lastRot = now;
-        int want = rotForAccel();
-        if (want != g_rot) {
-            g_rot = want;
-            M5.Display.setRotation(g_rot);
-            if (pager::ringCount() > 0)
-                pager::showPage(pager::currentRingIndex(), false);
-            Serial.printf("[rot] -> rotation %d\n", g_rot);
-        }
     }
 
     // STATUS every 2s while connected (a one-shot is missed mid-pairing), or

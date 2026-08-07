@@ -36,7 +36,7 @@ void drawOnto(m5gfx::M5Canvas& canvas);
 // header's top-right whitespace — the blank band the host leaves below its date
 // row. Called by pager::showPage right after drawOnto, before the single
 // pushSprite, so the version rides the page's own EPD update (no extra refresh)
-// on every page draw: new push, SD restore, page turn, rotate. Same
+// on every page draw: new push, SD restore, page turn. Same
 // Minecraftia16 face as the bar; right-aligned to the host's pad (24px) margin.
 void drawVersionOnto(m5gfx::M5Canvas& canvas);
 
