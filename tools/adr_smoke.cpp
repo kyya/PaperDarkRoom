@@ -141,21 +141,63 @@ int main() {
     printf("     trap loot delta = %d\n", drops1 - drops0);
 
     // Bug repro: "陷阱捕获到XXX" on real hardware showed nothing after the
-    // intro. Print the raw log tail and assert the catch itself (which
-    // resource(s) got caught) actually made it into the log ring, not just
-    // the bare "the traps contain " intro with no follow-up entry.
+    // intro, because the intro and each catch were separate log entries and the
+    // newest-on-top ring floated the catches ABOVE their own intro. checkTraps
+    // now emits ONE compound entry (intro key + each drop key, LOG_KEY_SEP
+    // joined), so assert the whole catch rides on the newest entry.
     printf("     log tail after checkTraps (raw en_key, newest last):\n");
     for (int i = 0; i < gs.logCount; i++)
         printf("       [%d] \"%s\"%s\n", i, gs.log[i].enKey,
                gs.log[i].hasArg ? " (has arg)" : "");
-    bool sawIntro = false, sawCatch = false;
-    for (int i = 0; i < gs.logCount; i++) {
-        if (strcmp(gs.log[i].enKey, "the traps contain ") == 0) sawIntro = true;
+    const LogEntry& trapEntry = gs.log[gs.logCount - 1];
+    bool sawIntro = strncmp(trapEntry.enKey, "the traps contain |",
+                            strlen("the traps contain |")) == 0;
+    bool sawCatch = false, strayCatch = false;
+    for (int j = 0; j < 6; j++)
+        if (strstr(trapEntry.enKey, TRAP_DROPS[j].msg)) sawCatch = true;
+    for (int i = 0; i < gs.logCount - 1; i++)
         for (int j = 0; j < 6; j++)
-            if (strcmp(gs.log[i].enKey, TRAP_DROPS[j].msg) == 0) sawCatch = true;
-    }
-    CHECK(sawIntro, "trap-check log has the \"the traps contain \" intro");
+            if (strcmp(gs.log[i].enKey, TRAP_DROPS[j].msg) == 0) strayCatch = true;
+    CHECK(sawIntro, "trap-check log is one entry opening with the intro key");
     CHECK(sawCatch, "trap-check log names what was actually caught (bug repro)");
+    CHECK(!strayCatch, "no catch spills into its own log entry above the intro");
+
+    printf("== trap catch of several types folds into ONE compound entry ==\n");
+    {
+        // Ten traps + bait give 20 drop rolls, so every type is near-certain to
+        // land; assert the round costs exactly one log line and that the line
+        // lists every type actually credited this round.
+        GameState gt; gt.init();
+        gt.settle(1000);
+        gt.buildings[B_TRAP] = 10;
+        gt.stores[R_BAIT]    = 10 * FP;
+        int before[6];
+        for (int j = 0; j < 6; j++) before[j] = gt.whole(TRAP_DROPS[j].res);
+        int logBefore = gt.logCount;
+        CHECK(gt.checkTraps(2000) == RC_OK, "10 baited traps check ok");
+        CHECK(gt.logCount == logBefore + 1, "the whole catch is a single log entry");
+        const char* k = gt.log[gt.logCount - 1].enKey;
+        printf("     compound key = \"%s\" (%zu/%d bytes)\n", k, strlen(k), LOG_KEY_MAX);
+        int types = 0, listed = 0;
+        for (int j = 0; j < 6; j++) {
+            if (gt.whole(TRAP_DROPS[j].res) <= before[j]) continue;
+            types++;
+            if (strstr(k, TRAP_DROPS[j].msg)) listed++;
+        }
+        printf("     types caught = %d, named in the key = %d\n", types, listed);
+        CHECK(types >= 3, "a 20-roll round catches several distinct types");
+        // Every caught type is named unless the 96-byte key ran out of room,
+        // which only the all-six round can do (18 + 6 keys + 6 joiners = 112).
+        CHECK(listed == types || types == 6,
+              "the one entry names every type caught (all-six may drop its tail)");
+        CHECK(strlen(k) < LOG_KEY_MAX, "the compound key stays inside LOG_KEY_MAX");
+        // Round-trips through the hand-rolled JSON codec unescaped.
+        CHECK(gt.save(), "save() accepts the compound key");
+        GameState gl; gl.init();
+        CHECK(gl.load(), "load() reads the save back");
+        CHECK(strcmp(gl.log[gl.logCount - 1].enKey, k) == 0,
+              "compound key survives the save/load round-trip byte for byte");
+    }
 
     printf("== build a hut ==\n");
     // top up wood for the 100-wood hut + later lodge/traps via the builder over time
