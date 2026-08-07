@@ -1,4 +1,5 @@
 #include "pager.h"
+#include "action_band.h"   // CORNER_R — the press flash masks to the drawn button's arcs
 #include "frame_store.h"
 #include "status_bar.h"
 #include "page.h"
@@ -321,6 +322,20 @@ void partialRefresh(const pages::Rect& r, pages::RefreshMode mode) {
     }
 }
 
+// How far the CORNER_R arc pulls a row in from the rect's left/right edge, `dy`
+// rows in from the nearer of its top/bottom edges. Integer quarter-circle:
+// inset = R - floor(sqrt(R^2 - (R-dy)^2)), i.e. {8,5,3,2,2,1,1,1} at R=8. It does
+// NOT have to match LGFX's midpoint arc pixel for pixel — the flash sits under the
+// frame the user is looking at, so lining the two up at arm's length is the whole
+// requirement — and 8 iterations of an integer loop keep it off the float path.
+static int cornerInset(int dy) {
+    const int R = action_band::CORNER_R;
+    if (dy >= R || dy < 0) return 0;
+    int e = R - dy, q = R * R - e * e, s = 0;
+    while ((s + 1) * (s + 1) <= q) s++;
+    return R - s;
+}
+
 // Invert-flash a button rect as press feedback: XOR-invert the canvas's
 // grayscale_8bit pixels inside `r` (1 byte/pixel, row stride = canvas width),
 // push just that rect under FASTEST (a quick DU flash), then invert the canvas
@@ -328,6 +343,15 @@ void partialRefresh(const pages::Rect& r, pages::RefreshMode mode) {
 // in reverse video. The caller either repaints over it (any showPage) or rebounds
 // it with a second partialRefresh of the now-restored rect. Rect is clamped to the
 // panel; an empty rect (pressRect's "don't flash" signal) never reaches here.
+//
+// The inverted area is ROUNDED, not the raw rect: every button this can flash is
+// drawn by action_band, whose frame has been a CORNER_R round-rect since v0.16, and
+// a square invert flashed four sharp black nubs outside the arcs on every press.
+// The top and bottom CORNER_R rows therefore invert only [x0+inset, x1-inset) —
+// the middle rows, i.e. almost all of them, are untouched, so this costs nothing.
+// (Pages with no override still flash the default full-width y-band; nicking 8px
+// off its corners is invisible at 540px wide.) The PUSHED rect stays the full `r`
+// so the corner pixels — unchanged in the canvas — still get driven back cleanly.
 void flashPressRect(const pages::Rect& r) {
     const int W = canvas.width(), H = canvas.height();
     int x0 = r.x < 0 ? 0 : r.x, y0 = r.y < 0 ? 0 : r.y;
@@ -339,8 +363,14 @@ void flashPressRect(const pages::Rect& r) {
     if (!buf) return;
     for (int pass = 0; pass < 2; pass++) {           // invert -> push -> invert back
         for (int y = y0; y < y1; y++) {
+            // Insets are measured from the RECT's own edges, never the clamped
+            // ones, so an off-panel rect keeps the arc where the frame drew it.
+            int dTop = y - r.y, dBot = (r.y + r.h - 1) - y;
+            int in   = cornerInset(dTop < dBot ? dTop : dBot);
+            int lx   = r.x + in;         if (lx < x0) lx = x0;
+            int rx   = r.x + r.w - in;   if (rx > x1) rx = x1;
             uint8_t* row = buf + (size_t)y * W;
-            for (int x = x0; x < x1; x++) row[x] = (uint8_t)(255 - row[x]);
+            for (int x = lx; x < rx; x++) row[x] = (uint8_t)(255 - row[x]);
         }
         if (pass == 0) partialRefresh(r, pages::RefreshMode::FASTEST);
     }
