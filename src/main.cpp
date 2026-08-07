@@ -638,7 +638,19 @@ void loop() {
     g_onUsb = usbPresent();
     if (g_onUsb) enterInteractive("usb");
 
-    if (!g_onUsb) {
+    // On USB there is no sleep edge to hang the ghosting deep-clean off (the whole
+    // branch below is skipped), so the fast-refresh debt would grow without bound —
+    // the Room log band pushes FAST several times a minute. Settle it on the same
+    // idle timer a battery wake would have slept at, gated by the SAME
+    // anyWantsAwake() predicate as the sleep branch so a live fight/event/setpiece
+    // or a running pomo can never have the page repainted out from under it.
+    // g_lastInteraction is deliberately not touched: this is not interaction, and
+    // once it fires pager's own 10-minute gap keeps it from repeating.
+    if (g_onUsb) {
+        if (!client_pages::anyWantsAwake() &&
+            now - g_lastInteraction > IDLE_TIMEOUT_MS)
+            pager::idleDeepCleanIfDue(now);
+    } else {
         if (ble_link::otaBusy()) {
             // OTA in flight: never sleep — the reboot (ota=ok) or a disconnect
             // abort ends this wake instead of timerSleep cutting the transfer.
