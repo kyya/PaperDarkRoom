@@ -86,6 +86,8 @@ uint32_t s_lastMs     = 0;     // last interaction (idle-timeout clock)
 uint32_t s_lastTickMs = 0;     // 1s combat-tick gate
 uint32_t s_victoryMs  = 0;     // when the victory panel appeared (spam guard)
 uint32_t s_lastPressMs = 0;    // press debounce (e-ink double-tap bounce, pager.cpp)
+int      s_lastPressBtn = -1;  // band that press hit (-1 = missed every band) — the
+                               // debounce is scoped to a repeat of THAT same target
 
 // ---- button model, rebuilt each render ----
 enum : uint8_t { BK_WEAPON, BK_EAT, BK_MEDS, BK_FLEE };
@@ -289,6 +291,7 @@ void raise(uint32_t nowMs) {
     s_lastTickMs  = nowMs;
     s_victoryMs   = 0;
     s_lastPressMs = 0;         // don't inherit a stale press time from a prior fight
+    s_lastPressBtn = -1;
     pushQuality();
     // encounter alert: a short falling two-note chime, distinct from the event
     // pop (1047->1568 rising) and the switcher tone (2000).
@@ -311,13 +314,7 @@ void beginSetpiece(uint32_t nowMs) {
 }
 
 bool handleHold(int x, int y) {
-    // Tap debounce (pager.cpp's e-ink quirk): one physical tap can report TWO
-    // clicks ~<350ms apart. Weapon cooldowns are >=1s so this never blocks
-    // intentional combat, but it stops a bounce from low-beeping a spurious
-    // cooldown reject right after each landed swing.
     uint32_t nowMs = millis();
-    if (s_lastPressMs != 0 && nowMs - s_lastPressMs < 300) return true;
-    s_lastPressMs = nowMs;
     s_lastMs = nowMs;
 
     if (g_world.fightWon()) {                       // victory panel: any press leaves
@@ -329,6 +326,19 @@ bool handleHold(int x, int y) {
     }
 
     int b = hitButton(x, y);
+
+    // Per-button tap debounce (pager.cpp's e-ink quirk): one physical tap can
+    // report TWO clicks ~<350ms apart — always at the SAME coordinates, i.e. the
+    // same band, so the window only has to cover a repeat of whatever the last
+    // press hit (a miss counts as its own target). Weapon cooldowns are >=1s so
+    // this never blocks intentional combat, but it stops a bounce from
+    // low-beeping a spurious cooldown reject right after each landed swing. A
+    // tap on a DIFFERENT band is a second real intent and passes immediately.
+    if (s_lastPressMs != 0 && b == s_lastPressBtn && nowMs - s_lastPressMs < 300)
+        return true;
+    s_lastPressMs = nowMs;
+    s_lastPressBtn = b;
+
     if (b < 0) { M5.Speaker.tone(600, 120); return true; }   // missed every band
 
     // Press feedback: invert-flash the pressed band (event_modal parity). A repaint
