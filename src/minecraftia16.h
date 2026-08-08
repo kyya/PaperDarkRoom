@@ -1,7 +1,7 @@
 // Minecraftia 16px — LovyanGFX/Adafruit GFXfont, generated from the host's
 // daemon/fonts/Minecraftia-Regular.ttf (the face the pixel pages' small text
-// uses, at the same 8*scale=16px) so the firmware status bar + pomo header
-// match the page style. Rasterized by tools/gen_fw_fonts.py (fontmode "1", no
+// uses, at the same 8*scale=16px) so the firmware status bar matches the page
+// style. Rasterized by tools/gen_fw_fonts.py (fontmode "1", no
 // AA; 16px = exact 2x of the font's 8px grid so glyphs land on whole pixels).
 // Glyph offsets are MEASURED ink bboxes — Minecraftia's TTF metrics are
 // unreliable — with the baseline defined as the row under '0's bottom ink and
@@ -10,16 +10,16 @@
 // Charset "0123456789:/%-. " + weekday letters "ADEFHIMNORSTUW" (range
 // 0x20-0x57; codepoints not in the set are zero-size fillers). The digits/':'/
 // '.'/'-'/'/'/'%'/space glyphs are byte-identical to the pre-letter font. The
-// letters (A/D/E/F/H/I/M/N/O/R/S/T/U/W) cover the pomo page's weekday header
+// letters (A/D/E/F/H/I/M/N/O/R/S/T/U/W) were added for a weekday header
 // (MON..SUN) plus the status bar's "OTA" label — note A/O/T were REGENERATED
-// here (the earlier hand-appended A/O/T were corrupt) so weekday + OTA text
-// renders cleanly. MINECRAFTIA16_DIGIT_H stays 14 (shared digit ink height).
+// here (the earlier hand-appended A/O/T were corrupt) so OTA text renders
+// cleanly. Only "OTA" is drawn today; the rest stay for charset headroom. MINECRAFTIA16_DIGIT_H stays 14 (shared digit ink height).
 //
 // CHARSET CONSTRAINT: ANY codepoint outside this set has no glyph and the GFX
 // renderer draws a vertical BAR in its place — so on-panel text must stay
 // within "0123456789:/%-. ADEFHIMNORSTUW". The status bar prints: HH:MM clock,
 // NN% battery, "--%" placeholder, "OTA NN%", the dotted version string, and the
-// page counter — all inside this set. The pomo header adds the weekday.
+// page counter — all inside this set.
 #pragma once
 #include <M5GFX.h>
 

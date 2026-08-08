@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """TTF -> Adafruit/LovyanGFX GFXfont C header, rasterized to MATCH the daemon.
 
-The firmware self-draws its client pages (clock header, pomodoro buttons/
-countdown) and must render the SAME glyphs the daemon's Pillow pages do
+The firmware self-draws its client pages (clock header, buttons, counters) and
+must render the SAME glyphs the daemon's Pillow pages do
 (daemon/card_render_pixel.py). Both sides therefore share one rasterization
 recipe, implemented here so a firmware font is byte-for-byte the panel image
 the host would have pushed:

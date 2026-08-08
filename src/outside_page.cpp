@@ -17,7 +17,7 @@
 #include "path_page.h"          // 尘土之路 cell opens the Path (背包整备) page
 #include "tech_page.h"          // 科技树 cell opens the tech-tree sub-page (v0.14)
 #include "cjk_text.h"
-#include "pomo_page.h"          // PAD (shared layout authority)
+#include "page_layout.h"        // PAD (shared layout authority)
 #include "page_tabs.h"          // shared tab header (生火间 │ 村落 │ 贸易站)
 #include "pager.h"
 #include "game_state.h"

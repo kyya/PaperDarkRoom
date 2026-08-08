@@ -14,7 +14,7 @@
 #include "action_band.h"        // shared band frame + title baseline + wide bands
 #include "stepper.h"            // shared ±1 / ±10 stepper zone (AssignPage parity)
 #include "cjk_text.h"
-#include "pomo_page.h"          // PAD (shared layout authority)
+#include "page_layout.h"        // PAD (shared layout authority)
 #include "page_tabs.h"          // shared tab header (村落 lit — village sub-page)
 #include "pager.h"
 #include "game_state.h"

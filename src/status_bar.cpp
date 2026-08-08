@@ -2,9 +2,7 @@
 #include "ble_link.h"
 #include "frame_store.h"
 #include "pager.h"
-#include "pomo.h"
 #include "minecraftia16.h"
-#include "tomato_icons.h"
 #include <M5Unified.h>
 #include <math.h>       // lroundf — page-dot spacing
 #include <string.h>
@@ -157,39 +155,6 @@ static void drawTo(LovyanGFX* dst, int barTop, int otaPct = -1) {
         int fillW = (pbw - 4) * pct / 100;
         if (fillW > 0) dst->fillRect(pbx + 2, pby + 2, fillW, pbh - 4, TFT_BLACK);
         dst->drawString(opct, pbx + pbw + gap, cy);
-    } else if (pomo::active() &&
-               strcmp(pager::currentName(), "pomo") != 0) {
-        // Pomodoro on ANOTHER page: phase disc + remaining minutes + a small
-        // progress-style bar — digits only (Minecraftia16 has no letters
-        // beyond OTA; a "POMO" label would render as bars, see the charset
-        // note in drawVersionOnto).
-        int rem = pomo::remainingMinutes();
-        if (rem > 99) rem = 99;   // u8 param can reach 255 min; the center
-                                  // block reserves 2 digits — display-clamp
-                                  // only, the real countdown is untouched
-        char buf[8];
-        snprintf(buf, sizeof(buf), "%d", rem);
-        dst->setTextDatum(middle_left);             // don't inherit a stale datum
-        int numW = dst->textWidth("60");            // fixed reserve
-        const int dotR = 6, gap = 8, pbw = 120, pbh = 12;
-        int x0 = W / 2 - (dotR * 2 + gap + pbw + gap + numW) / 2;
-        int dcy = cy;
-        // A 16px tomato on the old dot's centre (solid=WORK, hollow=BREAK); it
-        // fits the 32px band and its gloss reads off the white band cleared above.
-        const uint8_t* tomato = pomo::inBreak() ? TOMATO_BAR_RING_BITS
-                                                : TOMATO_BAR_FILL_BITS;
-        dst->drawBitmap(x0 + dotR - TOMATO_BAR_W / 2, dcy - TOMATO_BAR_H / 2,
-                        tomato, TOMATO_BAR_W, TOMATO_BAR_H, TFT_BLACK);
-        int pbx = x0 + dotR * 2 + gap;
-        dst->drawRect(pbx, cy - pbh / 2, pbw, pbh, TFT_BLACK);
-        // Bar shows REMAINING fraction (drains right->left as time passes —
-        // distinct from OTA's filling bar, and reads naturally as "time left").
-        // Real remaining-of-span ratio, both from the service (fw 0.10.0+);
-        // span is only meaningful while active(), which this branch already is.
-        uint32_t ms = pomo::remainingMs(), span = pomo::spanMs();
-        int fw = (int)((uint64_t)(pbw - 4) * ms / (span ? span : 1));
-        if (fw > 0) dst->fillRect(pbx + 2, cy - pbh / 2 + 2, fw, pbh - 4, TFT_BLACK);
-        dst->drawString(buf, pbx + pbw + gap, cy);
     } else {
         // iOS TabView-style page dots. Geometry: radius 4, pitch 16, dots
         // centered on the band's mid-line. Current page is a solid black disc;

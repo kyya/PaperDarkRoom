@@ -32,7 +32,6 @@
 #include "ble_link.h"
 #include "status_bar.h"
 #include "quiet_hours.h"
-#include "pomo.h"
 #include "client_pages.h"
 #include "game_state.h"
 #include "world_state.h"       // g_world: committed map + volatile expedition (P2)
@@ -71,9 +70,9 @@ bool            g_interactive     = false;  // mirrors INTERACTIVE — ble_link.
                                             // connect chime (silent background
                                             // sync must not beep).
 static bool     g_wokeByTimer     = true;
-bool            g_lowBattery      = false;   // pomo.cpp reads it (extern) — the
-                                             // dormant pomo service's low-batt
-                                             // start gate; kept for link parity.
+static bool     g_lowBattery      = false;   // <=LOW_BATTERY_PCT: keeps the card
+                                             // in SYNC mode (enterInteractive
+                                             // refuses to open the window).
 bool            g_onUsb           = false;   // status_bar.cpp reads it (extern)
                                              // for the charge glyph.
 static int      g_rot             = 2;   // fixed portrait; no auto-rotate — kept
@@ -556,10 +555,8 @@ void loop() {
     // Debug game command landed (BLE CTRL "adr:" intercept): inject resources.
     applyPendingGameCmd();
 
-    // Dormant pomo service tick (no PomoPage / pomo region exists in this
-    // firmware, so it never activates) + the current page's time axis. Kept so
-    // the reused ble_link/status_bar link cleanly; both are guarded no-ops here.
-    pomo::tick();
+    // The current page's time axis (seconds counter, header clock); a no-op for
+    // pages with an empty tick(), and suppressed entirely while a modal is up.
     pager::tickCurrent(now);
 
     // Random-event engine (research.md §4.1/§5.4), page-independent:
@@ -630,7 +627,7 @@ void loop() {
     // the Room log band pushes FAST several times a minute. Settle it on the same
     // idle timer a battery wake would have slept at, gated by the SAME
     // anyWantsAwake() predicate as the sleep branch so a live fight/event/setpiece
-    // or a running pomo can never have the page repainted out from under it.
+    // can never have the page repainted out from under it.
     // g_lastInteraction is deliberately not touched: this is not interaction, and
     // once it fires pager's own 10-minute gap keeps it from repeating.
     if (g_onUsb) {
@@ -680,7 +677,7 @@ void loop() {
     static uint32_t s_hb = 0;
     if (now - s_hb > 3000) {
         s_hb = now;
-        if (!pomo::active()) setStatusLed(false);
+        setStatusLed(false);
         bool sof = usbSofActive();
         int mnt = tud_mounted() ? 1 : 0;
         int sus = tud_suspended() ? 1 : 0;

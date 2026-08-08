@@ -44,7 +44,7 @@ int  currentRingIndex();        // clamped to [0, ringCount)
 bool ringAvailable(int ring);
 int  visibleCount();
 int  visibleIndexOf(int ringIdx);
-const char* currentName();      // the current page's name() ("srv:0", "pomo")
+const char* currentName();      // the current page's name() ("srv:0", "room")
 
 // Ring index of the registered page named `name`, or -1 if none. Lets a client
 // page navigate to a sibling by identity (e.g. Outside 分工 -> "assign", the
@@ -96,11 +96,10 @@ void flashPressRect(const pages::Rect& r);
 uint16_t skipCount();
 
 // A REGIONS transfer landed for `pageIdx` (ble_link::rx.isRegions). Two wire
-// formats, length-disambiguated (fw 0.9.6, see
-// docs/superpowers/specs/2026-07-20-pomodoro-focus-design.md):
+// formats, length-disambiguated (fw 0.9.6):
 //   v1: u8 count | count * (u16 LE y0, u16 LE y1)                    — host action
 //   v2: u8 count | count * (u16 LE y0, u16 LE y1, u8 type, u8 param) — type=1
-//       is firmware-local (param = pomodoro minutes), type=0 = host action
+//       is firmware-local (param = the page's action index), type=0 = host action
 // Replaces any table already held for that page — RAM-only, so the host
 // resends it every session that page is shown (device is a cold boot on
 // every wake).
