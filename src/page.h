@@ -13,7 +13,8 @@ namespace pages {
 
 // A touch region: a y-band [y0,y1) with type/param — the exact shape the BLE
 // REGIONS wire format delivers (type 0 = host action, type 1 = firmware-local,
-// param = pomodoro minutes). ClientPages return a firmware-constant table.
+// param = the page's own action index). ClientPages return a firmware-constant
+// table.
 struct Region { uint16_t y0, y1; uint8_t type, param; };
 
 // A partial-refresh target (see pager::partialRefresh). Whole-panel is
@@ -22,8 +23,7 @@ struct Rect { int x, y, w, h; };
 
 // FAST = e-ink fast/DU-class update of the rect (ghosting accrues, charged to
 // the existing debt counter). FASTEST = even quicker DU-class update for
-// sub-second cadences (e.g. the pomodoro countdown tick); same debt accounting
-// as FAST. QUALITY = grayscale-clean update (clears local ghosting, resets
+// sub-second cadences; same debt accounting as FAST. QUALITY = grayscale-clean update (clears local ghosting, resets
 // the debt).
 enum class RefreshMode { FAST, FASTEST, QUALITY };
 
@@ -31,7 +31,7 @@ class Page {
 public:
     virtual ~Page() = default;
 
-    // Stable identity — persisted as the current page ("srv:0", "pomo").
+    // Stable identity — persisted as the current page ("srv:0", "room").
     virtual const char* name() const = 0;
 
     // Full-page paint into the shared canvas. Returns false when the page
@@ -59,8 +59,7 @@ public:
     // worker COLUMN by x; y then picks the stepper half WITHIN the band (v0.3.3:
     // upper half = increment ▲, lower half = decrement ▼, replacing the old
     // left−/right＋ split). The Room page uses x for its two-column grid and
-    // ignores y; pages that care about neither (Trade full-width, pomo) ignore
-    // both. The action is consumed on-device, never reported to the host.
+    // ignores y; pages that care about neither (Trade, full-width) ignore both. The action is consumed on-device, never reported to the host.
     // Default: no-op (server pages carry no firmware-local behavior).
     virtual void onLocalAction(uint8_t param, int x, int y) {
         (void)param; (void)x; (void)y;

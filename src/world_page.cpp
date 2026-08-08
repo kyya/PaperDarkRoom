@@ -11,7 +11,7 @@
 // baked ASCII (0x20..0x7E), not tr() text.
 #include "world_page.h"
 #include "cjk_text.h"
-#include "pomo_page.h"          // PAD (shared layout authority)
+#include "page_layout.h"        // PAD (shared layout authority)
 #include "page_tabs.h"          // resetHitCache — tab-less page clears the header cache
 #include "pager.h"
 #include "path_page.h"          // close the Path latch on goHome (defensive)

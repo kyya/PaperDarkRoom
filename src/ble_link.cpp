@@ -2,7 +2,6 @@
 #include "frame_store.h"
 #include "pager.h"
 #include "status_bar.h"
-#include "pomo.h"
 #include <M5Unified.h>
 #include <esp_heap_caps.h>
 #include <esp_ota_ops.h>
@@ -475,10 +474,6 @@ void sendStatus(const char* fwVersion, bool onUsb, int rot, bool interactive) {
     n += snprintf(s + n, sizeof(s) - n, " sd=%d skips=%u",
                   g_sdOk ? 1 : 0, (unsigned)pager::skipCount());
     n += snprintf(s + n, sizeof(s) - n, " mode=%s", interactive ? "int" : "sync");
-    if (pomo::active())
-        n += snprintf(s + n, sizeof(s) - n, " pomo=%s:%d",
-                      pomo::inBreak() ? "break" : "work",
-                      pomo::remainingMinutes());
     if (pager::hasPendingTap())
         n += snprintf(s + n, sizeof(s) - n, " tap=%lu:%d:%d",
                       (unsigned long)pager::pendingTapSeq(),

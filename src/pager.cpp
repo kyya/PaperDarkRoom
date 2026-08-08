@@ -108,7 +108,7 @@ void setRegions(int pageIdx, const uint8_t* data, size_t len) {
     int n = data[0];
     if (n > MAX_REGIONS_PER_PAGE) n = MAX_REGIONS_PER_PAGE;
     // v2 (fw 0.9.6): 6-byte entries carry type+param (type 1 = firmware-local,
-    // param = pomodoro minutes). v1: 4-byte entries, all host actions. The
+    // param = the page's action index). v1: 4-byte entries, all host actions. The
     // count byte is explicit so the two length checks can't both match; check
     // v2 FIRST (1+6n > 1+4n). Anything shorter than v1 is corrupt — leave the
     // table empty, never partial-parse.
@@ -252,7 +252,7 @@ int ringIndexByName(const char* name) {
 
 int currentRingIndex() {
     // Lazy reconcile: the server page count can change under s_curRing (first
-    // sync 0->N, or a shrink) with no re-resolution — a user parked on "pomo"
+    // sync 0->N, or a shrink) with no re-resolution — a user parked on "room"
     // (ring 0 at server count 0) would silently become "srv:0" (ring 0 after a
     // 5-page sync). When the count differs from last seen, re-resolve s_curRing
     // from the persisted page NAME so the view stays on the same logical page.
@@ -276,7 +276,7 @@ const char* currentName() {
 
 bool showPage(int ring, bool quality) {
     // A modal owns the panel while it's up: refuse every redraw (background BLE
-    // push, pomo phase flip) so none can clobber it. The event modal
+    // push, a page tick) so none can clobber it. The event modal
     // (research.md §4.1) first: while a random event is on screen no background
     // push / tick can repaint the page under it.
     // event_modal::closeAndRestore() clears the flag before its own showPage.
@@ -676,8 +676,8 @@ bool handleTouch() {
     // A hold that lands outside every region (or on a page with none) still
     // counts as interaction — it just selects nothing. Take the first slot
     // that reports a hold this frame. Suppressed entirely when >=2 points are
-    // down, so a three-finger press-down can't fire a type=1 region hold (e.g.
-    // cancel a running pomo) on its way to the switcher gesture.
+    // down, so a three-finger press-down can't fire a type=1 region hold on its
+    // way to the switcher gesture.
     for (int i = 0; tc <= 1 && i < tc; i++) {
         auto t = M5.Touch.getDetail(i);
         if (!t.wasHold()) continue;
@@ -790,10 +790,10 @@ bool handleTouch() {
 // Drive the current page's time axis (seconds counter, header clock). Called
 // every loop() pass; no-op for pages whose tick() is empty (ServerPage).
 void tickCurrent(uint32_t nowMs) {
-    // Suppress every page-tick draw side effect while a modal is up — a running
-    // pomo's per-second partialRefresh would otherwise paint MM:SS over it. Least-
-    // intrusive choke point (one guard covers all page ticks); the pomo service
-    // keeps counting, only its VIEW repaint is held off.
+    // Suppress every page-tick draw side effect while a modal is up — a page's
+    // per-second partialRefresh would otherwise paint over it. Least-intrusive
+    // choke point (one guard covers all page ticks); only the repaint is held
+    // off, never the underlying state.
     if (event_modal::active()) return;   // event modal owns the panel
     if (fight_modal::active()) return;   // combat overlay drives its own tick (main.cpp)
     if (setpiece_modal::active()) return;  // setpiece overlay owns the panel too
