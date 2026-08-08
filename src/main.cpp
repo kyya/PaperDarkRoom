@@ -57,6 +57,7 @@ static const uint32_t ADVERTISE_WINDOW_MS = 15000;  // background wake: no host,
 static const uint32_t HARD_CAP_MS         = 45000;  // background wake: absolute ceiling
 static const uint32_t IDLE_TIMEOUT_MS     = 5 * 60 * 1000;
 static const int      LOW_BATTERY_PCT     = 5;
+static constexpr uint8_t STATUS_LED_PIN   = 0;  // M5PaperS3 GPIO0 / SYS_LED
 
 static const int PANEL_W = 540;
 static const int PANEL_H = 960;
@@ -82,6 +83,15 @@ bool            g_sdOk            = false;   // ble_link.cpp reads it (extern) f
                                              // STATUS's sd= token.
 static uint32_t g_bootMs          = 0;
 static uint32_t g_lastInteraction = 0;
+
+// M5PaperS3's SYS_LED is driven through LEDC by M5Unified.  Clear the PWM
+// duty first, then leave the pin in a deterministic GPIO state as a fallback
+// for firmware components that may reconfigure the LEDC route later.
+static void setStatusLed(bool on) {
+    M5.Power.setLed(on ? 255 : 0);
+    pinMode(STATUS_LED_PIN, OUTPUT);
+    digitalWrite(STATUS_LED_PIN, on ? HIGH : LOW);
+}
 
 // The Room+Outside game model. Loaded (or freshly started) each cold boot, its
 // passive economy settled forward from the RTC (offline income/population while
@@ -488,8 +498,8 @@ void setup() {
     status_bar::draw();
 
     for (int i = 0; i < 2; i++) {   // "I just woke" heartbeat blink
-        M5.Power.setLed(255); delay(90);
-        M5.Power.setLed(0);   delay(90);
+        setStatusLed(true);  delay(90);
+        setStatusLed(false); delay(90);
     }
 
     ble_link::init("M5PaperS3");
@@ -670,6 +680,7 @@ void loop() {
     static uint32_t s_hb = 0;
     if (now - s_hb > 3000) {
         s_hb = now;
+        if (!pomo::active()) setStatusLed(false);
         bool sof = usbSofActive();
         int mnt = tud_mounted() ? 1 : 0;
         int sus = tud_suspended() ? 1 : 0;
