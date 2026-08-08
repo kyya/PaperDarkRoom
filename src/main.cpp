@@ -25,6 +25,7 @@
 #include <nvs.h>
 #include <esp_gap_ble_api.h>
 #include <esp_ota_ops.h>
+#include <driver/gpio.h>
 #include <soc/usb_struct.h>
 #include <lgfx/v1/touch/Touch_GT911.hpp>
 #include "frame_store.h"
@@ -58,6 +59,18 @@ static const uint32_t HARD_CAP_MS         = 45000;  // background wake: absolute
 static const uint32_t IDLE_TIMEOUT_MS     = 5 * 60 * 1000;
 static const int      LOW_BATTERY_PCT     = 5;
 static constexpr uint8_t STATUS_LED_PIN   = 0;  // M5PaperS3 GPIO0 / SYS_LED
+
+static constexpr gpio_num_t STATUS_LED_GPIO = GPIO_NUM_0;
+
+static void initStatusLed() {
+    gpio_reset_pin(STATUS_LED_GPIO);
+    gpio_set_direction(STATUS_LED_GPIO, GPIO_MODE_OUTPUT);
+    gpio_set_level(STATUS_LED_GPIO, 1);  // active-low: off
+}
+
+static void setStatusLed(bool on) {
+    gpio_set_level(STATUS_LED_GPIO, on ? 0 : 1);
+}
 
 static const int PANEL_W = 540;
 static const int PANEL_H = 960;
@@ -402,6 +415,7 @@ void setup() {
     auto cfg = M5.config();
     cfg.clear_display = false;     // keep the last frame on the EPD
     M5.begin(cfg);
+    initStatusLed();
 
     // GT911 factory config reports only 2 touch points — the grip-graze slot scan
     // and the multi-finger guard need more. Volatile: re-apply every cold boot.
