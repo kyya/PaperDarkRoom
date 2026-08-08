@@ -88,6 +88,9 @@ uint32_t s_victoryMs  = 0;     // when the victory panel appeared (spam guard)
 uint32_t s_lastPressMs = 0;    // press debounce (e-ink double-tap bounce, pager.cpp)
 int      s_lastPressBtn = -1;  // band that press hit (-1 = missed every band) — the
                                // debounce is scoped to a repeat of THAT same target
+int16_t  s_lastPressX = 0;     // ...and to the physical coordinates of that press, which
+int16_t  s_lastPressY = 0;     // survive a button-grid rebuild (see handleHold)
+constexpr int BOUNCE_R2 = 24 * 24;   // same-tap radius^2 (px^2, integer compare)
 
 // ---- button model, rebuilt each render ----
 enum : uint8_t { BK_WEAPON, BK_EAT, BK_MEDS, BK_FLEE };
@@ -292,6 +295,8 @@ void raise(uint32_t nowMs) {
     s_victoryMs   = 0;
     s_lastPressMs = 0;         // don't inherit a stale press time from a prior fight
     s_lastPressBtn = -1;
+    s_lastPressX  = 0;
+    s_lastPressY  = 0;
     pushQuality();
     // encounter alert: a short falling two-note chime, distinct from the event
     // pop (1047->1568 rising) and the switcher tone (2000).
@@ -327,17 +332,26 @@ bool handleHold(int x, int y) {
 
     int b = hitButton(x, y);
 
-    // Per-button tap debounce (pager.cpp's e-ink quirk): one physical tap can
-    // report TWO clicks ~<350ms apart — always at the SAME coordinates, i.e. the
-    // same band, so the window only has to cover a repeat of whatever the last
-    // press hit (a miss counts as its own target). Weapon cooldowns are >=1s so
-    // this never blocks intentional combat, but it stops a bounce from
-    // low-beeping a spurious cooldown reject right after each landed swing. A
-    // tap on a DIFFERENT band is a second real intent and passes immediately.
-    if (s_lastPressMs != 0 && b == s_lastPressBtn && nowMs - s_lastPressMs < 300)
-        return true;
+    // Per-target tap debounce (pager.cpp's e-ink quirk): one physical tap can
+    // report TWO clicks ~<350ms apart — always at the SAME coordinates. The
+    // COORDINATE test is what actually models that double-report: a landed action
+    // can consume its last item (eat the last meat), so repaintDynamic() rebuilds
+    // and bottom-anchors a SMALLER grid before the bounced touch arrives, and the
+    // same physical point now resolves to a different index — an index-only test
+    // would let the bounce fire a real attack. The index test is kept on top of it
+    // so intentional same-button spam stays debounced even when a rebuild shifts
+    // that button under the finger. Weapon cooldowns are >=1s so neither blocks
+    // intentional combat; together they stop a bounce from low-beeping a spurious
+    // cooldown reject right after each landed swing. A tap on a different band AND
+    // a different spot is a second real intent and passes immediately.
+    if (s_lastPressMs != 0 && nowMs - s_lastPressMs < 300) {
+        int dx = x - s_lastPressX, dy = y - s_lastPressY;
+        if (b == s_lastPressBtn || dx * dx + dy * dy <= BOUNCE_R2) return true;
+    }
     s_lastPressMs = nowMs;
     s_lastPressBtn = b;
+    s_lastPressX = (int16_t)x;
+    s_lastPressY = (int16_t)y;
 
     if (b < 0) { M5.Speaker.tone(600, 120); return true; }   // missed every band
 
