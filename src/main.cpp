@@ -30,6 +30,7 @@
 #include "frame_store.h"
 #include "pager.h"
 #include "ble_link.h"
+#include "fb_codec.h"          // fb::encode — FBGet's wire format (BLE + USB)
 #include "status_bar.h"
 #include "quiet_hours.h"
 #include "client_pages.h"
@@ -201,6 +202,62 @@ static void applyPendingTimeConfig() {
 // is the GM wipe — factory reset for a fresh playthrough. Same capture-in-
 // callback / act-in-loop split as applyPendingTimeConfig; the engine write +
 // save + repaint all live here, off the BLE callback.
+// Debug console on the USB CDC port. Line-oriented, two commands:
+//   "fb:get"       -> "FB <w> <h> <len>\n" + <len> bytes  (see ble_link::fbSend)
+//   "page:<name>"  -> jump the ring to that page, "PAGE <name>\n" / "PAGEERR\n"
+//
+// FBGet's primary channel is BLE, but that needs a live bond, and a bond can be
+// lost (a reflashed NVS, a host that forgot the device) exactly when the screen
+// is what you need to look at. USB is always there while flashing, so this keeps
+// the capability reachable with no pairing at all; both share fb::encode, so
+// there is one wire format and one host decoder.
+//
+// page: exists so a screenshot can be aimed. Flashing reboots the card onto its
+// default page, and without this every UI iteration needs a human to tap the
+// right tab before the grab is worth anything.
+static void handleDebugLine(const char* line, int len) {
+    if (len == 6 && strcmp(line, "fb:get") == 0) {
+        const int w = canvas.width(), h = canvas.height();
+        const size_t cap = fb::encodedCap(w, h);
+        uint8_t* buf = (uint8_t*)heap_caps_malloc(cap, MALLOC_CAP_SPIRAM);
+        if (!buf) { Serial.println("FBERR nomem"); return; }
+        size_t n = fb::encode((const uint8_t*)canvas.getBuffer(), w, h, buf, cap);
+        if (n == 0) { free(buf); Serial.println("FBERR encode"); return; }
+        Serial.printf("FB %d %d %u\n", w, h, (unsigned)n);
+        Serial.write(buf, n);
+        Serial.flush();
+        free(buf);
+        return;
+    }
+    if (len > 5 && strncmp(line, "page:", 5) == 0) {
+        const char* want = line + 5;
+        int idx = pager::ringIndexByName(want);
+        // showPage refuses a page whose available() is false (a locked game
+        // page), so report the outcome rather than the lookup.
+        if (idx >= 0 && pager::showPage(idx, false)) Serial.printf("PAGE %s\n", want);
+        else Serial.printf("PAGEERR %s\n", want);
+        return;
+    }
+}
+
+static void pollDebugConsole() {
+    static char line[32];
+    static int  n = 0;
+    while (Serial.available()) {
+        int c = Serial.read();
+        if (c == '\n' || c == '\r') {
+            line[n] = '\0';
+            int len = n;
+            n = 0;
+            if (len) handleDebugLine(line, len);
+        } else if (n < (int)sizeof(line) - 1) {
+            line[n++] = (char)c;
+        } else {
+            n = 0;                      // overlong line: resynchronise
+        }
+    }
+}
+
 static void applyPendingGameCmd() {
     if (!ble_link::rx.gameCmdPending) return;
     ble_link::rx.gameCmdPending = false;
@@ -501,7 +558,12 @@ void setup() {
         setStatusLed(false); delay(90);
     }
 
-    ble_link::init("M5PaperS3");
+    // BLE advertised name. Deliberately the PRODUCT name, not the board's: the
+    // M5PaperS3 hardware runs more than one of this author's firmwares, and the
+    // host tools (ble_ota.py, ble_fbget.py, adr_cmd.py) all scan BY NAME — a
+    // shared "M5PaperS3" would let an OTA push land on the wrong device. Matches
+    // the repo, the M5Burner entry and the release artifacts.
+    ble_link::init("PaperDarkRoom");
 
     // BLE-ready — clear any OTA rollback markers (the new image works).
     otaConfirmHealthy();
@@ -554,6 +616,17 @@ void loop() {
 
     // Debug game command landed (BLE CTRL "adr:" intercept): inject resources.
     applyPendingGameCmd();
+
+    // Framebuffer grab (FBGet). Served from the loop, never a BLE callback, so
+    // the encode + the transmit cannot stall the stack; and served from `canvas`
+    // — the sprite every page and modal composes into — so what the host gets is
+    // exactly what was last pushed to the panel.
+    if (ble_link::rx.fbPending) {                 // BLE CTRL "fb:get" -> STAT
+        ble_link::rx.fbPending = false;
+        ble_link::fbSend((const uint8_t*)canvas.getBuffer(),
+                         canvas.width(), canvas.height());
+    }
+    pollDebugConsole();                           // USB CDC: fb:get / page:
 
     // The current page's time axis (seconds counter, header clock); a no-op for
     // pages with an empty tick(), and suppressed entirely while a modal is up.

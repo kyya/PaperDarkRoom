@@ -1,4 +1,5 @@
 #include "ble_link.h"
+#include "fb_codec.h"          // fb::encode — the FBGet wire format
 #include "frame_store.h"
 #include "pager.h"
 #include "status_bar.h"
@@ -45,6 +46,48 @@ void statNotify(const char* s) {
     if (!statChar || !rx.connected) return;
     statChar->setValue((uint8_t*)s, strlen(s));
     statChar->notify();
+}
+
+// True while fbSend() owns STAT — sendStatus() checks it so a periodic STATUS
+// line cannot land in the middle of the binary run.
+static volatile bool s_fbBusy = false;
+bool fbBusy() { return s_fbBusy; }
+
+void fbSend(const uint8_t* gray8, int w, int h) {
+    if (!statChar || !rx.connected || !gray8 || w <= 0 || h <= 0 || (w & 1)) {
+        statNotify("FBERR");
+        return;
+    }
+    const size_t packed = (size_t)(w / 2) * h;
+    const size_t cap    = fb::encodedCap(w, h);
+    uint8_t* out = (uint8_t*)heap_caps_malloc(cap, MALLOC_CAP_SPIRAM);
+    if (!out) { statNotify("FBERR nomem"); return; }
+
+    const size_t o = fb::encode(gray8, w, h, out, cap);
+    if (o == 0) { free(out); statNotify("FBERR encode"); return; }
+
+    s_fbBusy = true;
+    char hdr[48];
+    snprintf(hdr, sizeof hdr, "FB %d %d %u", w, h, (unsigned)o);
+    statNotify(hdr);
+    // Chunked at the negotiated MTU. Notifications are UNACKNOWLEDGED — there is
+    // no ATT-level back-pressure and no retransmit, so the only thing keeping the
+    // controller's tx queue from overflowing is this pacing. At 6ms a 23KB frame
+    // lost ~35% of its bytes on macOS; one notification per connection interval
+    // is the honest budget, and CoreBluetooth negotiates 15ms intervals, so pace
+    // to that. A 23KB frame then takes ~0.7s, which is fine for a debug grab.
+    const size_t chunk = (rx.mtu > 23 ? rx.mtu : 23) - 3;
+    for (size_t off = 0; off < o; off += chunk) {
+        size_t n = o - off; if (n > chunk) n = chunk;
+        statChar->setValue(out + off, n);
+        statChar->notify();
+        delay(15);
+    }
+    s_fbBusy = false;
+    free(out);
+    Serial.printf("[ble] fb sent %dx%d raw=%u rle=%u (%.1fx)\n", w, h,
+                  (unsigned)packed, (unsigned)o,
+                  o ? (double)packed / (double)o : 0.0);
 }
 
 static uint32_t u32le(const uint8_t* p) {
@@ -132,6 +175,15 @@ class CtrlCb : public BLECharacteristicCallbacks {
         // header: the header's u32 LE `total` is a small count, never 0x3A726461
         // ("adr:" LE), so this is collision-free. Capture the line here; the main
         // loop parses + applies it (CtrlCb/TimeCfgCb capture-vs-act division).
+        // Framebuffer grab (v0.20). Same trick as "adr:" below and for the same
+        // reason — a new GATT characteristic would invalidate cached tables on
+        // already-paired hosts. "fb:get" is ASCII, and the binary header's u32 LE
+        // `total` is a small count, never 0x3A3A6266, so it cannot collide.
+        if (v.size() >= 6 && memcmp(v.data(), "fb:get", 6) == 0) {
+            rx.fbPending = true;
+            Serial.println("[ble] CTRL fb:get");
+            return;
+        }
         if (v.size() >= 4 && memcmp(v.data(), "adr:", 4) == 0) {
             size_t n = v.size();
             if (n >= sizeof(rx.gameCmd)) n = sizeof(rx.gameCmd) - 1;   // cap 63+NUL
@@ -451,6 +503,7 @@ void setUsbDiag(int chg, int sof, int tud) {
 }
 
 void sendStatus(const char* fwVersion, bool onUsb, int rot, bool interactive) {
+    if (fbBusy()) return;      // never interleave ASCII into a framebuffer run
     char etags[96];
     frame_store::etagsHex(etags, sizeof(etags));
     int bat = (int)M5.Power.getBatteryLevel();
