@@ -238,8 +238,19 @@ constexpr int barLevel(int left, int total) {
 //                    The cost column is centred, so with the most
 //                    entries any table can produce (3) it ends exactly at the
 //                    bar's top edge in a 96px band — see the budget in draw().
+// `rightInset` (v0.20) reserves that many pixels at the band's RIGHT edge for
+// content the caller draws itself — today TradePage's up-only ×10 stepper
+// column. The frame is still drawn at full `r`, so the button reads as one box;
+// only the layout budget shrinks: the cost column right-aligns to
+// r.x + r.w - EDGE_PAD - rightInset, and the title's overflow guard measures
+// against the reduced usable width. The Trade bands have the room — the widest
+// there is 购买外星合金 at 216 + 4 + 120 = 340 against 460 usable, so a 78px
+// inset (stepper INSET + COL_W) still clears it by 42px. Without this the cost
+// column and the stepper simply overlap, which is exactly what shipped and had
+// to be fixed: "毛皮" rendered underneath the ▲.
 void draw(m5gfx::M5Canvas& c, const pages::Rect& r, const char* title,
-          const char* subtitle, bool enabled, int coolLeft, int coolTotal);
+          const char* subtitle, bool enabled, int coolLeft, int coolTotal,
+          int rightInset = 0);
 
 // Just the frame — the 2px black rounded ring when `enabled`, the 1px
 // DISABLED_FRAME rounded ring when not. Exported for assign_page/path_page:

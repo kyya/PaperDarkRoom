@@ -987,6 +987,51 @@ int main() {
         CHECK(t.logCount == logBefore, "compass at max pushes no maxMsg (upstream parity)");
     }
 
+    printf("== [v0.20] buy(n): the x10 column truncates to what is affordable ==\n");
+    {
+        // User report: buying 1 iron needs 50 scales, i.e. FIFTY presses at x1
+        // before the iron band is even affordable (1 steel = 101, 1 alien alloy =
+        // 1051). The Assign/Path rows solved the same "一个一个调节太费事" with a
+        // x10 step in v0.14; the trade bands now carry it too, with upstream's
+        // TRUNCATION rule (outside.js:376 Math.min(available, data)).
+        GameState t; t.init(); t.buildings[B_TRADING_POST] = 1;
+        t.stores[R_FUR] = 1000 * FP;                  // scales cost 150 -> 6 affordable
+        CHECK(t.buy(T_SCALES, 10) == RC_OK, "x10 with only 6 affordable -> RC_OK");
+        CHECK(t.whole(R_SCALES) == 6, "bought exactly the 6 it could pay for");
+        CHECK(t.whole(R_FUR) == 100, "charged 6*150, not 10*150");
+
+        // A shortage is only a shortage when NOTHING is affordable.
+        GameState p; p.init(); p.buildings[B_TRADING_POST] = 1;
+        p.stores[R_FUR] = 100 * FP;
+        int lb = p.logCount;
+        CHECK(p.buy(T_SCALES, 10) == RC_ERR_COST, "none affordable -> RC_ERR_COST");
+        CHECK(p.whole(R_FUR) == 100, "a refused buy charges nothing");
+        CHECK(p.logCount == lb + 1, "and pushes the 'not enough' notice once");
+
+        // A multi-resource good truncates on its SCARCEST cost line.
+        GameState m; m.init(); m.buildings[B_TRADING_POST] = 1;
+        m.stores[R_FUR] = 10000 * FP; m.stores[R_SCALES] = 120 * FP;
+        CHECK(m.buy(T_IRON, 10) == RC_OK, "iron x10 -> RC_OK");
+        CHECK(m.whole(R_IRON) == 2, "iron truncated to 2 by the 50-scale line");
+        CHECK(m.whole(R_SCALES) == 20 && m.whole(R_FUR) == 9700,
+              "both cost lines charged for exactly 2");
+
+        // maximum still caps, and only the bought units are paid for.
+        GameState c; c.init(); c.buildings[B_TRADING_POST] = 1;
+        c.stores[R_FUR] = 100000 * FP; c.stores[R_SCALES] = 1000 * FP;
+        c.stores[R_TEETH] = 1000 * FP;
+        CHECK(c.buy(T_COMPASS, 10) == RC_OK, "compass x10 -> RC_OK");
+        CHECK(c.whole(R_COMPASS) == 1, "compass still capped at its maximum of 1");
+        CHECK(c.whole(R_FUR) == 99600, "charged for ONE compass, not ten");
+
+        // n <= 0 is a caller bug, never a free buy.
+        GameState z; z.init(); z.buildings[B_TRADING_POST] = 1;
+        z.stores[R_FUR] = 99999 * FP;
+        CHECK(z.buy(T_SCALES, 0) == RC_ERR_INVALID, "n=0 rejected");
+        CHECK(z.buy(T_SCALES, -5) == RC_ERR_INVALID, "negative n rejected");
+        CHECK(z.whole(R_SCALES) == 0, "neither guard bought anything");
+    }
+
     printf("== [v0.4.9] The Sick Man: trigger medicine>0, help consumes + reward branch ==\n");
     {
         GameState e; e.init(); uint32_t t = 270000; e.settle(t);

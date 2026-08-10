@@ -13,6 +13,9 @@
 #include "cjk_text.h"
 #include "page_layout.h"        // PAD (shared layout authority)
 #include "page_tabs.h"          // shared three-tab header (生火间 │ 村落 │ 贸易站)
+#include "stepper.h"            // the shared ×10 column (up-only here)
+#include "icons.h"              // icons::drawCentred — 1bpp Lucide glyphs
+#include "icons_data.h"         // ICON_CART_* — this is its ONE includer
 #include "pager.h"
 #include "game_state.h"
 #include "world_state.h"        // WorldState::ensureGenerated + compassFromVillage (§1.6)
@@ -62,34 +65,43 @@ constexpr int BUY_W     = CONTENT_W;         // 492
 // "更多" pagination sentinel; real slot codes are Trade ids (0..TRADE_COUNT-1).
 constexpr uint8_t A_MORE = 0xFF;
 
-// Trading-post buy labels (moved here from room_page.cpp v0.3.2). Upstream
-// room.js's OWN persistent buy button shows the bare good name (`text: _(g)`),
-// but this page's flat grid has no "build:/craft:/buy:" section legend, so a
-// bare resource name would read like a craftable — the label composes tr("buy:")
-// (stripped of its trailing ASCII ':') with the resource name for the 6 goods
-// with no matching event "buy X" key, and reuses the exact event string for the
-// 4 that do (scales/teeth/medicine/compass). Order matches the Trade enum.
-static const char* const TRADE_BUY_KEY[TRADE_COUNT] = {
-    "buy scales",   // T_SCALES
-    "buy teeth",    // T_TEETH
-    nullptr,        // T_IRON        — compose "buy:" + "iron"
-    nullptr,        // T_COAL        — compose "buy:" + "coal"
-    nullptr,        // T_STEEL       — compose "buy:" + "steel"
-    "buy medicine", // T_MEDICINE
-    nullptr,        // T_BULLETS     — compose "buy:" + "bullets"
-    nullptr,        // T_ENERGY_CELL — compose "buy:" + "energy cell"
-    nullptr,        // T_ALIEN_ALLOY — compose "buy:" + "alien alloy"
-    "buy compass",  // T_COMPASS
-};
+// ---- the ×10 column -------------------------------------------------------
+// Trade lays out its own coarse column instead of borrowing stepper's 66px one.
+// That width is sized for a lone ▲ glyph; this column carries a 24px cart AND a
+// 36px "x10" (64px of content), which left nothing for padding — the divider
+// ended up 5px from the icon and the whole group read as one cramped smudge.
+// 96px seats the same content with 16px of air on both sides of the rule.
+//
+// The room was always there: a band's cost prints ONE ENTRY PER LINE (splitCost),
+// so the widest single line is "-1500 毛皮" at 120px, not the 360px a one-line
+// rendering of 外星合金's full cost would need. Title + cost + this column still
+// clears action_band's budget with room over.
+//
+// stepper::MANY is still the shared step size — the number 10 is one decision,
+// wherever it is spent.
+constexpr int STEP_COL_W = 96;
+constexpr int STEP_INSET = 12;                 // column -> band right edge
+constexpr int STEP_PAD   = 16;                 // air each side of the rule
+constexpr int stepColX(int w) { return w - STEP_INSET - STEP_COL_W; }
+// The rule is drawn ON the hit boundary, so what looks like the ×10 zone is
+// exactly what behaves like it.
+constexpr int stepRuleX(int w) { return stepColX(w) - 4; }
+// Structural, not content: a hairline that separates without competing with the
+// cost figures beside it (用户: 分割线的灰度再不明显一点). Lighter than
+// action_band's DISABLED_INK, which is for text that is still meant to be read.
+constexpr uint16_t STEP_RULE_INK = 0x9CD3;
 
+// The band's label is the BARE good name — 鳞片, not 购买鳞片 (v0.20).
+//
+// This is what upstream room.js does too (`text: _(g)`); the port had prefixed
+// every label with 购买 because its flat v0.3.2 grid mixed build/craft/buy rows
+// with no section legend, so a bare resource name would have read like a
+// craftable. That reason is gone: this is a dedicated page whose every row is a
+// purchase, the row now ends in a basket button that says so, and repeating
+// 购买 on all ten rows spent 4 of the label's characters saying what the page
+// already says once — pushing long names like 外星合金 into the 24px fallback.
 void tradeLabel(uint8_t tradeId, char* out, size_t cap) {
-    const char* direct = TRADE_BUY_KEY[tradeId];
-    if (direct) { snprintf(out, cap, "%s", tr(direct)); return; }
-    char prefix[16];
-    snprintf(prefix, sizeof(prefix), "%s", tr("buy:"));      // "购买:"
-    size_t plen = strlen(prefix);
-    if (plen > 0 && prefix[plen - 1] == ':') prefix[plen - 1] = '\0';  // "购买"
-    snprintf(out, cap, "%s%s", prefix, tr(RES_KEY[TRADE[tradeId].product]));
+    snprintf(out, cap, "%s", tr(RES_KEY[TRADE[tradeId].product]));
 }
 
 struct BandView {
@@ -232,6 +244,10 @@ pages::Rect bandRect(int top) {
     return pages::Rect{ BUY_X, top, BUY_W, BUY_H };
 }
 
+// Slot index -> its band's top, the one place that stacking rule is written
+// (layoutBands lays the regions out with the identical expression).
+int bandTopForSlot(int slot) { return BAND_TOP + slot * (BUY_H + BUY_GAP); }
+
 // One full-width BUY band, through the shared renderer. This page's 36px-label-
 // over-24px-cost, block-centered band IS the app-wide button style (v0.12 pulled
 // it into action_band and migrated every other site onto it — see action_band.h),
@@ -239,9 +255,45 @@ pages::Rect bandRect(int top) {
 // its label+cost block; the costless "更多" pager centres its lone label, which
 // on this page reads cleanly because it only ever sits alone at the very bottom
 // of a single full-width column.
+
 void drawBuyBand(m5gfx::M5Canvas& c, int top, const BandView& v) {
+    // Every priced band carries the column, affordable or not — an unaffordable
+    // good greys its cart the way the band greys everything else, instead of
+    // losing the button entirely and leaving a hole where the other rows have
+    // one. The band must also keep its cost text clear of that column: the cost
+    // right-aligns to the band edge, so without the inset the two land on top of
+    // each other (they did, and it shipped that way once).
+    const bool step = v.hasCost;
     action_band::draw(c, bandRect(top), v.label, v.hasCost ? v.cost : nullptr,
-                      v.enabled, 0, 0);
+                      v.enabled, 0, 0,
+                      step ? STEP_INSET + STEP_COL_W + STEP_PAD : 0);
+    // The ×10 column (v0.20). A good's cost is paid over and over — 1 iron wants
+    // 50 scales, i.e. fifty separate presses at ×1 — so the same coarse step the
+    // Assign/Path rows have had since v0.14 belongs here too. Not drawn on 更多
+    // (no quantity to step) or on a band already unaffordable at ×1.
+    if (!step) return;
+    pages::Rect band = bandRect(top);
+    // Cart over its multiplier. The cart alone says "buy", which the whole page
+    // already says — what this column actually does is buy TEN, and that number
+    // has to be on the button or the player has no way to know pressing here
+    // differs from pressing the row. The cart is lucide/shopping-cart rasterised
+    // at 34px by tools/gen_icons.py; hand-drawing it was tried and rejected
+    // (用户: "太丑了") — this page is line art, so the mark has to carry the same
+    // considered stroke weight as everything else on it.
+    c.drawFastVLine(band.x + stepRuleX(band.w), band.y + 14, band.h - 28,
+                    STEP_RULE_INK);
+    // Cart and multiplier side by side, both vertically centred, the pair centred
+    // in the column — 24 + 4 + 36 = 64 of content in 96, so 16px clears the rule
+    // on the left and the band's edge on the right.
+    const int colX = band.x + stepColX(band.w);
+    const int cy   = band.y + band.h / 2;
+    const uint16_t ink = v.enabled ? TFT_BLACK : action_band::DISABLED_INK;
+    const char* mult = "x10";
+    const int mw   = cjk::textWidth(mult, 2);
+    const int x0   = colX + (STEP_COL_W - (ICON_CART_W + 4 + mw)) / 2;
+    icons::draw(c, ICON_CART_BITS, ICON_CART_W, ICON_CART_H, ICON_CART_STRIDE,
+                x0, cy - ICON_CART_H / 2, ink);
+    cjk::drawText(c, x0 + ICON_CART_W + 4, cy - 12, mult, 2, ink);
 }
 
 // Content signature — a hash of every live value that alters a painted number or
@@ -277,8 +329,21 @@ const pages::Region* TradePage::regions(int* n) const {
 // white margin outside the drawn frame. x/y are unused: onLocalAction (and
 // every band's drawn frame) doesn't split on them.
 pages::Rect TradePage::pressRect(const pages::Region& rg, int x, int y) const {
-    (void)x; (void)y;
-    return bandRect(rg.y0);
+    (void)y;
+    pages::Rect band = bandRect(rg.y0);
+    // A band carrying the ×10 column flashes only the part that was pressed, so
+    // the feedback says WHICH quantity is being bought. Bands with no column
+    // (更多, or a good unaffordable even at ×1) keep flashing whole — the same
+    // predicate drawBuyBand used, so the flash can never disagree with the paint.
+    int slot = rg.param;
+    if (slot < 0 || slot >= m_slotCount) return band;
+    // 更多 has no column and flashes whole; every good has one, affordable or
+    // not, so the flash tells the player which quantity they hit even when the
+    // press is about to be refused for cost.
+    if (m_slotCodes[slot] >= TRADE_COUNT) return band;
+    const int cx = band.x + stepColX(band.w);
+    if (x >= cx) return pages::Rect{ cx, band.y, STEP_COL_W, band.h };
+    return pages::Rect{ band.x, band.y, stepColX(band.w) - 4, band.h };
 }
 
 // Hidden until the trading post stands: returning false makes showPageOrNext
@@ -310,7 +375,7 @@ bool TradePage::draw(m5gfx::M5Canvas& c) {
 // needed here. "更多" flips to the next batch. save() lives here (buy() does not
 // persist itself — single write, no double-save).
 void TradePage::onLocalAction(uint8_t param, int x, int y) {
-    (void)x; (void)y;
+    (void)y;
     int slot = param;
     if (slot < 0 || slot >= m_slotCount) { M5.Speaker.tone(600, 120); return; }
     uint8_t code = m_slotCodes[slot];
@@ -323,7 +388,13 @@ void TradePage::onLocalAction(uint8_t param, int x, int y) {
     }
     if (code >= TRADE_COUNT) { M5.Speaker.tone(600, 120); return; }
 
-    Result r = g_game.buy(code);
+    // x decides the quantity: the ×10 column buys ten, anywhere left of it (the
+    // whole label + cost area, i.e. exactly where the band was pressed before
+    // this column existed) buys one. buy() truncates, so a ×10 with only 3
+    // affordable buys 3 and still reports RC_OK.
+    const pages::Rect band = bandRect(bandTopForSlot(slot));
+    const int qty = (x >= band.x + stepColX(band.w)) ? stepper::MANY : 1;
+    Result r = g_game.buy(code, qty);
     if (r == RC_OK) {
         // room.js: `if(stores.compass && !pathDiscovery){ pathDiscovery = true;
         // Path.openPath() }` — buying the compass (capped at 1, so this is always

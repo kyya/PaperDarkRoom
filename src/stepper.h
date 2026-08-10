@@ -67,6 +67,11 @@ constexpr int dividerX(int w) { return oneX0(w) - 4; }        // 344
 // Both columns use the SAME triangle and are told apart by position alone.
 // Triangles are drawn geometrically (fillTriangle) because ▲/▼ are not in the
 // sparse 12px face and must never be rendered as text.
+//
+// NOT the Trade page's ×10 column: that one is up-only (a good cannot be sold
+// back), carries an icon plus a multiplier rather than a glyph, and needs a
+// wider column to seat them — so it lays out its own geometry in trade_page.cpp
+// and shares only MANY, the step size itself.
 void draw(m5gfx::M5Canvas& c, const pages::Rect& band);
 
 // The SIGNED number of units a press at (x,y) inside `band` is asking for:

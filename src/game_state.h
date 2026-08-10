@@ -225,7 +225,11 @@ public:
     Result checkTraps(uint32_t now);
     Result build(uint8_t craftId);          // buildings
     Result craft(uint8_t craftId);          // tools/upgrades/weapons
-    Result buy(uint8_t tradeId);            // trading-post goods
+    // Buy `n` of a trading-post good, TRUNCATING to what is affordable (and to
+    // the good's maximum): a ×10 press with only 7 affordable buys 7 and returns
+    // RC_OK. RC_ERR_COST only when not even one is affordable. n defaults to 1,
+    // which is byte-for-byte the pre-v0.20 behaviour.
+    Result buy(uint8_t tradeId, int n = 1);
     Result assignWorker(uint8_t job, int delta);  // +/- villagers to a job
 
     // ---- read helpers ----
