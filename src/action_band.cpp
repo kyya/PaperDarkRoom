@@ -60,7 +60,7 @@ int action_band::titleBoxY(int top, int h) {
 
 void action_band::draw(m5gfx::M5Canvas& c, const pages::Rect& r,
                        const char* title, const char* subtitle, bool enabled,
-                       int coolLeft, int coolTotal) {
+                       int coolLeft, int coolTotal, int rightInset) {
     drawFrame(c, r, enabled);
     if (!title) title = "";
 
@@ -106,7 +106,7 @@ void action_band::draw(m5gfx::M5Canvas& c, const pages::Rect& r,
     // subtitle-less, so it is measured against `tw` alone (108px at worst).
     int tScale = TITLE_SCALE;
     int tw     = cjk::textWidth(title, TITLE_SCALE);
-    int usable = r.w - 2 * EDGE_PAD;
+    int usable = r.w - 2 * EDGE_PAD - rightInset;   // rightInset: see the header
     int need   = hasSub ? tw + MID_GAP + subW : tw;
     if (need > usable) { tScale = SUB_SCALE; tw = cjk::textWidth(title, SUB_SCALE); }
 
@@ -147,7 +147,7 @@ void action_band::draw(m5gfx::M5Canvas& c, const pages::Rect& r,
     if (hasSub) {
         cjk::drawText(c, r.x + EDGE_PAD, inkY, title, tScale, titleInk);  // left col
         int subTop = r.y + (r.h - subN * SUB_GLYPH) / 2 - inkNudge(SUB_SCALE);
-        int right  = r.x + r.w - EDGE_PAD;
+        int right  = r.x + r.w - EDGE_PAD - rightInset;
         for (int i = 0; i < subN; i++) {
             int lw = cjk::textWidth(subLine[i], SUB_SCALE);
             cjk::drawText(c, right - lw, subTop + i * SUB_GLYPH, subLine[i],

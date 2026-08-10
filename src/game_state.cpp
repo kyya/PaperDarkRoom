@@ -574,28 +574,42 @@ Result GameState::makeCraftable(uint8_t craftId) {
     return RC_OK;
 }
 
-Result GameState::buy(uint8_t tradeId) {
-    if (tradeId >= TRADE_COUNT) return RC_ERR_INVALID;
+Result GameState::buy(uint8_t tradeId, int n) {
+    if (tradeId >= TRADE_COUNT || n <= 0) return RC_ERR_INVALID;
     if (buildings[B_TRADING_POST] == 0) return RC_ERR_LOCKED;
     const TradeGood& g = TRADE[tradeId];
     int have = whole(g.product); if (have < 0) have = 0;
     if (g.maximum >= 0 && have >= g.maximum) return RC_ERR_MAX;
+    // TRUNCATION, not all-or-nothing (v0.20) — the same rule the ±10 stepper
+    // already follows for workers and outfit units (stepper.h, upstream
+    // outside.js:376 `Math.min(available, btn.data)`): a ×10 press with only 7
+    // affordable buys 7 rather than refusing. n == 1 therefore behaves exactly as
+    // this function always did.
+    if (g.maximum >= 0 && have + n > g.maximum) n = g.maximum - have;
+    for (int i = 0; i < 3 && g.cost[i].res != RA_END; i++) {
+        int can = (int)(stores[g.cost[i].res] / (g.cost[i].amt * FP));
+        if (can < n) n = can;
+    }
     // room.js buy(): Notifications.notify(Room, _("not enough " + k)) on the
     // FIRST short cost resource (loop breaks there) — same v0.3.1 feedback-2
     // pattern makeCraftable() already carries for build/craft; a cost-disabled
     // trade band used to fail silently, exactly like the pre-0.3.1 build/craft
-    // bug this mirrors.
-    for (int i = 0; i < 3 && g.cost[i].res != RA_END; i++) {
-        if (stores[g.cost[i].res] < g.cost[i].amt * FP) {
-            char key[40];
-            snprintf(key, sizeof(key), "not enough %s", RES_KEY[g.cost[i].res]);
-            pushLog(key);
-            return RC_ERR_COST;
+    // bug this mirrors. Reported only when NOTHING was affordable: a truncated
+    // ×10 is a success, not a shortage.
+    if (n <= 0) {
+        for (int i = 0; i < 3 && g.cost[i].res != RA_END; i++) {
+            if (stores[g.cost[i].res] < g.cost[i].amt * FP) {
+                char key[40];
+                snprintf(key, sizeof(key), "not enough %s", RES_KEY[g.cost[i].res]);
+                pushLog(key);
+                break;
+            }
         }
+        return RC_ERR_COST;
     }
     for (int i = 0; i < 3 && g.cost[i].res != RA_END; i++)
-        stores[g.cost[i].res] -= g.cost[i].amt * FP;
-    stores[g.product] += 1 * FP;
+        stores[g.cost[i].res] -= g.cost[i].amt * n * FP;
+    stores[g.product] += n * FP;
     markSeen(g.product);
     // room.js buy(): Notifications.notify(Room, good.buildMsg) on success — but
     // Room.TradeGoods entries carry no buildMsg property (only type/cost/audio),
