@@ -23,4 +23,9 @@ STAT_UUID = "e3e30004-1111-2222-3333-444455556666"
 # image streams over DATA_UUID (see tools/ble_ota.py + the firmware).
 OTA_UUID = "e3e30007-1111-2222-3333-444455556666"
 
-DEVICE_NAME = "M5PaperS3"
+# The advertised name is the PRODUCT, not the board (src/main.cpp): the same
+# M5PaperS3 hardware runs other firmwares, and every tool here scans by name, so
+# a board-named device would be ambiguous — an OTA could land on the wrong one.
+# Renamed in v0.20; a device on older firmware still advertises "M5PaperS3" and
+# must be re-paired after the upgrade.
+DEVICE_NAME = "PaperDarkRoom"

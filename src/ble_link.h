@@ -84,6 +84,9 @@ struct Rx {
     // host that then times out waiting can misjudge the protocol version
     // (the tray's v1 fallback used to wipe the page set this way).
     volatile bool     statSubPending = false;
+    // Host asked for the current framebuffer (CTRL "fb:get"). Consumed once by
+    // the main loop, which hands the live canvas to fbSend().
+    volatile bool     fbPending = false;
     // TIME_CONFIG (set by TimeCfgCb, consumed once by the main loop)
     volatile bool     timeCfgPending = false;
     volatile uint8_t  rtcYearSince2000 = 0;
@@ -107,6 +110,19 @@ extern uint8_t* rxBuf;
 
 void init(const char* name);
 void statNotify(const char* s);
+
+// Answer a CTRL "fb:get" by streaming the panel's current framebuffer out over
+// STAT notifications. `gray8` is w*h bytes of 8-bit luma (the shared canvas).
+//
+// The wire form is the SAME 4bpp + RLE encoding the art blobs use
+// (tools/gen_event_art.py writes it, art::blit reads it), so the host decoder is
+// code that already exists and 540x960 leaves as tens of KB instead of 518.
+// Sequence, all on STAT:
+//   "FB <w> <h> <len>"      ASCII header
+//   <len bytes>             binary, chunked at mtu-3
+// The caller must not repaint mid-send; regular STATUS lines are suppressed for
+// the duration so nothing interleaves into the binary run.
+void fbSend(const uint8_t* gray8, int w, int h);
 void sendStatus(const char* fwVersion, bool onUsb, int rot, bool interactive);
 
 // OTA: otaBusy() is true while an image transfer is in flight (the main loop
