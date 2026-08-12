@@ -77,13 +77,13 @@ BAYER4 = [
 ]
 
 
-def quantize(img, dither):
+def quantize(img, dither, w=ART_W, h=ART_H):
     """8-bit L image -> list of 0..15 nibbles, row-major."""
     px = img.load()
-    out = bytearray(ART_W * ART_H)
+    out = bytearray(w * h)
     i = 0
-    for y in range(ART_H):
-        for x in range(ART_W):
+    for y in range(h):
+        for x in range(w):
             v = px[x, y]
             if dither == "bayer":
                 # v/255*15 in 1/16-level steps, plus the Bayer threshold.
@@ -96,13 +96,13 @@ def quantize(img, dither):
     return out
 
 
-def pack4bpp(nibbles):
+def pack4bpp(nibbles, w=ART_W, h=ART_H):
     """Row-major nibbles -> 4bpp bytes, high nibble = even x."""
-    out = bytearray(ART_W // 2 * ART_H)
+    out = bytearray(w // 2 * h)
     o = 0
-    for y in range(ART_H):
-        base = y * ART_W
-        for x in range(0, ART_W, 2):
+    for y in range(h):
+        base = y * w
+        for x in range(0, w, 2):
             out[o] = (nibbles[base + x] << 4) | nibbles[base + x + 1]
             o += 1
     return bytes(out)

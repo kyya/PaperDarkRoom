@@ -60,4 +60,12 @@ bool handleHold(int x, int y);
 // so this is a flee — a cold boot resumes the pre-fight tile. No-op if inactive.
 void endForSleep();
 
+// TEMPORARY layout probe: how many columns the attack grid uses (2..4). Exists
+// so the three candidate layouts can be compared on the device in one flash —
+// upstream's fight buttons are ~120px and float, ours are 240px in two columns,
+// and which width actually reads well under a thumb is not a question source
+// code can answer. Remove once the layout is chosen.
+void setCols(int n);
+int  cols();
+
 }  // namespace fight_modal
