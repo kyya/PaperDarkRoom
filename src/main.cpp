@@ -232,6 +232,67 @@ static void handleDebugLine(const char* line, int len) {
         free(buf);
         return;
     }
+    // Game commands, the same "adr:" lines CTRL accepts. Captured here and left
+    // for applyPendingGameCmd() to act on in the loop — identical to the BLE
+    // path's callback-captures / loop-acts split, and the same single parser.
+    //
+    // Worth having on USB precisely because BLE is not always there: flashing
+    // clears the device's bond, so the wireless path needs re-pairing after
+    // exactly the operation a developer performs most often.
+    if (len > 4 && strncmp(line, "adr:", 4) == 0) {
+        if (ble_link::rx.gameCmdPending) { Serial.println("CMDBUSY"); return; }
+        snprintf(ble_link::rx.gameCmd, sizeof(ble_link::rx.gameCmd), "%s", line);
+        ble_link::rx.gameCmdPending = true;
+        Serial.printf("CMD %s\n", line);
+        return;
+    }
+    // "fight:<enemyId>[,<weapons>]" — raise the combat overlay on demand.
+    //
+    // The fight panel's layout is driven by how many attack buttons it ends up
+    // with, and that follows the weapons the expedition packs: the enemy plate
+    // shows its full height at 2-8 buttons, crops toward ART_H_MIN at 9-11. To
+    // see the tight end for real you would otherwise have to leave the village
+    // carrying eight fed weapons — which is a long trip to check a rectangle.
+    //
+    // So this fabricates an expedition rather than embarking one: hp/water full,
+    // meat + meds + ammo in the bag, and the first `weapons` non-fist weapons
+    // equipped (default 1). NOT a real trip — it writes g_world.ex directly, so
+    // it will trample a trip in progress, and any loot the fight banks is loot
+    // the save will keep.
+    if (len > 6 && strncmp(line, "fight:", 6) == 0) {
+        int id = 0, nWeapons = 1;
+        if (sscanf(line + 6, "%d,%d", &id, &nWeapons) < 1 ||
+            id < 0 || id >= adr::ENCOUNTER_COUNT) {
+            Serial.printf("FIGHTERR %s\n", line + 6);
+            return;
+        }
+        if (nWeapons < 0) nWeapons = 0;
+        auto& ex = g_world.ex;
+        memset(ex.outfitItem, 0, sizeof ex.outfitItem);
+        ex.active = true;
+        ex.dead   = false;
+        ex.hp = ex.maxHp = 30;
+        ex.water = ex.maxWater = 10;
+        ex.outfitRes[adr::R_CURED_MEAT]  = 5;    // gives the 吃肉 button
+        ex.outfitRes[adr::R_MEDICINE]    = 2;    // gives the 药剂 button
+        ex.outfitRes[adr::R_BULLETS]     = 50;   // feeds the rifle
+        ex.outfitRes[adr::R_ENERGY_CELL] = 50;   // feeds the laser rifle
+        // Skip index 0 (fists): armWeapons() only lists carried weapons and
+        // falls back to fists when none qualify, so index 1 up is what varies
+        // the button count.
+        for (int i = 1; i <= nWeapons && i < adr::WEAPON_COUNT; i++)
+            ex.outfitItem[adr::WEAPONS[i].itemSlot] = 1;
+        fight_modal::begin((uint8_t)id, millis());
+        Serial.printf("FIGHT %d weapons=%d buttons=%d\n", id, nWeapons,
+                      g_world.fightWeaponCount() + 3);
+        return;
+    }
+    // "cols:<2..4>" — attack-grid column count, the layout probe (fight_modal.h).
+    if (len > 5 && strncmp(line, "cols:", 5) == 0) {
+        fight_modal::setCols(atoi(line + 5));
+        Serial.printf("COLS %d\n", fight_modal::cols());
+        return;
+    }
     if (len > 5 && strncmp(line, "page:", 5) == 0) {
         const char* want = line + 5;
         int idx = pager::ringIndexByName(want);
