@@ -39,6 +39,12 @@ enum Result : uint8_t {
     RC_ERR_INVALID,    // bad argument
 };
 
+struct BuyResult {
+    Result status;
+    int requested;
+    int purchased;
+};
+
 // One log line: an en_key (rendered via tr() at draw time — never a baked
 // sentence, keeping the §8.3 glyph closure complete) plus an optional integer
 // argument (e.g. villagers arrived) the renderer may splice into a {0} slot.
@@ -226,6 +232,9 @@ public:
     // max 1) is owned (room.js goodsMax). Const: unlike craftUnlocked, upstream
     // trade goods carry no availableMsg/maxMsg, so nothing is pushed or latched.
     bool buyOfferable(uint8_t tradeId) const;
+    // Maximum quantity affordable and allowed by the current state. This is the
+    // single source of truth used by the trading-post UI and buy().
+    int maxBuyable(uint8_t tradeId) const;
 
     // ---- action API (校验成本/冷却/解锁, writes log, returns Result) ----
     Result lightFire(uint32_t now);
@@ -234,7 +243,7 @@ public:
     Result checkTraps(uint32_t now);
     Result build(uint8_t craftId);          // buildings
     Result craft(uint8_t craftId);          // tools/upgrades/weapons
-    Result buy(uint8_t tradeId);            // trading-post goods
+    BuyResult buy(uint8_t tradeId, int requested = 1); // trading-post goods
     Result assignWorker(uint8_t job, int delta);  // +/- villagers to a job
 
     // ---- read helpers ----

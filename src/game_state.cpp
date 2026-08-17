@@ -574,36 +574,71 @@ Result GameState::makeCraftable(uint8_t craftId) {
     return RC_OK;
 }
 
-Result GameState::buy(uint8_t tradeId) {
-    if (tradeId >= TRADE_COUNT) return RC_ERR_INVALID;
-    if (buildings[B_TRADING_POST] == 0) return RC_ERR_LOCKED;
+int GameState::maxBuyable(uint8_t tradeId) const {
+    if (tradeId >= TRADE_COUNT || buildings[B_TRADING_POST] == 0) return 0;
     const TradeGood& g = TRADE[tradeId];
-    int have = whole(g.product); if (have < 0) have = 0;
-    if (g.maximum >= 0 && have >= g.maximum) return RC_ERR_MAX;
-    // room.js buy(): Notifications.notify(Room, _("not enough " + k)) on the
-    // FIRST short cost resource (loop breaks there) — same v0.3.1 feedback-2
-    // pattern makeCraftable() already carries for build/craft; a cost-disabled
-    // trade band used to fail silently, exactly like the pre-0.3.1 build/craft
-    // bug this mirrors.
-    for (int i = 0; i < 3 && g.cost[i].res != RA_END; i++) {
-        if (stores[g.cost[i].res] < g.cost[i].amt * FP) {
-            char key[40];
-            snprintf(key, sizeof(key), "not enough %s", RES_KEY[g.cost[i].res]);
-            pushLog(key);
-            return RC_ERR_COST;
-        }
+    if (g.product != R_COMPASS && !hasSeen(g.product)) return 0;
+
+    int have = whole(g.product);
+    if (have < 0) have = 0;
+    int limit = 0x7fffffff / FP;  // keep fixed-point stores inside int32_t
+    if (g.maximum >= 0) {
+        if (have >= g.maximum) return 0;
+        limit = g.maximum - have;
     }
+    for (int i = 0; i < 3 && g.cost[i].res != RA_END; i++) {
+        if (g.cost[i].amt <= 0) continue;
+        const int64_t unit = (int64_t)g.cost[i].amt * FP;
+        int available = (int)((int64_t)stores[g.cost[i].res] / unit);
+        if (available < 0) available = 0;
+        if (available < limit) limit = available;
+    }
+    return limit > 0 ? limit : 0;
+}
+
+BuyResult GameState::buy(uint8_t tradeId, int requested) {
+    BuyResult out{RC_ERR_INVALID, requested, 0};
+    if (tradeId >= TRADE_COUNT || requested <= 0) return out;
+    if (buildings[B_TRADING_POST] == 0) {
+        out.status = RC_ERR_LOCKED;
+        return out;
+    }
+
+    const TradeGood& g = TRADE[tradeId];
+    if (g.product != R_COMPASS && !hasSeen(g.product)) {
+        out.status = RC_ERR_LOCKED;
+        return out;
+    }
+    int have = whole(g.product);
+    if (have < 0) have = 0;
+    if (g.maximum >= 0 && have >= g.maximum) {
+        out.status = RC_ERR_MAX;
+        return out;
+    }
+
+    const int capacity = maxBuyable(tradeId);
+    if (capacity <= 0) {
+        char key[40];
+        for (int i = 0; i < 3 && g.cost[i].res != RA_END; i++) {
+            if (g.cost[i].amt > 0 &&
+                stores[g.cost[i].res] < g.cost[i].amt * FP) {
+                snprintf(key, sizeof(key), "not enough %s", RES_KEY[g.cost[i].res]);
+                pushLog(key);
+                out.status = RC_ERR_COST;
+                return out;
+            }
+        }
+        out.status = RC_ERR_MAX;
+        return out;
+    }
+
+    out.purchased = requested < capacity ? requested : capacity;
     for (int i = 0; i < 3 && g.cost[i].res != RA_END; i++)
-        stores[g.cost[i].res] -= g.cost[i].amt * FP;
-    stores[g.product] += 1 * FP;
+        stores[g.cost[i].res] -= (int32_t)((int64_t)g.cost[i].amt * FP * out.purchased);
+    stores[g.product] += (int32_t)((int64_t)FP * out.purchased);
     markSeen(g.product);
-    // room.js buy(): Notifications.notify(Room, good.buildMsg) on success — but
-    // Room.TradeGoods entries carry no buildMsg property (only type/cost/audio),
-    // so good.buildMsg is undefined, and Notifications.notify() no-ops on an
-    // undefined message (notifications.js: "if (typeof text == 'undefined')
-    // return;"). Upstream's buy() therefore has NO success notification —
-    // matched exactly here: no pushLog on the RC_OK path.
-    return RC_OK;
+    out.status = RC_OK;
+    return out;
 }
 
 Result GameState::assignWorker(uint8_t job, int delta) {
