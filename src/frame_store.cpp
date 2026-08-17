@@ -57,22 +57,57 @@ static void pagePath(int idx, char* out, size_t cap) {
     snprintf(out, cap, "%s/%d.png", DIR, idx);
 }
 
+static bool writeAtomic(const char* path, const char* tmp, const char* bak,
+                        const uint8_t* data, size_t len) {
+    File f = SD.open(tmp, FILE_WRITE);
+    if (!f) return false;
+    size_t wr = f.write(data, len);
+    f.close();
+    if (wr != len) {
+        SD.remove(tmp);
+        return false;
+    }
+
+    const bool hadOld = SD.exists(path);
+    if (hadOld) {
+        SD.remove(bak);
+        if (!SD.rename(path, bak)) {
+            SD.remove(tmp);
+            return false;
+        }
+    }
+    if (!SD.rename(tmp, path)) {
+        SD.remove(tmp);
+        if (hadOld) {
+            SD.remove(path);
+            SD.rename(bak, path);
+        }
+        return false;
+    }
+    return true;
+}
+
 static bool writeMeta() {
     if (!s_sd) return false;
-    File f = SD.open(META_TMP, FILE_WRITE);
-    if (!f) return false;
-    f.printf("{\"v\":2,\"count\":%d,\"cur\":%d,\"curName\":\"%s\",\"etags\":[",
-             s_count, s_cur, s_curName);
+    char buf[512];
+    size_t o = 0;
+    int n = snprintf(buf, sizeof(buf),
+                     "{\"v\":2,\"count\":%d,\"cur\":%d,\"curName\":\"%s\",\"etags\":[",
+                     s_count, s_cur, s_curName);
+    if (n < 0 || (size_t)n >= sizeof(buf)) return false;
+    o = (size_t)n;
     for (int i = 0; i < s_count; i++) {
-        if (s_pages[i].valid)
-            f.printf("%s\"%08lx\"", i ? "," : "", (unsigned long)s_pages[i].etag);
-        else
-            f.printf("%s\"-\"", i ? "," : "");
+        n = snprintf(buf + o, sizeof(buf) - o, "%s\"%08lx\"",
+                     i ? "," : "", s_pages[i].valid
+                         ? (unsigned long)s_pages[i].etag : 0ul);
+        if (n < 0 || (size_t)n >= sizeof(buf) - o) return false;
+        o += (size_t)n;
     }
-    f.print("]}");
-    f.close();
-    SD.remove(META);
-    return SD.rename(META_TMP, META);
+    n = snprintf(buf + o, sizeof(buf) - o, "]}");
+    if (n < 0 || (size_t)n >= sizeof(buf) - o) return false;
+    o += (size_t)n;
+    return writeAtomic(META, META_TMP, "/.darkroom/pages/meta.bak",
+                       (const uint8_t*)buf, o);
 }
 
 // Only count/cur are trusted from meta; etags are recomputed on preload.
@@ -209,17 +244,18 @@ bool storePage(int idx, int count, const uint8_t* png, size_t len,
     s_pages[idx].etag = et;
     s_pages[idx].valid = true;
     if (s_sd) {
-        char tmp[24], path[24];
+        char tmp[32], bak[32], path[32];
         snprintf(tmp, sizeof(tmp), "%s/%d.tmp", DIR, idx);
+        snprintf(bak, sizeof(bak), "%s/%d.bak", DIR, idx);
         pagePath(idx, path, sizeof(path));
-        File f = SD.open(tmp, FILE_WRITE);
-        if (f) {
-            f.write(buf, len);
-            f.close();
-            SD.remove(path);
-            SD.rename(tmp, path);
+        if (!writeAtomic(path, tmp, bak, buf, len)) {
+            Serial.printf("[store] page %d save failed\n", idx);
+            return false;
         }
-        writeMeta();
+        if (!writeMeta()) {
+            Serial.println("[store] metadata save failed");
+            return false;
+        }
     }
     return true;
 }

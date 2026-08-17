@@ -709,13 +709,112 @@ bool readStr(const char*& p, char* buf, size_t cap) {
     buf[i] = 0;
     return true;
 }
-const char* afterKey(const char* j, const char* key) {   // -> char after "key":
+void skipWs(const char*& p) {
+    while (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n') p++;
+}
+bool skipJsonString(const char*& p) {
+    if (*p != '"') return false;
+    p++;
+    while (*p) {
+        if (*p == '\\') { p++; if (!*p) return false; p++; continue; }
+        if (*p == '"') { p++; return true; }
+        p++;
+    }
+    return false;
+}
+bool skipJsonValue(const char*& p) {
+    skipWs(p);
+    if (*p == '"') return skipJsonString(p);
+    if (*p == '{') {
+        p++; skipWs(p);
+        if (*p == '}') { p++; return true; }
+        while (*p) {
+            if (!skipJsonString(p)) return false;
+            skipWs(p); if (*p++ != ':') return false;
+            if (!skipJsonValue(p)) return false;
+            skipWs(p);
+            if (*p == '}') { p++; return true; }
+            if (*p++ != ',') return false;
+            skipWs(p);
+        }
+        return false;
+    }
+    if (*p == '[') {
+        p++; skipWs(p);
+        if (*p == ']') { p++; return true; }
+        while (*p) {
+            if (!skipJsonValue(p)) return false;
+            skipWs(p);
+            if (*p == ']') { p++; return true; }
+            if (*p++ != ',') return false;
+            skipWs(p);
+        }
+        return false;
+    }
+    if (*p == '-' || (*p >= '0' && *p <= '9')) {
+        char* end = nullptr;
+        strtod(p, &end);
+        if (end == p) return false;
+        p = end;
+        return true;
+    }
+    for (const char* word : {"true", "false", "null"}) {
+        size_t n = strlen(word);
+        if (strncmp(p, word, n) == 0) { p += n; return true; }
+    }
+    return false;
+}
+bool jsonComplete(const char* j) {
+    const char* p = j;
+    skipWs(p);
+    if (!skipJsonValue(p)) return false;
+    skipWs(p);
+    return *p == '\0';
+}
+int jsonArrayCount(const char* p) {
+    if (!p) return -1;
+    skipWs(p);
+    if (*p++ != '[') return -1;
+    skipWs(p);
+    if (*p == ']') return 0;
+    int count = 0;
+    while (*p) {
+        if (!skipJsonValue(p)) return -1;
+        count++;
+        skipWs(p);
+        if (*p == ']') { p++; return count; }
+        if (*p++ != ',') return -1;
+        skipWs(p);
+    }
+    return -1;
+}
+const char* keyToken(const char* j, const char* key) {
     char pat[40];
-    snprintf(pat, sizeof pat, "\"%s\":", key);
-    const char* p = strstr(j, pat);
-    return p ? p + strlen(pat) : nullptr;
+    snprintf(pat, sizeof pat, "\"%s\"", key);
+    for (const char* p = j; (p = strstr(p, pat)) != nullptr; p++) {
+        const char* q = p + strlen(pat);
+        skipWs(q);
+        if (*q == ':') return p;
+    }
+    return nullptr;
+}
+const char* afterKey(const char* j, const char* key) {
+    const char* p = keyToken(j, key);
+    if (!p) return nullptr;
+    p += strlen(key) + 2;
+    skipWs(p);
+    return *p == ':' ? p + 1 : nullptr;
 }
 long readLong(const char* p) { return p ? strtol(p, nullptr, 10) : 0; }
+uint32_t fnv1a32(const char* p, size_t n) {
+    uint32_t h = 2166136261u;
+    for (size_t i = 0; i < n; i++) h = (h ^ (uint8_t)p[i]) * 16777619u;
+    return h;
+}
+bool requiredKeys(const char* j, const char* const* keys, size_t n) {
+    for (size_t i = 0; i < n; i++) if (!afterKey(j, keys[i])) return false;
+    return true;
+}
 // Parse n ints from a "[a,b,...]" starting at p (p just after the key).
 void readIntArr(const char* p, int32_t* out, int n) {
     for (int i = 0; i < n; i++) out[i] = 0;
@@ -779,16 +878,53 @@ size_t GameState::toJson(char* out, size_t cap) const {
         apStr(out, cap, o, log[i].enKey);
         AP(",%ld,%d,%d]", (long)log[i].arg, log[i].hasArg ? 1 : 0, log[i].count);
     }
-    AP("]}");
+    AP("],");
+    uint32_t sum = fnv1a32(out, o);
+    AP("\"sum\":%lu}", (unsigned long)sum);
 #undef AP
     return o;
 }
 
 bool GameState::fromJson(const char* j) {
-    if (!j) return false;
+    if (!j || !jsonComplete(j)) return false;
     long v = readLong(afterKey(j, "v"));
-    if (v < 1 || v > 3) return false;    // accept v1 (pre-events), v2, v3 saves
-    init();                              // defaults, then overwrite
+    if (v < 1 || v > SAVE_VER) return false;
+
+    static const char* const required[] = {
+        "v","ts","rng","fire","temp","bl","pop","fl","cd","tm",
+        "stores","bld","itm","wrk","log"
+    };
+    if (!requiredKeys(j, required, sizeof(required) / sizeof(required[0]))) return false;
+    if (v >= 2 && (!afterKey(j, "nev") || !afterKey(j, "echo"))) return false;
+    if (v >= 3 && (!afterKey(j, "seen") || !afterKey(j, "cshow") ||
+                   !afterKey(j, "perks") || !afterKey(j, "oftr") ||
+                   !afterKey(j, "ofti"))) return false;
+
+    if (jsonArrayCount(afterKey(j, "cd")) != 3 ||
+        jsonArrayCount(afterKey(j, "tm")) != 5 ||
+        jsonArrayCount(afterKey(j, "stores")) != RES_COUNT ||
+        jsonArrayCount(afterKey(j, "bld")) != BLD_COUNT ||
+        jsonArrayCount(afterKey(j, "itm")) != ITEM_COUNT ||
+        jsonArrayCount(afterKey(j, "wrk")) != JOB_COUNT) return false;
+    if (v >= 2 && jsonArrayCount(afterKey(j, "echo")) != 3) return false;
+    if (v >= 3) {
+        int nr = jsonArrayCount(afterKey(j, "oftr"));
+        int ni = jsonArrayCount(afterKey(j, "ofti"));
+        if (nr < 0 || ni < 0 || (nr & 1) || (ni & 1) ||
+            nr > 2 * RES_COUNT || ni > 2 * ITEM_COUNT) return false;
+    }
+    int logTotal = jsonArrayCount(afterKey(j, "log"));
+    if (logTotal < 0 || logTotal > LOG_CAP) return false;
+
+    if (v >= 4) {
+        const char* sumKey = keyToken(j, "sum");
+        const char* sumValue = afterKey(j, "sum");
+        if (!sumKey || !sumValue ||
+            fnv1a32(j, (size_t)(sumKey - j)) != (uint32_t)strtoul(sumValue, nullptr, 10))
+            return false;
+    }
+
+    init();                              // validated document, then overwrite
     lastSettleTs = (uint32_t)readLong(afterKey(j, "ts"));
     rng          = (uint32_t)readLong(afterKey(j, "rng"));
     fire         = (uint8_t)readLong(afterKey(j, "fire"));
@@ -889,56 +1025,128 @@ bool GameState::fromJson(const char* j) {
             }
         }
     }
+    if (logCount != logTotal) return false;
+    if (builderLevel < -1 || builderLevel > 4) return false;
+    for (int i = 0; i < BLD_COUNT; i++) if (buildings[i] > 250) return false;
+    for (int i = 0; i < ITEM_COUNT; i++) if (items[i] > 250) return false;
+    for (int i = 0; i < JOB_COUNT; i++) if (workers[i] > population) return false;
     return true;
 }
 
 // ===================== persistence (platform) =============================
 
 #ifdef ARDUINO
-bool GameState::save() const {
-    char buf[4096];
-    size_t n = toJson(buf, sizeof buf);
-    if (n >= sizeof buf) return false;              // truncated -> refuse
-    const char* tmp = ADR_SAVE_PATH ".tmp";
-    File f = SD.open(tmp, FILE_WRITE);
-    if (!f) return false;
-    f.write((const uint8_t*)buf, n);
-    f.close();
-    SD.remove(ADR_SAVE_PATH);                        // atomic tmp+rename
-    return SD.rename(tmp, ADR_SAVE_PATH);
-}
-bool GameState::load() {
-    File f = SD.open(ADR_SAVE_PATH, FILE_READ);
+static bool readSaveFile(const char* path, GameState& out) {
+    File f = SD.open(path, FILE_READ);
     if (!f) return false;
     size_t len = f.size();
     if (len == 0 || len >= 4096) { f.close(); return false; }
     char buf[4096];
     size_t rd = f.read((uint8_t*)buf, len);
     f.close();
-    buf[rd] = 0;
-    return fromJson(buf);
+    if (rd != len) return false;
+    buf[len] = 0;
+    return out.fromJson(buf);
 }
-#else   // host build (smoke test): plain stdio
 bool GameState::save() const {
     char buf[4096];
     size_t n = toJson(buf, sizeof buf);
     if (n >= sizeof buf) return false;
-    const char* tmp = ADR_SAVE_PATH ".tmp";
-    FILE* f = fopen(tmp, "wb");
+
+    File f = SD.open(ADR_SAVE_TMP_PATH, FILE_WRITE);
     if (!f) return false;
-    fwrite(buf, 1, n, f);
-    fclose(f);
-    remove(ADR_SAVE_PATH);
-    return rename(tmp, ADR_SAVE_PATH) == 0;
+    size_t wr = f.write((const uint8_t*)buf, n);
+    f.close();
+    if (wr != n) {
+        Serial.printf("[game] save short write %u/%u\n",
+                      (unsigned)wr, (unsigned)n);
+        SD.remove(ADR_SAVE_TMP_PATH);
+        return false;
+    }
+
+    const bool hadPrimary = SD.exists(ADR_SAVE_PATH);
+    if (hadPrimary) {
+        SD.remove(ADR_SAVE_BAK_PATH);
+        if (!SD.rename(ADR_SAVE_PATH, ADR_SAVE_BAK_PATH)) {
+            Serial.println("[game] save failed: primary -> bak");
+            SD.remove(ADR_SAVE_TMP_PATH);
+            return false;
+        }
+    }
+    if (!SD.rename(ADR_SAVE_TMP_PATH, ADR_SAVE_PATH)) {
+        Serial.println("[game] save failed: tmp -> primary");
+        SD.remove(ADR_SAVE_TMP_PATH);
+        if (hadPrimary) {
+            SD.remove(ADR_SAVE_PATH);
+            if (!SD.rename(ADR_SAVE_BAK_PATH, ADR_SAVE_PATH))
+                Serial.println("[game] save failed: backup restore");
+        }
+        return false;
+    }
+    Serial.printf("[game] saved %u bytes\n", (unsigned)n);
+    return true;
 }
 bool GameState::load() {
-    FILE* f = fopen(ADR_SAVE_PATH, "rb");
+    if (readSaveFile(ADR_SAVE_PATH, *this)) return true;
+    if (!readSaveFile(ADR_SAVE_BAK_PATH, *this)) return false;
+
+    SD.remove(ADR_SAVE_PATH);
+    if (!save()) Serial.println("[game] backup loaded but primary restore failed");
+    else Serial.println("[game] restored primary from backup");
+    return true;
+}
+#else   // host build (smoke test): plain stdio
+static bool readSaveFile(const char* path, GameState& out) {
+    FILE* f = fopen(path, "rb");
     if (!f) return false;
     char buf[4096];
     size_t rd = fread(buf, 1, sizeof buf - 1, f);
+    bool complete = !ferror(f) && rd > 0;
     fclose(f);
+    if (!complete) return false;
     buf[rd] = 0;
-    return fromJson(buf);
+    return out.fromJson(buf);
+}
+bool GameState::save() const {
+    char buf[4096];
+    size_t n = toJson(buf, sizeof buf);
+    if (n >= sizeof buf) return false;
+    FILE* f = fopen(ADR_SAVE_TMP_PATH, "wb");
+    if (!f) return false;
+    size_t wr = fwrite(buf, 1, n, f);
+    int closeRc = fclose(f);
+    bool ok = (wr == n) && closeRc == 0;
+    if (!ok) {
+        remove(ADR_SAVE_TMP_PATH);
+        return false;
+    }
+
+    FILE* old = fopen(ADR_SAVE_PATH, "rb");
+    const bool hadPrimary = old != nullptr;
+    if (old) fclose(old);
+    if (hadPrimary) {
+        remove(ADR_SAVE_BAK_PATH);
+        if (rename(ADR_SAVE_PATH, ADR_SAVE_BAK_PATH) != 0) {
+            remove(ADR_SAVE_TMP_PATH);
+            return false;
+        }
+    }
+    if (rename(ADR_SAVE_TMP_PATH, ADR_SAVE_PATH) != 0) {
+        remove(ADR_SAVE_TMP_PATH);
+        if (hadPrimary) {
+            remove(ADR_SAVE_PATH);
+            rename(ADR_SAVE_BAK_PATH, ADR_SAVE_PATH);
+        }
+        return false;
+    }
+    return true;
+}
+bool GameState::load() {
+    if (readSaveFile(ADR_SAVE_PATH, *this)) return true;
+    if (!readSaveFile(ADR_SAVE_BAK_PATH, *this)) return false;
+    remove(ADR_SAVE_PATH);
+    save();
+    return true;
 }
 #endif
 

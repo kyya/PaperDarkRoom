@@ -37,14 +37,26 @@ namespace adr {
 #ifndef ADR_WORLD_PATH
 #define ADR_WORLD_PATH "/.darkroom/world.bin"
 #endif
+#ifndef ADR_WORLD_TMP_PATH
+#define ADR_WORLD_TMP_PATH ADR_WORLD_PATH ".tmp"
+#endif
+#ifndef ADR_WORLD_BAK_PATH
+#define ADR_WORLD_BAK_PATH "/.darkroom/world.bak"
+#endif
 #ifndef ADR_TREK_PATH
 #define ADR_TREK_PATH  "/.darkroom/trek.bin"
+#endif
+#ifndef ADR_TREK_TMP_PATH
+#define ADR_TREK_TMP_PATH ADR_TREK_PATH ".tmp"
+#endif
+#ifndef ADR_TREK_BAK_PATH
+#define ADR_TREK_BAK_PATH "/.darkroom/trek.bak"
 #endif
 
 constexpr uint32_t WORLD_MAGIC = 0x314C5257;  // "WRL1" LE — world.bin
 constexpr uint32_t TREK_MAGIC  = 0x314B5254;  // "TRK1" LE — trek.bin
-constexpr uint8_t  WORLD_VER   = 2;   // v2 adds the used-outpost mask (v1 migrates)
-constexpr uint8_t  TREK_VER    = 1;
+constexpr uint8_t  WORLD_VER   = 3;   // v3 appends a CRC32 to the v2 payload
+constexpr uint8_t  TREK_VER    = 2;   // v2 appends a CRC32 to the v1 payload
 
 // What one move() resolved to. Landmark is a hook for 2.4 (the setpiece engine);
 // FIGHT is live as of 2.3 — the caller (World page) starts the fight overlay.

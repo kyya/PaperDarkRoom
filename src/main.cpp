@@ -80,6 +80,9 @@ static int      g_rot             = 2;   // fixed portrait; no auto-rotate — k
                                              // sendStatus/otaPollFinish take it.
 bool            g_sdOk            = false;   // ble_link.cpp reads it (extern) for
                                              // STATUS's sd= token.
+static bool     g_displayReady    = false;   // panel + canvas are valid
+static bool     g_touchReady      = false;   // GT911 polling starts after boot handoff
+static uint32_t g_touchEnableAt   = 0;
 static uint32_t g_bootMs          = 0;
 static uint32_t g_lastInteraction = 0;
 
@@ -207,8 +210,9 @@ static void applyPendingGameCmd() {
     // Reset hides Outside/Trade/Assign (outsideUnlocked=false), so we can't
     // refresh the current page — jump explicitly to the always-visible Room.
     if (strcmp(ble_link::rx.gameCmd, "adr:reset") == 0) {
-        SD.remove(ADR_SAVE_PATH);            // primary save file
-        SD.remove(ADR_SAVE_PATH ".tmp");     // stray tmp from a torn atomic write
+        SD.remove(ADR_SAVE_PATH);          // primary save file
+        SD.remove(ADR_SAVE_TMP_PATH);       // stray tmp from a torn atomic write
+        SD.remove(ADR_SAVE_BAK_PATH);       // backup from the previous save
         g_game.init();                       // factory state (all fields)
         events::reset();                     // drop any RAM-only on-screen event latch
         if (assign_page::isOpen()) assign_page::close();   // its ring slot re-hides
@@ -260,7 +264,11 @@ static void applyPendingGameCmd() {
     g_game.stores[r] += amount * adr::FP;         // stores are fixed-point × FP
     if (g_game.stores[r] < 0) g_game.stores[r] = 0;   // never leave it negative
     g_game.markSeen((uint8_t)r);   // injected == "owned": unlock its craft/buy gates
-    g_game.save();
+    if (!g_game.save()) {
+        Serial.println("[cmd] give save failed");
+        M5.Speaker.tone(600, 120);
+        return;
+    }
     M5.Speaker.tone(1800, 80);
     pager::showPage(pager::currentRingIndex(), false);
     Serial.printf("[cmd] give %s %d -> stores[%d]=%ld\n",
@@ -335,7 +343,7 @@ static void sleepNow(const char* reason) {
     // (anyWantsAwake). Release the guard so payGhostDebtIfDue can repaint.
     fight_modal::endForSleep();
     setpiece_modal::endForSleep();   // same for a live setpiece overlay (abandon)
-    pager::payGhostDebtIfDue();
+    if (g_displayReady) pager::payGhostDebtIfDue();
     uint32_t sleepSecs = WAKE_INTERVAL_SECS;
     uint16_t qStart, qEnd;
     loadQuietHours(qStart, qEnd);
@@ -350,7 +358,12 @@ static void sleepNow(const char* reason) {
                           (unsigned long)sleepSecs);
         }
     }
-    g_game.save();                     // persist the game before power-off
+    if (!g_game.save()) {
+        // Do not power off after a failed persist; the RAM-only state would be
+        // lost and the backup/primary pair remains available for recovery.
+        Serial.println("[sleep] save failed — staying awake");
+        return;
+    }
     Serial.printf("[sleep] %s — timerSleep(%lus)\n", reason, (unsigned long)sleepSecs);
     Serial.flush();
     delay(40);
@@ -393,10 +406,18 @@ void setup() {
     cfg.clear_display = false;     // keep the last frame on the EPD
     M5.begin(cfg);
 
-    // GT911 factory config reports only 2 touch points — the grip-graze slot scan
-    // and the multi-finger guard need more. Volatile: re-apply every cold boot.
-    if (auto t = M5.Display.touch())
-        static_cast<lgfx::Touch_GT911*>(t)->setTouchNums(5);
+    // A failed panel probe leaves M5.Display methods only partially usable.
+    // Disable touch immediately so the first M5.update() cannot poll GT911
+    // while PaperBoot/SD handoff is still settling or while there is no panel.
+    M5.Touch.end();
+    g_displayReady = M5.Display.getPanel() != nullptr &&
+                     M5.Display.width() > 0 && M5.Display.height() > 0;
+    if (g_displayReady) {
+        if (auto t = M5.Display.touch())
+            static_cast<lgfx::Touch_GT911*>(t)->setTouchNums(5);
+        g_touchReady = false;
+        g_touchEnableAt = millis() + 1500;
+    }
 
     Serial.begin(115200);
     delay(400);
@@ -422,12 +443,19 @@ void setup() {
     // Before anything heavy: count this boot toward OTA probation / roll back.
     otaRollbackCheck();
 
-    M5.Display.setRotation(0);
-    M5.Display.setEpdMode(epd_mode_t::epd_fast);
-    canvas.setColorDepth(m5gfx::grayscale_8bit);
-    if (!canvas.createSprite(PANEL_W, PANEL_H))
-        Serial.println("[boot] FATAL: canvas alloc failed");
-    canvas.fillSprite(TFT_WHITE);
+    if (g_displayReady) {
+        M5.Display.setRotation(0);
+        M5.Display.setEpdMode(epd_mode_t::epd_fast);
+        canvas.setColorDepth(m5gfx::grayscale_8bit);
+        if (!canvas.createSprite(PANEL_W, PANEL_H)) {
+            Serial.println("[boot] FATAL: canvas alloc failed");
+            g_displayReady = false;
+        } else {
+            canvas.fillSprite(TFT_WHITE);
+        }
+    } else {
+        Serial.println("[boot] no valid display — graphics disabled");
+    }
 
     g_onUsb = usbPresent();
     int bat = (int)M5.Power.getBatteryLevel();
@@ -437,8 +465,9 @@ void setup() {
                   g_onUsb ? 1 : 0, bat,
                   (int)M5.Power.getBatteryVoltage(), g_lowBattery ? 1 : 0);
 
-    M5.Display.setRotation(2);
-    Serial.printf("[boot] rotation=%d\n", g_rot);
+    if (g_displayReady) M5.Display.setRotation(2);
+    Serial.printf("[boot] rotation=%d display=%d\n", g_rot,
+                  g_displayReady ? 1 : 0);
 
     g_sdOk = sdInit();
     Serial.printf("[boot] sd %s\n", g_sdOk ? "ok" : "none");
@@ -480,12 +509,16 @@ void setup() {
     // The ring is all client (game) pages — no host pages exist. Restore the
     // last-shown game page by NAME and paint it in quality mode (a cold-boot
     // redraw isn't latency-sensitive and clears ghosting).
-    if (pager::ringCount() > 0) {
-        pager::restore(true);
-        Serial.printf("[boot] restored page %d/%d\n",
-                      pager::currentRingIndex(), pager::ringCount());
+    if (g_displayReady) {
+        if (pager::ringCount() > 0) {
+            pager::restore(true);
+            Serial.printf("[boot] restored page %d/%d\n",
+                          pager::currentRingIndex(), pager::ringCount());
+        }
+        status_bar::draw();
+    } else {
+        Serial.println("[boot] skipping page restore/status bar");
     }
-    status_bar::draw();
 
     for (int i = 0; i < 2; i++) {   // "I just woke" heartbeat blink
         M5.Power.setLed(255); delay(90);
@@ -516,11 +549,18 @@ void setup() {
 }
 
 void loop() {
+    if (g_displayReady && !g_touchReady &&
+        millis() >= g_touchEnableAt && digitalRead(48) == HIGH) {
+        M5.Touch.begin(&M5.Display);
+        g_touchReady = true;
+        Serial.println("[touch] GT911 polling enabled");
+    }
+
     M5.update();
     uint32_t now = millis();
 
     // Touch first: any tap = interaction — page + open/extend the wake window.
-    if (pager::handleTouch()) {
+    if (g_displayReady && pager::handleTouch()) {
         g_lastInteraction = now;
         enterInteractive("tap");
     }
@@ -550,7 +590,7 @@ void loop() {
     // firmware, so it never activates) + the current page's time axis. Kept so
     // the reused ble_link/status_bar link cleanly; both are guarded no-ops here.
     pomo::tick();
-    pager::tickCurrent(now);
+    if (g_displayReady) pager::tickCurrent(now);
 
     // Random-event engine (research.md §4.1/§5.4), page-independent:
     //  - drive the scheduler ~1s (RTC epoch = scheduling/echo clock);
@@ -567,16 +607,18 @@ void loop() {
     // queued event waits and shows once the fight ends. The combat overlay drives
     // its own 1s tick here (pager::tickCurrent no-ops while it's active), the
     // per-second clock the enemy swings + weapon cooldowns run on.
-    if (events::active() && !event_modal::active() && !fight_modal::active() &&
-        !setpiece_modal::active())
+    if (g_displayReady && events::active() && !event_modal::active() &&
+        !fight_modal::active() && !setpiece_modal::active())
         event_modal::show(now);
-    event_modal::checkTimeout(now);
-    if (fight_modal::active())
-        fight_modal::tick(now);
+    if (g_displayReady) {
+        event_modal::checkTimeout(now);
+        if (fight_modal::active())
+            fight_modal::tick(now);
+    }
     // Landmark setpiece overlay (P2.4): its own 2-minute idle watchdog. The combat
     // it may interleave is ticked by fight_modal above; checkTimeout no-ops while
     // that fight is live (the fight owns the clock).
-    setpiece_modal::checkTimeout(now);
+    if (g_displayReady) setpiece_modal::checkTimeout(now);
 
     // OTA: on the last streamed byte, verify + commit + reboot (never returns)
     // or report ota=err. No-op unless an OTA transfer just finished. THE
@@ -588,7 +630,7 @@ void loop() {
     static bool     s_otaBarActive = false;
     static int      s_otaBarPct    = -1;
     static uint32_t s_otaBarDraw   = 0;
-    if (ble_link::otaBusy()) {
+    if (g_displayReady && ble_link::otaBusy()) {
         uint32_t recv = ble_link::otaReceived();
         uint32_t tot  = ble_link::otaTotal();
         int pct = tot ? (int)((recv * 100ULL) / tot) : 0;
@@ -626,7 +668,7 @@ void loop() {
     if (g_onUsb) {
         if (!client_pages::anyWantsAwake() &&
             now - g_lastInteraction > IDLE_TIMEOUT_MS)
-            pager::idleDeepCleanIfDue(now);
+            if (g_displayReady) pager::idleDeepCleanIfDue(now);
     } else {
         if (ble_link::otaBusy()) {
             // OTA in flight: never sleep — the reboot (ota=ok) or a disconnect
@@ -660,8 +702,9 @@ void loop() {
         M5.Rtc.getTime(&t);
         int min = t.minutes;
         int usb = g_onUsb ? 1 : 0;
-        int bat = status_bar::batteryPercent();
-        if ((min != s_barMin || usb != s_barUsb || bat != s_barBat) &&
+        int bat = g_displayReady ? status_bar::batteryPercent() : -1;
+        if (g_displayReady &&
+            (min != s_barMin || usb != s_barUsb || bat != s_barBat) &&
             pager::ringCount() > 0 && !ble_link::otaBusy())
             status_bar::draw();
         s_barMin = min; s_barUsb = usb; s_barBat = bat;

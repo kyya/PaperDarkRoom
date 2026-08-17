@@ -51,30 +51,52 @@ static inline int16_t getI16(const uint8_t* b, size_t& o) {
     uint16_t u = (uint16_t)b[o] | ((uint16_t)b[o + 1] << 8); o += 2;
     return (int16_t)u;
 }
+static uint32_t crc32(const uint8_t* data, size_t len) {
+    uint32_t c = 0xffffffffu;
+    for (size_t i = 0; i < len; i++) {
+        c ^= data[i];
+        for (int bit = 0; bit < 8; bit++)
+            c = (c >> 1) ^ (0xedb88320u & (uint32_t)-(int)(c & 1));
+    }
+    return ~c;
+}
 
 // ---- binary sizes (documented layout; see world_state.h) ------------------
 // v1 = header + tiles + revealed + visited (legacy, loaded via migration);
 // v2 appends the used-outpost mask.
 constexpr size_t WORLD_BIN_SIZE_V1 =
-    12 + WORLD_CELLS + 2 * WORLD_MASK_BYTES;                       // 4665
-constexpr size_t WORLD_BIN_SIZE =
-    12 + WORLD_CELLS + 3 * WORLD_MASK_BYTES;                       // 5131
-constexpr size_t TREK_HDR = 8 + 2 + 18 + 2 + 4 + 1 + 1 + 32;      // 68
-constexpr size_t TREK_BIN_SIZE =
+    12 + WORLD_CELLS + 2 * WORLD_MASK_BYTES;                       // legacy v1
+constexpr size_t WORLD_BIN_SIZE_V2 =
+    12 + WORLD_CELLS + 3 * WORLD_MASK_BYTES;                       // legacy v2
+constexpr size_t WORLD_BIN_SIZE_CRC = WORLD_BIN_SIZE_V2 + 4;
+constexpr size_t TREK_HDR = 8 + 2 + 18 + 2 + 4 + 1 + 1 + 32;       // 68
+constexpr size_t TREK_BIN_SIZE_V1 =
     TREK_HDR + RES_COUNT * 2 + ITEM_COUNT * 2 +
     WORLD_CELLS + 2 * WORLD_MASK_BYTES;
+constexpr size_t TREK_BIN_SIZE_CRC = TREK_BIN_SIZE_V1 + 4;
 
 // ===================== platform file I/O ==================================
 
 #ifdef ARDUINO
-static bool w_writeAtomic(const char* path, const uint8_t* d, size_t n) {
-    char tmp[80]; snprintf(tmp, sizeof tmp, "%s.tmp", path);
+static bool w_writeAtomic(const char* path, const char* tmp, const char* bak,
+                          const uint8_t* d, size_t n) {
     File f = SD.open(tmp, FILE_WRITE);
     if (!f) return false;
-    f.write(d, n);
+    size_t wr = f.write(d, n);
     f.close();
-    SD.remove(path);
-    return SD.rename(tmp, path);
+    if (wr != n) { SD.remove(tmp); return false; }
+
+    const bool hadOld = SD.exists(path);
+    if (hadOld) {
+        SD.remove(bak);
+        if (!SD.rename(path, bak)) { SD.remove(tmp); return false; }
+    }
+    if (!SD.rename(tmp, path)) {
+        SD.remove(tmp);
+        if (hadOld) { SD.remove(path); SD.rename(bak, path); }
+        return false;
+    }
+    return true;
 }
 static int w_read(const char* path, uint8_t* buf, size_t cap) {
     File f = SD.open(path, FILE_READ);
@@ -83,26 +105,44 @@ static int w_read(const char* path, uint8_t* buf, size_t cap) {
     if (len == 0 || len > cap) { f.close(); return -1; }
     size_t rd = f.read(buf, len);
     f.close();
-    return (int)rd;
+    return rd == len ? (int)rd : -1;
 }
 static bool w_exists(const char* path) { return SD.exists(path); }
 static void w_remove(const char* path) { SD.remove(path); }
 #else
-static bool w_writeAtomic(const char* path, const uint8_t* d, size_t n) {
-    char tmp[512]; snprintf(tmp, sizeof tmp, "%s.tmp", path);
+static bool w_writeAtomic(const char* path, const char* tmp, const char* bak,
+                          const uint8_t* d, size_t n) {
     FILE* f = fopen(tmp, "wb");
     if (!f) return false;
-    fwrite(d, 1, n, f);
-    fclose(f);
-    remove(path);
-    return rename(tmp, path) == 0;
+    size_t wr = fwrite(d, 1, n, f);
+    bool ok = (wr == n) && (fclose(f) == 0);
+    if (!ok) { remove(tmp); return false; }
+
+    FILE* old = fopen(path, "rb");
+    const bool hadOld = old != nullptr;
+    if (old) fclose(old);
+    if (hadOld) {
+        remove(bak);
+        if (rename(path, bak) != 0) { remove(tmp); return false; }
+    }
+    if (rename(tmp, path) != 0) {
+        remove(tmp);
+        if (hadOld) { remove(path); rename(bak, path); }
+        return false;
+    }
+    return true;
 }
 static int w_read(const char* path, uint8_t* buf, size_t cap) {
     FILE* f = fopen(path, "rb");
     if (!f) return -1;
-    size_t rd = fread(buf, 1, cap, f);
+    if (fseek(f, 0, SEEK_END) != 0) { fclose(f); return -1; }
+    long size = ftell(f);
+    if (size <= 0 || (size_t)size > cap || fseek(f, 0, SEEK_SET) != 0) {
+        fclose(f); return -1;
+    }
+    size_t rd = fread(buf, 1, (size_t)size, f);
     fclose(f);
-    return (int)rd;
+    return rd == (size_t)size ? (int)rd : -1;
 }
 static bool w_exists(const char* path) {
     FILE* f = fopen(path, "rb");
@@ -930,12 +970,54 @@ bool WorldState::compassFromVillage(char* out, size_t cap) const {
 }
 
 // ===================== SD persistence =====================================
-// world.bin layout (LE): [magic u32][ver u8][rsv 3][seed u32][tiles CELLS]
-//                        [revealed MASK][visited MASK][usedOutpost MASK] (5131 B)
-// A v1 file (no usedOutpost mask, 4665 B) still loads — the mask defaults empty.
+// New files use magic + version + payload + CRC32. Legacy v1/v2 world files
+// and v1 trek files are accepted only at their exact historical sizes, validated,
+// and immediately rewritten in the checksummed format.
+
+static bool validWorldPayload(const uint8_t* buf, size_t n, uint8_t ver) {
+    if (ver != 1 && ver != 2 && ver != WORLD_VER) return false;
+    const size_t expected = ver == 1 ? WORLD_BIN_SIZE_V1 : WORLD_BIN_SIZE_V2;
+    if (n != expected) return false;
+    size_t o = 0;
+    if (getU32(buf, o) != WORLD_MAGIC) return false;
+    if (buf[o++] != ver) return false;
+    o += 3;
+    (void)getU32(buf, o);
+    for (int i = 0; i < WORLD_CELLS; i++)
+        if (buf[o + i] >= TILE_COUNT) return false;
+    return true;
+}
+static bool validTrekPayload(const uint8_t* buf, size_t n, uint8_t ver) {
+    if ((ver != 1 && ver != TREK_VER) || n != TREK_BIN_SIZE_V1) return false;
+    size_t o = 0;
+    if (getU32(buf, o) != TREK_MAGIC) return false;
+    if (buf[o++] != ver) return false;
+    o += 3;
+    const int16_t x = getI16(buf, o), y = getI16(buf, o);
+    const int16_t hp = getI16(buf, o), maxHp = getI16(buf, o);
+    const int16_t water = getI16(buf, o), maxWater = getI16(buf, o);
+    o += 6; // foodMove, waterMove, fightMove
+    o += 2; // starving, thirsty
+    o += 4; // rng
+    o += 1; // cleared flags
+    uint8_t used = buf[o++];
+    if (used > 16 || x < 0 || x >= WORLD_DIM || y < 0 || y >= WORLD_DIM ||
+        maxHp < 0 || hp < 0 || hp > maxHp ||
+        maxWater < 0 || water < 0 || water > maxWater) return false;
+    for (int i = 0; i < used; i++) {
+        if (buf[o + i] >= WORLD_DIM || buf[o + 16 + i] >= WORLD_DIM) return false;
+    }
+    o += 32;
+    for (int i = 0; i < RES_COUNT + ITEM_COUNT; i++) {
+        if (getI16(buf, o) < 0) return false;
+    }
+    for (int i = 0; i < WORLD_CELLS; i++)
+        if (buf[o + i] >= TILE_COUNT) return false;
+    return true;
+}
 
 bool WorldState::saveWorld() const {
-    static uint8_t buf[WORLD_BIN_SIZE];
+    static uint8_t buf[WORLD_BIN_SIZE_CRC];
     size_t o = 0;
     putU32(buf, o, WORLD_MAGIC);
     buf[o++] = WORLD_VER; buf[o++] = 0; buf[o++] = 0; buf[o++] = 0;
@@ -944,41 +1026,46 @@ bool WorldState::saveWorld() const {
     memcpy(buf + o, revealed, WORLD_MASK_BYTES);    o += WORLD_MASK_BYTES;
     memcpy(buf + o, visited, WORLD_MASK_BYTES);     o += WORLD_MASK_BYTES;
     memcpy(buf + o, usedOutpost, WORLD_MASK_BYTES); o += WORLD_MASK_BYTES;
-    return w_writeAtomic(ADR_WORLD_PATH, buf, o);
+    uint32_t sum = crc32(buf, o);
+    putU32(buf, o, sum);
+    return w_writeAtomic(ADR_WORLD_PATH, ADR_WORLD_TMP_PATH, ADR_WORLD_BAK_PATH, buf, o);
 }
 
 bool WorldState::loadWorld() {
-    static uint8_t buf[WORLD_BIN_SIZE];
+    static uint8_t buf[WORLD_BIN_SIZE_CRC];
     int n = w_read(ADR_WORLD_PATH, buf, sizeof buf);
-    if (n < (int)WORLD_BIN_SIZE_V1) return false;   // too short even for legacy
+    if (n < 12) return false;
+    size_t payload = 0;
+    uint8_t ver = buf[4];
+    if (ver == WORLD_VER) {
+        if (n != (int)WORLD_BIN_SIZE_CRC) return false;
+        payload = n - 4;
+        uint32_t stored = getU32(buf, payload);
+        if (stored != crc32(buf, payload) ||
+            !validWorldPayload(buf, payload, ver)) return false;
+    } else if (ver == 1 || ver == 2) {
+        payload = n;
+        if (!validWorldPayload(buf, payload, ver)) return false;
+    } else return false;
+
     size_t o = 0;
     if (getU32(buf, o) != WORLD_MAGIC) return false;
-    uint8_t ver = buf[o++]; o += 3;
-    if (ver != 1 && ver != WORLD_VER) return false;
+    ver = buf[o++]; o += 3;
     seed = getU32(buf, o);
     memcpy(tiles, buf + o, WORLD_CELLS);            o += WORLD_CELLS;
     memcpy(revealed, buf + o, WORLD_MASK_BYTES);    o += WORLD_MASK_BYTES;
     memcpy(visited, buf + o, WORLD_MASK_BYTES);     o += WORLD_MASK_BYTES;
-    if (ver == WORLD_VER) {
-        if (n < (int)WORLD_BIN_SIZE) return false;
-        memcpy(usedOutpost, buf + o, WORLD_MASK_BYTES); o += WORLD_MASK_BYTES;
-    } else {
-        // v1 migration: no used-outpost record — start empty. Worst case a
-        // previously-used outpost becomes usable once more after the upgrade.
+    if (ver == 2 || ver == WORLD_VER)
+        memcpy(usedOutpost, buf + o, WORLD_MASK_BYTES);
+    else
         memset(usedOutpost, 0, sizeof usedOutpost);
-    }
     generated = true;
+    if (ver != WORLD_VER) saveWorld();
     return true;
 }
 
-// trek.bin layout (LE): [magic u32][ver u8][rsv 3][active u8][dead u8]
-//   [x,y,hp,maxHp,water,maxWater,foodMove,waterMove,fightMove i16 x9]
-//   [starving u8][thirsty u8][rng u32][clearedFlags u8][usedOutpostN u8]
-//   [usedOutpostX 16][usedOutpostY 16][outfitRes i16 x RES_COUNT]
-//   [outfitItem i16 x ITEM_COUNT][tiles CELLS][revealed MASK][visited MASK]
-
 bool WorldState::saveTrek() const {
-    static uint8_t buf[TREK_BIN_SIZE];
+    static uint8_t buf[TREK_BIN_SIZE_CRC];
     size_t o = 0;
     putU32(buf, o, TREK_MAGIC);
     buf[o++] = TREK_VER; buf[o++] = 0; buf[o++] = 0; buf[o++] = 0;
@@ -997,6 +1084,7 @@ bool WorldState::saveTrek() const {
                  (ex.clearedExec ? 16 : 0) | (ex.gastronome ? 32 : 0) |
                  (ex.danger ? 64 : 0);
     buf[o++] = cf;
+    if (ex.usedOutpostN > 16) return false;
     buf[o++] = ex.usedOutpostN;
     memcpy(buf + o, ex.usedOutpostX, 16); o += 16;
     memcpy(buf + o, ex.usedOutpostY, 16); o += 16;
@@ -1005,17 +1093,32 @@ bool WorldState::saveTrek() const {
     memcpy(buf + o, ex.tiles, WORLD_CELLS);          o += WORLD_CELLS;
     memcpy(buf + o, ex.revealed, WORLD_MASK_BYTES);  o += WORLD_MASK_BYTES;
     memcpy(buf + o, ex.visited, WORLD_MASK_BYTES);   o += WORLD_MASK_BYTES;
-    return w_writeAtomic(ADR_TREK_PATH, buf, o);
+    uint32_t sum = crc32(buf, o);
+    putU32(buf, o, sum);
+    return w_writeAtomic(ADR_TREK_PATH, ADR_TREK_TMP_PATH, ADR_TREK_BAK_PATH, buf, o);
 }
 
 bool WorldState::loadTrek() {
-    static uint8_t buf[TREK_BIN_SIZE];
+    static uint8_t buf[TREK_BIN_SIZE_CRC];
     int n = w_read(ADR_TREK_PATH, buf, sizeof buf);
-    if (n < (int)TREK_BIN_SIZE) { ex.active = false; return false; }
+    if (n < 0) { ex.active = false; return false; }
+
+    size_t payload = 0;
+    uint8_t ver = buf[4];
+    if (ver == TREK_VER) {
+        if (n != (int)TREK_BIN_SIZE_CRC) { ex.active = false; return false; }
+        payload = n - 4;
+        uint32_t stored = getU32(buf, payload);
+        if (stored != crc32(buf, payload) ||
+            !validTrekPayload(buf, payload, ver)) { ex.active = false; return false; }
+    } else if (ver == 1) {
+        payload = n;
+        if (!validTrekPayload(buf, payload, ver)) { ex.active = false; return false; }
+    } else { ex.active = false; return false; }
+
     size_t o = 0;
     if (getU32(buf, o) != TREK_MAGIC) { ex.active = false; return false; }
-    uint8_t ver = buf[o++]; o += 3;
-    if (ver != TREK_VER) { ex.active = false; return false; }
+    ver = buf[o++]; o += 3;
     memset(&ex, 0, sizeof ex);
     ex.active = buf[o++] != 0;
     ex.dead   = buf[o++] != 0;
@@ -1030,8 +1133,7 @@ bool WorldState::loadTrek() {
     uint8_t cf = buf[o++];
     ex.clearedIron = cf & 1; ex.clearedCoal = cf & 2; ex.clearedSulphur = cf & 4;
     ex.clearedShip = cf & 8; ex.clearedExec = cf & 16; ex.gastronome = cf & 32;
-    ex.danger = cf & 64;   // absent (0) on a pre-existing trek.bin -> fail-open,
-                          // re-derived on the next move()'s checkDanger anyway
+    ex.danger = cf & 64;
     ex.usedOutpostN = buf[o++];
     memcpy(ex.usedOutpostX, buf + o, 16); o += 16;
     memcpy(ex.usedOutpostY, buf + o, 16); o += 16;
@@ -1040,6 +1142,7 @@ bool WorldState::loadTrek() {
     memcpy(ex.tiles, buf + o, WORLD_CELLS);          o += WORLD_CELLS;
     memcpy(ex.revealed, buf + o, WORLD_MASK_BYTES);  o += WORLD_MASK_BYTES;
     memcpy(ex.visited, buf + o, WORLD_MASK_BYTES);   o += WORLD_MASK_BYTES;
+    if (ver != TREK_VER) saveTrek();
     return true;
 }
 
@@ -1047,11 +1150,10 @@ void WorldState::clearTrek() { w_remove(ADR_TREK_PATH); }
 
 bool WorldState::restore() {
     memset(&ex, 0, sizeof ex);
-    memset(&cx, 0, sizeof cx);      // a resumed trip has no active combat (=flee)
+    memset(&cx, 0, sizeof cx);
     if (!loadWorld()) { generated = false; return false; }
     if (w_exists(ADR_TREK_PATH) && loadTrek() && ex.active) return true;
     ex.active = false;
     return false;
 }
-
 }  // namespace adr

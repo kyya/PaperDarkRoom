@@ -72,13 +72,22 @@ struct LogEntry {
 // an 8-entry save loads into a 16-slot ring untouched (and a 16-entry save read
 // by older firmware simply truncates at 8).
 constexpr int   LOG_CAP    = 16;
-constexpr int   SAVE_VER   = 3;    // v2 adds the random-event fields (nextEventAt,
-                                   // delayed-echo slot); v3 adds the craft-unlock
-                                   // bitsets (seen / craftShown). v1 & v2 saves
-                                   // still load (missing fields derived on read).
+constexpr int   SAVE_VER   = 4;    // v4 adds a checksum and strict shape validation;
+                                   // v3 and older saves remain readable when their
+                                   // legacy fields are present.
 constexpr uint8_t ECHO_NONE = 0xFF;  // delayedEcho.res sentinel: slot empty
 #ifndef ADR_SAVE_PATH
 #define ADR_SAVE_PATH "/.darkroom/adr_save.json"
+#endif
+#ifndef ADR_SAVE_TMP_PATH
+#define ADR_SAVE_TMP_PATH ADR_SAVE_PATH ".tmp"
+#endif
+#ifndef ADR_SAVE_BAK_PATH
+#ifdef ARDUINO
+#define ADR_SAVE_BAK_PATH "/.darkroom/adr_save.bak"
+#else
+#define ADR_SAVE_BAK_PATH ADR_SAVE_PATH ".bak"
+#endif
 #endif
 
 // Compile switch: keep the fire frozen while the device deep-sleeps (default),
