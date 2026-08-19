@@ -384,14 +384,34 @@ static void applyPendingGameCmd() {
     int r = -1;
     for (int i = 0; i < adr::RES_COUNT; i++)
         if (strcmp(res, adr::RES_KEY[i]) == 0) { r = i; break; }
-    if (r < 0) {
+    if (r >= 0) {
+        g_game.stores[r] += amount * adr::FP;         // stores are fixed-point × FP
+        if (g_game.stores[r] < 0) g_game.stores[r] = 0;   // never leave it negative
+        g_game.markSeen((uint8_t)r);   // injected == "owned": unlock its craft/buy gates
+        if (!g_game.save()) {
+            Serial.println("[cmd] give save failed");
+            M5.Speaker.tone(600, 120);
+            return;
+        }
+        M5.Speaker.tone(1800, 80);
+        pager::showPage(pager::currentRingIndex(), false);
+        Serial.printf("[cmd] give %s %d -> stores[%d]=%ld\n",
+                      res, amount, r, (long)g_game.stores[r]);
+        return;
+    }
+    // Weapons / tools / bag and water upgrades live in items[], not stores[].
+    // Same verb so the USB/BLE host does not need a second command.
+    int it = -1;
+    for (int i = 0; i < adr::ITEM_COUNT; i++)
+        if (strcmp(res, adr::ITEM_KEY[i]) == 0) { it = i; break; }
+    if (it < 0) {
         Serial.printf("[cmd] unknown resource: '%s'\n", res);
         M5.Speaker.tone(600, 120);
         return;
     }
-    g_game.stores[r] += amount * adr::FP;         // stores are fixed-point × FP
-    if (g_game.stores[r] < 0) g_game.stores[r] = 0;   // never leave it negative
-    g_game.markSeen((uint8_t)r);   // injected == "owned": unlock its craft/buy gates
+    int v = (int)g_game.items[it] + amount;
+    if (v > 255) v = 255;                 // items[] is uint8_t
+    g_game.items[it] = (uint8_t)v;
     if (!g_game.save()) {
         Serial.println("[cmd] give save failed");
         M5.Speaker.tone(600, 120);
@@ -399,8 +419,8 @@ static void applyPendingGameCmd() {
     }
     M5.Speaker.tone(1800, 80);
     pager::showPage(pager::currentRingIndex(), false);
-    Serial.printf("[cmd] give %s %d -> stores[%d]=%ld\n",
-                  res, amount, r, (long)g_game.stores[r]);
+    Serial.printf("[cmd] give %s %d -> items[%d]=%u\n",
+                  res, amount, it, (unsigned)g_game.items[it]);
 }
 
 // ---- OTA app-level rollback (NVS namespace "ota") ------------------------
