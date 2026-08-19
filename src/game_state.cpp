@@ -574,28 +574,44 @@ Result GameState::makeCraftable(uint8_t craftId) {
     return RC_OK;
 }
 
-Result GameState::buy(uint8_t tradeId, int n) {
-    if (tradeId >= TRADE_COUNT || n <= 0) return RC_ERR_INVALID;
-    if (buildings[B_TRADING_POST] == 0) return RC_ERR_LOCKED;
+int GameState::maxBuyable(uint8_t tradeId) const {
+    if (tradeId >= TRADE_COUNT || buildings[B_TRADING_POST] == 0) return 0;
     const TradeGood& g = TRADE[tradeId];
-    int have = whole(g.product); if (have < 0) have = 0;
-    if (g.maximum >= 0 && have >= g.maximum) return RC_ERR_MAX;
-    // TRUNCATION, not all-or-nothing (v0.20) — the same rule the ±10 stepper
-    // already follows for workers and outfit units (stepper.h, upstream
-    // outside.js:376 `Math.min(available, btn.data)`): a ×10 press with only 7
-    // affordable buys 7 rather than refusing. n == 1 therefore behaves exactly as
-    // this function always did.
-    if (g.maximum >= 0 && have + n > g.maximum) n = g.maximum - have;
-    for (int i = 0; i < 3 && g.cost[i].res != RA_END; i++) {
-        int can = (int)(stores[g.cost[i].res] / (g.cost[i].amt * FP));
-        if (can < n) n = can;
+    int have = whole(g.product);
+    if (have < 0) have = 0;
+    int limit = 0x7fffffff / FP;
+    if (g.maximum >= 0) {
+        if (have >= g.maximum) return 0;
+        limit = g.maximum - have;
     }
-    // room.js buy(): Notifications.notify(Room, _("not enough " + k)) on the
-    // FIRST short cost resource (loop breaks there) — same v0.3.1 feedback-2
-    // pattern makeCraftable() already carries for build/craft; a cost-disabled
-    // trade band used to fail silently, exactly like the pre-0.3.1 build/craft
-    // bug this mirrors. Reported only when NOTHING was affordable: a truncated
-    // ×10 is a success, not a shortage.
+    for (int i = 0; i < 3 && g.cost[i].res != RA_END; i++) {
+        if (g.cost[i].amt <= 0) continue;
+        const int64_t unit = (int64_t)g.cost[i].amt * FP;
+        int available = (int)((int64_t)stores[g.cost[i].res] / unit);
+        if (available < 0) available = 0;
+        if (available < limit) limit = available;
+    }
+    return limit > 0 ? limit : 0;
+}
+
+BuyResult GameState::buy(uint8_t tradeId, int requested) {
+    BuyResult out{RC_ERR_INVALID, requested, 0};
+    if (tradeId >= TRADE_COUNT || requested <= 0) return out;
+    if (buildings[B_TRADING_POST] == 0) {
+        out.status = RC_ERR_LOCKED;
+        return out;
+    }
+    const TradeGood& g = TRADE[tradeId];
+    int have = whole(g.product);
+    if (have < 0) have = 0;
+    if (g.maximum >= 0 && have >= g.maximum) {
+        out.status = RC_ERR_MAX;
+        return out;
+    }
+    const int capacity = maxBuyable(tradeId);
+    const int n = capacity < requested ? capacity : requested;
+    // room.js buy(): notify "not enough X" on the FIRST short cost only when
+    // nothing is affordable. A truncated ×10 is a success, not a shortage.
     if (n <= 0) {
         for (int i = 0; i < 3 && g.cost[i].res != RA_END; i++) {
             if (stores[g.cost[i].res] < g.cost[i].amt * FP) {
@@ -605,19 +621,16 @@ Result GameState::buy(uint8_t tradeId, int n) {
                 break;
             }
         }
-        return RC_ERR_COST;
+        out.status = RC_ERR_COST;
+        return out;
     }
     for (int i = 0; i < 3 && g.cost[i].res != RA_END; i++)
-        stores[g.cost[i].res] -= g.cost[i].amt * n * FP;
-    stores[g.product] += n * FP;
+        stores[g.cost[i].res] -= (int32_t)((int64_t)g.cost[i].amt * FP * n);
+    stores[g.product] += (int32_t)((int64_t)FP * n);
     markSeen(g.product);
-    // room.js buy(): Notifications.notify(Room, good.buildMsg) on success — but
-    // Room.TradeGoods entries carry no buildMsg property (only type/cost/audio),
-    // so good.buildMsg is undefined, and Notifications.notify() no-ops on an
-    // undefined message (notifications.js: "if (typeof text == 'undefined')
-    // return;"). Upstream's buy() therefore has NO success notification —
-    // matched exactly here: no pushLog on the RC_OK path.
-    return RC_OK;
+    out.purchased = n;
+    out.status = RC_OK;
+    return out;
 }
 
 Result GameState::assignWorker(uint8_t job, int delta) {
@@ -723,13 +736,107 @@ bool readStr(const char*& p, char* buf, size_t cap) {
     buf[i] = 0;
     return true;
 }
-const char* afterKey(const char* j, const char* key) {   // -> char after "key":
+void skipWs(const char*& p) {
+    while (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n') p++;
+}
+bool skipJsonString(const char*& p) {
+    if (*p != '"') return false;
+    p++;
+    while (*p) {
+        if (*p == '\\') { p++; if (!*p) return false; p++; continue; }
+        if (*p == '"') { p++; return true; }
+        p++;
+    }
+    return false;
+}
+bool skipJsonValue(const char*& p) {
+    skipWs(p);
+    if (*p == '"') return skipJsonString(p);
+    if (*p == '{') {
+        p++; skipWs(p);
+        if (*p == '}') { p++; return true; }
+        while (*p) {
+            if (!skipJsonString(p)) return false;
+            skipWs(p); if (*p++ != ':') return false;
+            if (!skipJsonValue(p)) return false;
+            skipWs(p);
+            if (*p == '}') { p++; return true; }
+            if (*p++ != ',') return false;
+            skipWs(p);
+        }
+        return false;
+    }
+    if (*p == '[') {
+        p++; skipWs(p);
+        if (*p == ']') { p++; return true; }
+        while (*p) {
+            if (!skipJsonValue(p)) return false;
+            skipWs(p);
+            if (*p == ']') { p++; return true; }
+            if (*p++ != ',') return false;
+            skipWs(p);
+        }
+        return false;
+    }
+    if (*p == '-' || (*p >= '0' && *p <= '9')) {
+        char* end = nullptr;
+        strtod(p, &end);
+        if (end == p) return false;
+        p = end;
+        return true;
+    }
+    if (strncmp(p, "true", 4) == 0) { p += 4; return true; }
+    if (strncmp(p, "false", 5) == 0) { p += 5; return true; }
+    if (strncmp(p, "null", 4) == 0) { p += 4; return true; }
+    return false;
+}
+bool jsonComplete(const char* j) {
+    const char* p = j;
+    skipWs(p);
+    if (!skipJsonValue(p)) return false;
+    skipWs(p);
+    return *p == '\0';
+}
+int jsonArrayCount(const char* p) {
+    if (!p) return -1;
+    skipWs(p);
+    if (*p++ != '[') return -1;
+    skipWs(p);
+    if (*p == ']') return 0;
+    int count = 0;
+    while (*p) {
+        if (!skipJsonValue(p)) return -1;
+        count++;
+        skipWs(p);
+        if (*p == ']') { p++; return count; }
+        if (*p++ != ',') return -1;
+        skipWs(p);
+    }
+    return -1;
+}
+const char* keyToken(const char* j, const char* key) {
     char pat[40];
-    snprintf(pat, sizeof pat, "\"%s\":", key);
-    const char* p = strstr(j, pat);
-    return p ? p + strlen(pat) : nullptr;
+    snprintf(pat, sizeof pat, "\"%s\"", key);
+    for (const char* p = j; (p = strstr(p, pat)) != nullptr; p++) {
+        const char* q = p + strlen(pat);
+        skipWs(q);
+        if (*q == ':') return p;
+    }
+    return nullptr;
+}
+const char* afterKey(const char* j, const char* key) {   // -> char after "key":
+    const char* p = keyToken(j, key);
+    if (!p) return nullptr;
+    p += strlen(key) + 2;
+    skipWs(p);
+    return *p == ':' ? p + 1 : nullptr;
 }
 long readLong(const char* p) { return p ? strtol(p, nullptr, 10) : 0; }
+uint32_t fnv1a32(const char* p, size_t n) {
+    uint32_t h = 2166136261u;
+    for (size_t i = 0; i < n; i++) h = (h ^ (uint8_t)p[i]) * 16777619u;
+    return h;
+}
 // Parse n ints from a "[a,b,...]" starting at p (p just after the key).
 void readIntArr(const char* p, int32_t* out, int n) {
     for (int i = 0; i < n; i++) out[i] = 0;
@@ -793,16 +900,50 @@ size_t GameState::toJson(char* out, size_t cap) const {
         apStr(out, cap, o, log[i].enKey);
         AP(",%ld,%d,%d]", (long)log[i].arg, log[i].hasArg ? 1 : 0, log[i].count);
     }
-    AP("]}");
+    AP("],");
+    uint32_t sum = fnv1a32(out, o);
+    AP("\"sum\":%lu}", (unsigned long)sum);
 #undef AP
     return o;
 }
 
 bool GameState::fromJson(const char* j) {
-    if (!j) return false;
+    if (!j || !jsonComplete(j)) return false;
     long v = readLong(afterKey(j, "v"));
-    if (v < 1 || v > 3) return false;    // accept v1 (pre-events), v2, v3 saves
-    init();                              // defaults, then overwrite
+    if (v < 1 || v > SAVE_VER) return false;
+    if (!afterKey(j, "v") || !afterKey(j, "ts") || !afterKey(j, "stores"))
+        return false;
+    if (afterKey(j, "cd") && jsonArrayCount(afterKey(j, "cd")) != 3) return false;
+    if (afterKey(j, "tm") && jsonArrayCount(afterKey(j, "tm")) != 5) return false;
+    if (jsonArrayCount(afterKey(j, "stores")) != RES_COUNT) return false;
+    if (afterKey(j, "bld") && jsonArrayCount(afterKey(j, "bld")) != BLD_COUNT)
+        return false;
+    if (afterKey(j, "itm") && jsonArrayCount(afterKey(j, "itm")) != ITEM_COUNT)
+        return false;
+    if (afterKey(j, "wrk") && jsonArrayCount(afterKey(j, "wrk")) != JOB_COUNT)
+        return false;
+    if (v >= 2 && afterKey(j, "echo") && jsonArrayCount(afterKey(j, "echo")) != 3)
+        return false;
+    if (afterKey(j, "oftr")) {
+        int nr = jsonArrayCount(afterKey(j, "oftr"));
+        if (nr < 0 || (nr & 1) || nr > 2 * RES_COUNT) return false;
+    }
+    if (afterKey(j, "ofti")) {
+        int ni = jsonArrayCount(afterKey(j, "ofti"));
+        if (ni < 0 || (ni & 1) || ni > 2 * ITEM_COUNT) return false;
+    }
+    if (afterKey(j, "log")) {
+        int logTotal = jsonArrayCount(afterKey(j, "log"));
+        if (logTotal < 0 || logTotal > LOG_CAP) return false;
+    }
+    if (v >= 4) {
+        const char* sumKey = keyToken(j, "sum");
+        const char* sumValue = afterKey(j, "sum");
+        if (!sumKey || !sumValue ||
+            fnv1a32(j, (size_t)(sumKey - j)) != (uint32_t)strtoul(sumValue, nullptr, 10))
+            return false;
+    }
+    init();                              // validated document, then overwrite
     lastSettleTs = (uint32_t)readLong(afterKey(j, "ts"));
     rng          = (uint32_t)readLong(afterKey(j, "rng"));
     fire         = (uint8_t)readLong(afterKey(j, "fire"));
@@ -903,56 +1044,118 @@ bool GameState::fromJson(const char* j) {
             }
         }
     }
+    if (builderLevel < -1 || builderLevel > 4) return false;
+    for (int i = 0; i < BLD_COUNT; i++) if (buildings[i] > 250) return false;
+    for (int i = 0; i < ITEM_COUNT; i++) if (items[i] > 250) return false;
+    for (int i = 0; i < JOB_COUNT; i++) if (workers[i] > population) return false;
     return true;
 }
 
 // ===================== persistence (platform) =============================
 
 #ifdef ARDUINO
-bool GameState::save() const {
-    char buf[4096];
-    size_t n = toJson(buf, sizeof buf);
-    if (n >= sizeof buf) return false;              // truncated -> refuse
-    const char* tmp = ADR_SAVE_PATH ".tmp";
-    File f = SD.open(tmp, FILE_WRITE);
-    if (!f) return false;
-    f.write((const uint8_t*)buf, n);
-    f.close();
-    SD.remove(ADR_SAVE_PATH);                        // atomic tmp+rename
-    return SD.rename(tmp, ADR_SAVE_PATH);
-}
-bool GameState::load() {
-    File f = SD.open(ADR_SAVE_PATH, FILE_READ);
+static bool readSaveFile(const char* path, GameState& out) {
+    File f = SD.open(path, FILE_READ);
     if (!f) return false;
     size_t len = f.size();
     if (len == 0 || len >= 4096) { f.close(); return false; }
     char buf[4096];
     size_t rd = f.read((uint8_t*)buf, len);
     f.close();
-    buf[rd] = 0;
-    return fromJson(buf);
+    if (rd != len) return false;
+    buf[len] = 0;
+    return out.fromJson(buf);
 }
-#else   // host build (smoke test): plain stdio
 bool GameState::save() const {
     char buf[4096];
     size_t n = toJson(buf, sizeof buf);
     if (n >= sizeof buf) return false;
-    const char* tmp = ADR_SAVE_PATH ".tmp";
-    FILE* f = fopen(tmp, "wb");
+
+    File f = SD.open(ADR_SAVE_TMP_PATH, FILE_WRITE);
     if (!f) return false;
-    fwrite(buf, 1, n, f);
-    fclose(f);
-    remove(ADR_SAVE_PATH);
-    return rename(tmp, ADR_SAVE_PATH) == 0;
+    size_t wr = f.write((const uint8_t*)buf, n);
+    f.close();
+    if (wr != n) {
+        SD.remove(ADR_SAVE_TMP_PATH);
+        return false;
+    }
+
+    const bool hadPrimary = SD.exists(ADR_SAVE_PATH);
+    if (hadPrimary) {
+        SD.remove(ADR_SAVE_BAK_PATH);
+        if (!SD.rename(ADR_SAVE_PATH, ADR_SAVE_BAK_PATH)) {
+            SD.remove(ADR_SAVE_TMP_PATH);
+            return false;
+        }
+    }
+    if (!SD.rename(ADR_SAVE_TMP_PATH, ADR_SAVE_PATH)) {
+        SD.remove(ADR_SAVE_TMP_PATH);
+        if (hadPrimary) {
+            SD.remove(ADR_SAVE_PATH);
+            SD.rename(ADR_SAVE_BAK_PATH, ADR_SAVE_PATH);
+        }
+        return false;
+    }
+    return true;
 }
 bool GameState::load() {
-    FILE* f = fopen(ADR_SAVE_PATH, "rb");
+    if (readSaveFile(ADR_SAVE_PATH, *this)) return true;
+    if (!readSaveFile(ADR_SAVE_BAK_PATH, *this)) return false;
+    SD.remove(ADR_SAVE_PATH);
+    if (!save()) Serial.println("[game] backup loaded but primary restore failed");
+    return true;
+}
+#else   // host build (smoke test): plain stdio
+static bool readSaveFile(const char* path, GameState& out) {
+    FILE* f = fopen(path, "rb");
     if (!f) return false;
     char buf[4096];
     size_t rd = fread(buf, 1, sizeof buf - 1, f);
+    bool complete = !ferror(f) && rd > 0;
     fclose(f);
+    if (!complete) return false;
     buf[rd] = 0;
-    return fromJson(buf);
+    return out.fromJson(buf);
+}
+bool GameState::save() const {
+    char buf[4096];
+    size_t n = toJson(buf, sizeof buf);
+    if (n >= sizeof buf) return false;
+    FILE* f = fopen(ADR_SAVE_TMP_PATH, "wb");
+    if (!f) return false;
+    size_t wr = fwrite(buf, 1, n, f);
+    int closeRc = fclose(f);
+    if (wr != n || closeRc != 0) {
+        remove(ADR_SAVE_TMP_PATH);
+        return false;
+    }
+
+    FILE* old = fopen(ADR_SAVE_PATH, "rb");
+    const bool hadPrimary = old != nullptr;
+    if (old) fclose(old);
+    if (hadPrimary) {
+        remove(ADR_SAVE_BAK_PATH);
+        if (rename(ADR_SAVE_PATH, ADR_SAVE_BAK_PATH) != 0) {
+            remove(ADR_SAVE_TMP_PATH);
+            return false;
+        }
+    }
+    if (rename(ADR_SAVE_TMP_PATH, ADR_SAVE_PATH) != 0) {
+        remove(ADR_SAVE_TMP_PATH);
+        if (hadPrimary) {
+            remove(ADR_SAVE_PATH);
+            rename(ADR_SAVE_BAK_PATH, ADR_SAVE_PATH);
+        }
+        return false;
+    }
+    return true;
+}
+bool GameState::load() {
+    if (readSaveFile(ADR_SAVE_PATH, *this)) return true;
+    if (!readSaveFile(ADR_SAVE_BAK_PATH, *this)) return false;
+    remove(ADR_SAVE_PATH);
+    save();
+    return true;
 }
 #endif
 

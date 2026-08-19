@@ -136,10 +136,7 @@ bool tradeOfferable(uint8_t id) {
 // gate (room.js buy() checks neither — only build()/craft() do), so only cost
 // gates here — an unaffordable good renders dashed.
 bool buyEnabled(uint8_t id) {
-    const TradeGood& g = TRADE[id];
-    for (int i = 0; i < 3 && g.cost[i].res != RA_END; i++)
-        if (g_game.stores[g.cost[i].res] < (int32_t)g.cost[i].amt * FP) return false;
-    return true;
+    return id < TRADE_COUNT && g_game.maxBuyable(id) > 0;
 }
 
 // The offerable trade goods for the current state (all under-maximum goods once
@@ -359,6 +356,13 @@ bool TradePage::draw(m5gfx::M5Canvas& c) {
     c.fillSprite(TFT_WHITE);
     page_tabs::draw(c, 2);           // three-tab header, Trade active
     drawBalance(c);
+    if (m_lastPurchased > 0) {
+        char label[48], notice[80];
+        tradeLabel(m_lastPurchaseCode, label, sizeof(label));
+        snprintf(notice, sizeof(notice), "%s%s x%d", tr("purchased:"), label,
+                 m_lastPurchased);
+        cjk::drawText(c, PAD, BAL_Y + 24, notice, 1);
+    }
     BandView views[MAX_BANDS];
     m_regionCount = layoutBands(m_regions, m_slotCodes, views, m_page, MAX_BANDS,
                                 &m_slotCount);
@@ -394,8 +398,8 @@ void TradePage::onLocalAction(uint8_t param, int x, int y) {
     // affordable buys 3 and still reports RC_OK.
     const pages::Rect band = bandRect(bandTopForSlot(slot));
     const int qty = (x >= band.x + stepColX(band.w)) ? stepper::MANY : 1;
-    Result r = g_game.buy(code, qty);
-    if (r == RC_OK) {
+    BuyResult r = g_game.buy(code, qty);
+    if (r.status == RC_OK) {
         // room.js: `if(stores.compass && !pathDiscovery){ pathDiscovery = true;
         // Path.openPath() }` — buying the compass (capped at 1, so this is always
         // the FIRST buy) is what "discovers" Path; openPath pushes the one-time
@@ -413,8 +417,14 @@ void TradePage::onLocalAction(uint8_t param, int x, int y) {
             char key[40];
             if (g_world.compassFromVillage(key, sizeof key)) g_game.pushLog(key);
         }
+        m_lastPurchased = r.purchased;
+        m_lastPurchaseCode = code;
         M5.Speaker.tone(1800, 80);
-        g_game.save();
+        if (!g_game.save()) {
+            Serial.println("[trade] save failed after purchase");
+            M5.Speaker.tone(600, 120);
+            return;
+        }
         pager::showPage(pager::currentRingIndex(), false);
         // Re-baseline tick()'s content signature to the state we JUST drew, so this
         // same buy no longer trips a SECOND full-page redraw next tick — only genuine

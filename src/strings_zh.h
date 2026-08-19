@@ -278,6 +278,7 @@ static const AdrString ADR_STRINGS[] = {
     { "buy scales", "购买鳞片" },
     { "buy teeth", "购买牙齿" },
     { "buy:", "购买:" },
+    { "purchased:", "已购买:" },
     { "camp fires burn by the entrance to the mine.", "矿井入口处燃烧着营火" },
     { "can't read the words.", "无法辨识字迹" },
     { "can't see what's inside.", "看不清里面有什么" },

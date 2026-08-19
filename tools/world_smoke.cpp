@@ -511,7 +511,25 @@ int main() {
         CHECK(g2.savedOutfitItem[I_BOLAS] == 3,       "bolas count survives round-trip");
         CHECK(g2.savedOutfitRes[R_TEETH] == 0,        "an unset slot stays zero");
         // Old saves lack the keys entirely -> empty remembered outfit (no bump).
-        GameState g3; g3.fromJson("{\"v\":3,\"ts\":0,\"stores\":[]}");
+        GameState g3; g3.init();
+        g3.savedOutfitRes[R_TEETH] = 7;
+        char v2[4096]; size_t o = 0;
+        o += (size_t)snprintf(v2 + o, sizeof v2 - o,
+            "{\"v\":2,\"ts\":0,\"rng\":1,\"fire\":0,\"temp\":0,\"bl\":-1,\"pop\":0,"
+            "\"fl\":0,\"cd\":[0,0,0],\"tm\":[0,0,0,0,0],\"stores\":[");
+        for (int i = 0; i < RES_COUNT; i++)
+            o += (size_t)snprintf(v2 + o, sizeof v2 - o, "%s0", i ? "," : "");
+        o += (size_t)snprintf(v2 + o, sizeof v2 - o, "],\"bld\":[");
+        for (int i = 0; i < BLD_COUNT; i++)
+            o += (size_t)snprintf(v2 + o, sizeof v2 - o, "%s0", i ? "," : "");
+        o += (size_t)snprintf(v2 + o, sizeof v2 - o, "],\"itm\":[");
+        for (int i = 0; i < ITEM_COUNT; i++)
+            o += (size_t)snprintf(v2 + o, sizeof v2 - o, "%s0", i ? "," : "");
+        o += (size_t)snprintf(v2 + o, sizeof v2 - o, "],\"wrk\":[");
+        for (int i = 0; i < JOB_COUNT; i++)
+            o += (size_t)snprintf(v2 + o, sizeof v2 - o, "%s0", i ? "," : "");
+        o += (size_t)snprintf(v2 + o, sizeof v2 - o, "],\"log\":[]}");
+        CHECK(g3.fromJson(v2), "v2 save without outfit keys still parses");
         bool empty = true;
         for (int i = 0; i < RES_COUNT; i++)  if (g3.savedOutfitRes[i])  empty = false;
         for (int i = 0; i < ITEM_COUNT; i++) if (g3.savedOutfitItem[i]) empty = false;
