@@ -16,6 +16,7 @@
 #include "action_band.h"         // the app-wide button band (shared with every page)
 #include "event_engine.h"        // events:: queries/commands (+ game_data RES_KEY)
 #include "event_art_data.h"      // EVENT_ART[] — this is its ONE includer
+#include "art_blit.h"            // art::blit — shared RLE/4bpp unpacker
 #include "game_state.h"          // adr::Result, GameState (save)
 #include "cjk_text.h"            // cjk::drawText/drawWrapped/textWidth, tr()
 #include "status_bar.h"
@@ -157,50 +158,14 @@ void drawButton(m5gfx::M5Canvas& c, int i, int n) {
 static_assert(sizeof(EVENT_ART) / sizeof(EVENT_ART[0]) == (size_t)adr::EVENT_COUNT,
               "event art table must have one entry per adr::EventId");
 
-// Blit event `eventId`'s illustration into the canvas at (ART_X, ART_Y).
-//
-// The stored form is RLE over a 4bpp pixel stream (format in event_art_data.h),
-// and both layers are unpacked in ONE forward pass straight into the canvas —
-// no intermediate buffer. An 8bpp copy of a plate would be 492*276 = 133KB of
-// PSRAM to allocate, memset and free on every event just to memcpy it away
-// again; there is no reason to touch the heap when the destination rows are
-// already sitting there. The canvas is grayscale_8bit (main.cpp), i.e. one byte
-// of luma per pixel with a row stride of canvas.width(), so a nibble expands
-// with a *17 (15 -> 255 paper white, 0 -> ink black) and lands directly.
-//
-// The cursor is kept in PACKED bytes: `bx` counts byte-pairs across the row and
-// wraps into the next canvas row at rowPack, so a single run can span rows the
-// way it does in the stream. A missing plate (nullptr / out-of-range id) just
-// leaves the area white — the modal still works, it is only unillustrated.
+// Blit event `eventId`'s illustration into the canvas at (ART_X, ART_Y). The
+// decode itself is art::blit (art_blit.cpp) — the fight overlay draws the same
+// encoding, so the unpacker lives in one place. A missing plate (nullptr /
+// out-of-range id) just leaves the area white: the modal still works, it is only
+// unillustrated.
 void drawArt(int eventId) {
     if (eventId < 0 || eventId >= (int)adr::EVENT_COUNT) return;
-    const uint8_t* p = EVENT_ART[eventId];
-    if (!p) return;
-    uint8_t* buf = (uint8_t*)canvas.getBuffer();
-    if (!buf) return;
-
-    const int stride  = canvas.width();
-    const int rowPack = EVENT_ART_W / 2;        // 246 packed bytes per row
-    uint8_t* row = buf + (size_t)ART_Y * stride + ART_X;
-    int bx = 0, by = 0;
-    while (by < EVENT_ART_H) {
-        uint8_t head = *p++;
-        const uint8_t* lit = nullptr;
-        uint8_t val = 0;
-        int n;
-        if (head == 0) { n = *p++; lit = p; p += n; }   // literal packet
-        else           { n = head; val = *p++; }        // run packet
-        for (int i = 0; i < n; i++) {
-            uint8_t b = lit ? lit[i] : val;
-            row[bx * 2]     = (uint8_t)((b >> 4) * 17);
-            row[bx * 2 + 1] = (uint8_t)((b & 0x0F) * 17);
-            if (++bx == rowPack) {
-                bx = 0;
-                if (++by == EVENT_ART_H) return;        // last row consumed
-                row += stride;
-            }
-        }
-    }
+    art::blit(canvas, EVENT_ART[eventId], EVENT_ART_W, EVENT_ART_H, ART_X, ART_Y);
 }
 
 // Compose the panel into the shared canvas (no push).

@@ -20,9 +20,10 @@
 // ASCII (font covers 0x20..0x7E), not tr() text.
 //
 // Layout (540x960): 36px title (16..52) · HUD line A 水/熏肉/生命 (68) · HUD line
-// B 罗盘指向 + 消息位 (96) · a 19-col x 33-row viewport of 24px cells (map
-// 42..498 x 124..916), clearing the 32px status bar (< 928). The viewport is a
-// freeze/recenter camera (world_page.cpp updateCamera, m_camX/m_camY): held still
+// B 罗盘指向 + 消息位 (96, wraps onto a 2nd 24px row) · a 19-col x 32-row
+// viewport of 24px cells (map 42..498 x 148..916), clearing the 32px status bar
+// (< 928). The viewport is a freeze/recenter camera (world_page.cpp
+// updateCamera, m_camX/m_camY): held still
 // between recenters so a plain step moves only the '@' — the e-ink throttle that
 // keeps a step from full-refreshing the whole scrolling map. The map area is ONE
 // touch region; a press resolves to N/S/E/W by its dominant axis relative to the

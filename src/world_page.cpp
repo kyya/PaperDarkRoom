@@ -46,22 +46,23 @@ constexpr int TITLE_Y     = 16;                // title ink 16..52 (page_tabs rh
 
 // ---- HUD rows (below the title) -------------------------------------------
 constexpr int HUD_A_Y = 68;    // 水 N/M · 熏肉 xK · 生命 N/M
-constexpr int HUD_B_Y = 96;    // 罗盘指向X · message slot
+constexpr int HUD_B_Y = 96;    // 罗盘指向X · message slot (wraps onto a 2nd line)
 
 // ---- viewport geometry ----------------------------------------------------
-// 24px cells (12px glyph x2), an ODD 19x33 window. 19 cols x 24 = 456px, centred
-// (x 42..498, inside the 24px tap-safe margin); 33 rows x 24 = 792px from y 124,
-// ending 916 < 928 (status bar). CENTER_COL/ROW is where a recenter re-parks the
-// wanderer — NOT its fixed cell every step: the camera holds still between
-// recenters (updateCamera) so a plain step only moves the '@', which is the whole
-// point of the per-step e-ink throttle. See m_camX/m_camY in world_page.h.
+// 24px cells (12px glyph x2), 19x32 window. 19 cols x 24 = 456px, centred
+// (x 42..498, inside the 24px tap-safe margin); 32 rows x 24 = 768px from y 148,
+// ending 916 < 928 (status bar). The extra 24px above the map (was 124) is the
+// second HUD-B line: terrain-narration sentences wrap instead of running off
+// the panel. CENTER_COL/ROW is where a recenter re-parks the wanderer — NOT
+// its fixed cell every step: the camera holds still between recenters
+// (updateCamera) so a plain step only moves the '@'. See m_camX/m_camY.
 constexpr int CELL       = 24;
 constexpr int COLS       = 19;
-constexpr int ROWS       = 33;
+constexpr int ROWS       = 32;
 constexpr int MAP_W      = COLS * CELL;                 // 456
-constexpr int MAP_H      = ROWS * CELL;                 // 792
+constexpr int MAP_H      = ROWS * CELL;                 // 768
 constexpr int MAP_X0     = (540 - MAP_W) / 2;           // 42
-constexpr int MAP_Y0     = 124;
+constexpr int MAP_Y0     = 148;
 constexpr int MAP_Y1     = MAP_Y0 + MAP_H;              // 916
 constexpr int CENTER_COL = COLS / 2;                    // 9
 constexpr int CENTER_ROW = ROWS / 2;                    // 16
@@ -165,26 +166,31 @@ void drawHud(m5gfx::M5Canvas& c, const char* landmarkKey) {
     int mw = cjk::textWidth(mbuf, SCALE);
     cjk::drawText(c, (540 - mw) / 2, HUD_A_Y, mbuf, SCALE);            // 熏肉 xK (centre)
 
-    // Compass (left) and message (right) share HUD line B. A step notice can be a
-    // full terrain-narration sentence (world_state.cpp TERRAIN_CHANGE / the danger
-    // warning) far longer than the landmark-name hints this row was sized for, so
-    // it can reach back past the compass's own text and paint over it. The message
-    // is the transient, higher-priority one (matches hudMessage's own starving/
-    // thirsty-beats-msgKey ordering above) and the compass recomputes fresh next
-    // frame regardless, so on a width collision the compass just sits this one
-    // frame out instead of the two overlapping.
+    // Compass (left) and message share HUD line B. Terrain-narration sentences
+    // (world_state.cpp TERRAIN_CHANGE) run 20–32 CJK wide — far more than one
+    // 492px row — so a long notice wraps onto the reserved second line instead
+    // of painting past the compass and off the panel. Compass yields the row
+    // when the two would collide, or when the notice needs the full width to
+    // wrap; it recomputes next frame either way.
     char ckey[40];
     bool showCompass = shipCompassKey(ckey, sizeof ckey);
 
     const char* msg = hudMessage(landmarkKey);
+    const int rowW = 540 - 2 * PAD;                    // 492
     int msgW = msg ? cjk::textWidth(msg, SCALE) : 0;
-    if (showCompass && msg) {
-        int compassW = cjk::textWidth(tr(ckey), SCALE);
-        if (compassW + msgW >= (540 - 2 * PAD)) showCompass = false;
-    }
+    int compassW = 0;
+    if (showCompass) compassW = cjk::textWidth(tr(ckey), SCALE);
+    const bool wrap = msg && msgW > rowW;
+    if (showCompass && msg && (wrap || compassW + msgW >= rowW)) showCompass = false;
 
-    if (showCompass) cjk::drawText(c, PAD, HUD_B_Y, tr(ckey), SCALE);  // 罗盘指向X (left)
-    if (msg) cjk::drawText(c, 540 - PAD - msgW, HUD_B_Y, msg, SCALE);  // message (right)
+    if (showCompass) cjk::drawText(c, PAD, HUD_B_Y, tr(ckey), SCALE);  // 罗盘指向X
+    if (msg) {
+        if (wrap) {
+            cjk::drawWrapped(c, PAD, HUD_B_Y, rowW, msg, SCALE, GLYPH);
+        } else {
+            cjk::drawText(c, 540 - PAD - msgW, HUD_B_Y, msg, SCALE);
+        }
+    }
 }
 
 // The viewport anchored at camera origin (camX,camY = world coord of the top-left

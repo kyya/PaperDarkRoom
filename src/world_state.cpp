@@ -575,7 +575,8 @@ void WorldState::goHome(GameState& gs) {
     memcpy(revealed, ex.revealed, sizeof revealed);
     memcpy(visited, ex.visited, sizeof visited);
     // Persist outposts used this trip into the committed one-shot bitmap (global
-    // across expeditions). die() skips this, so a discarded trip's uses are lost.
+    // across expeditions). die() still skips this — a discarded trip's uses are
+    // lost — even though it now keeps the revealed fog.
     for (int i = 0; i < ex.usedOutpostN; i++)
         setBit(usedOutpost, widx(ex.usedOutpostX[i], ex.usedOutpostY[i]));
     // Unlock cleared mines (economic closure: staffs the miner jobs).
@@ -615,8 +616,13 @@ void WorldState::goHome(GameState& gs) {
 }
 
 void WorldState::die() {
-    // Drop the working map (this trip's clears/fog are lost) and empty the bag —
-    // committed map and game state are untouched (World.state=null, outfit={}).
+    // Fog of war is knowledge of the land: keep it. Walking the map is the
+    // expensive part on e-ink, and losing every revealed tile to a thirst death
+    // feels like a save failure. Dungeon clears, mine unlocks, outpost uses and
+    // the bag still forfeit — matching upstream's World.state = null + empty
+    // outfit, just not the atlas.
+    memcpy(revealed, ex.revealed, sizeof revealed);
+    saveWorld();
     ex.dead = true;
     ex.active = false;
     for (int i = 0; i < RES_COUNT; i++) ex.outfitRes[i] = 0;

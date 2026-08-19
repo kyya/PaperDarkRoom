@@ -19,3 +19,9 @@ dist/
 # the originals, so they stay out of the repo.
 docs/event-art/
 docs/event-art-prompts.html
+
+# Combat-portrait working directory: the source drawings and the greyscale
+# previews. tools/gen_enemy_art.py bakes them into src/enemy_art_data.h (and
+# synthesises a placeholder for any subject whose source is still missing), and
+# THAT is what ships — nothing at runtime reads the originals.
+docs/enemy-art/
