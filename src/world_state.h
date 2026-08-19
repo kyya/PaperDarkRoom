@@ -12,15 +12,17 @@
 //
 // STATE LAYERING (milestone hard constraint): the 61x61 map NEVER enters the
 // 4096-byte main JSON save. It lives in two independent SD binaries:
-//   * world.bin — the COMMITTED map (seed + tiles + fog): generated once, only
-//     rewritten by goHome. This is game.world in upstream ($SM 'game.world').
+//   * world.bin — the COMMITTED map (seed + tiles + fog): generated once,
+//     rewritten by goHome (full commit) and die() (fog only). This is game.world
+//     in upstream ($SM 'game.world').
 //   * trek.bin  — the VOLATILE expedition (position/hp/water/bag + a WORKING
 //     copy of the map it is mutating): saved EVERY step, deleted on goHome/die.
 //     Its presence at cold boot == "an expedition was interrupted, resume it"
 //     (the device sleeps by fully powering off; a wake is a cold boot).
-// goHome copies working -> committed (cleared dungeons + revealed fog persist);
-// die discards the working copy entirely (this trip's map changes are lost) and
-// empties the bag — matching upstream's World.state = null + Path.outfit = {}.
+// goHome copies working -> committed (cleared dungeons + revealed fog persist)
+// and banks the bag. die() keeps the revealed fog (so a thirst death doesn't
+// blank the atlas) but still drops dungeon clears, mine unlocks, outpost uses
+// and the bag — the rest of upstream's World.state = null + Path.outfit = {}.
 //
 // Arduino independence: all logic is pure; only saveWorld/loadWorld/saveTrek/
 // loadTrek/clearTrek touch the platform (SD under ARDUINO, stdio on host, same
@@ -205,8 +207,9 @@ public:
     // Reached the village: commit working map -> committed, unlock cleared mines
     // in gs.buildings, bank the bag into gs, end the expedition, delete trek.bin.
     void goHome(GameState& gs);
-    // Starvation/thirst/(combat, 2.3): drop the working map, empty the bag, end
-    // the expedition, delete trek.bin. Committed map + gs are left untouched.
+    // Starvation/thirst/(combat, 2.3): keep revealed fog on the committed map,
+    // empty the bag, end the expedition, delete trek.bin. Dungeon clears / mine
+    // unlocks / outpost uses still forfeit (they only land at goHome).
     void die();
 
     // setpiece hooks (2.4) operate on the WORKING map, committed at goHome:

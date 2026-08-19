@@ -7,7 +7,8 @@
 // natively and asserts: deterministic map generation (landmark counts / radius
 // bands / spawn / terrain sanity), diamond visibility, move upkeep + starvation/
 // thirst death, goHome commit (mine unlock + loot bank + fog persist), die
-// discard, drawRoad, world.bin + trek.bin round-trip / cold-boot restore, and
+// (fog kept, bag/clears forfeit), drawRoad, world.bin + trek.bin round-trip /
+// cold-boot restore, and
 // the main-save headroom after the game_data enum growth.
 //
 // Build (clang++ is the host toolchain on this box):
@@ -389,23 +390,32 @@ int main() {
         CHECK(w.tileAt(35, VILLAGE_Y) == T_OUTPOST, "cleared dungeon committed to map");
     }
 
-    printf("== [die] discards the trip: committed map + game state untouched ==\n");
+    printf("== [die] bag and dungeon clears forfeit; revealed fog is kept ==\n");
     {
         GameState gs; gs.init();
         WorldState w; w.init(); w.generateMap(2025);
         int16_t out[RES_COUNT] = { 0 }; out[R_CURED_MEAT] = 5;
-        gs.stores[R_CURED_MEAT] = 5 * FP;
+        gs.stores[R_CURED_MEAT] = 10 * FP;
         w.embark(gs, out, nullptr, 1);
+        for (int i = 0; i < WORLD_CELLS; i++) w.ex.tiles[i] = T_FOREST;
+        for (int s = 0; s < 5; s++) w.move(gs, DIR_EAST);
+        const int farX = VILLAGE_X + 5 + LIGHT_RADIUS;
+        CHECK(w.exRevealed(farX, VILLAGE_Y), "walked-to cell revealed this trip");
+        CHECK(!w.isRevealed(farX, VILLAGE_Y), "not yet on the committed map");
         w.ex.clearedCoal = true;
         w.clearDungeon(34, VILLAGE_Y);
         uint8_t committedBefore = w.tileAt(34, VILLAGE_Y);
         w.die();
         CHECK(w.ex.dead && !w.ex.active, "die() ends the expedition");
+        CHECK(w.isRevealed(farX, VILLAGE_Y), "die() commits fog of war");
         CHECK(w.tileAt(34, VILLAGE_Y) == committedBefore,
-              "committed map unchanged (trip discarded)");
+              "dungeon clear NOT committed (still forfeited)");
         CHECK(gs.buildings[B_COAL_MINE] == 0, "coal mine NOT unlocked (died before goHome)");
-        CHECK(gs.whole(R_CURED_MEAT) == 0, "bag forfeited: the 5 embarked meat is lost");
+        CHECK(gs.whole(R_CURED_MEAT) == 5, "bag forfeited: the 5 embarked meat is lost");
         CHECK(w.ex.outfitRes[R_CURED_MEAT] == 0, "bag emptied on death");
+        out[R_CURED_MEAT] = 5;
+        CHECK(w.embark(gs, out, nullptr, 2), "second embark after death");
+        CHECK(w.exRevealed(farX, VILLAGE_Y), "next trip still sees the revealed tiles");
     }
 
     printf("== [outfit] goHome remembers the loadout (leaveItAtHome §3.5); raw loot drops off ==\n");
