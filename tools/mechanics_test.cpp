@@ -666,6 +666,7 @@ static void layer4_worldbin() {
 
     // -- truncated file rejected, no crash --
     {
+        remove(ADR_WORLD_PATH ".bak");
         uint8_t small[100];
         size_t o = 0;
         rawU32(small, o, WORLD_MAGIC);
@@ -678,6 +679,7 @@ static void layer4_worldbin() {
 
     // -- bad version rejected --
     {
+        remove(ADR_WORLD_PATH ".bak");
         uint8_t* buf = (uint8_t*)malloc(V2SZ);
         memset(buf, 0, V2SZ);
         size_t o = 0;
@@ -691,6 +693,7 @@ static void layer4_worldbin() {
 
     // -- bad magic rejected --
     {
+        remove(ADR_WORLD_PATH ".bak");
         uint8_t* buf = (uint8_t*)malloc(V2SZ);
         memset(buf, 0, V2SZ);
         size_t o = 0;
@@ -738,8 +741,39 @@ static void layer4_trekbin() {
               ld.ex.outfitItem[I_RIFLE] == 1, "bag (res+items) round-trips");
         CHECK(memcmp(ld.ex.tiles, w.ex.tiles, WORLD_CELLS) == 0, "working map round-trips");
     }
+    // -- hard power-off mid-rename: primary gone, only trek.bak remains --
+    {
+        GameState gs; gs.init();
+        WorldState w; w.init(); w.generateMap(0x111);
+        CHECK(w.saveWorld(), "bak-only: world saved");
+        int16_t out[RES_COUNT] = { 0 }; out[R_CURED_MEAT] = 5;
+        gs.stores[R_CURED_MEAT] = 5 * FP;
+        w.embark(gs, out, nullptr, 0x22);
+        w.move(gs, DIR_NORTH);
+        remove(ADR_TREK_PATH);          // torn promote left only .bak
+        WorldState ld; ld.init();
+        CHECK(ld.restore(), "restore() finds bak when primary is missing");
+        CHECK(ld.ex.active, "bak-only restore is still on expedition");
+    }
+    // -- Arduino FILE_WRITE append leftover: file longer than the CRC image --
+    {
+        GameState gs; gs.init();
+        WorldState w; w.init(); w.generateMap(0x333);
+        int16_t out[RES_COUNT] = { 0 }; out[R_CURED_MEAT] = 4;
+        gs.stores[R_CURED_MEAT] = 4 * FP;
+        w.embark(gs, out, nullptr, 0x44);
+        remove(ADR_TREK_PATH ".bak");
+        FILE* f = fopen(ADR_TREK_PATH, "ab");
+        CHECK(f != nullptr, "pad trek.bin");
+        uint8_t junk[64]; memset(junk, 0xA5, sizeof junk);
+        fwrite(junk, 1, sizeof junk, f);
+        fclose(f);
+        WorldState ld; ld.init();
+        CHECK(ld.loadTrek() && ld.ex.active, "oversized trek.bin still loads prefix");
+    }
     // -- truncated trek rejected --
     {
+        remove(ADR_TREK_PATH ".bak");
         uint8_t small[40];
         size_t o = 0; rawU32(small, o, TREK_MAGIC);
         small[o++] = TREK_VER;
@@ -751,6 +785,7 @@ static void layer4_trekbin() {
     }
     // -- corrupt magic rejected (full-size buffer, wrong magic) --
     {
+        remove(ADR_TREK_PATH ".bak");
         // full-size so the length gate passes; only the magic is wrong.
         const size_t TSZ = 68 + RES_COUNT * 2 + ITEM_COUNT * 2 +
                            WORLD_CELLS + 2 * WORLD_MASK_BYTES;
@@ -772,6 +807,18 @@ static void layer4_gamejson() {
     gs.stores[R_WOOD] = 42 * FP;
     static char buf[8192];
     gs.toJson(buf, sizeof buf);
+
+    // Downgrade a v4 document to a pre-checksum v3, then strip dcool so the
+    // test still means "legacy save without deathAt", not "break the checksum".
+    {
+        char* vp = strstr(buf, "\"v\":4");
+        if (vp) vp[4] = '3';
+        char* sp = strstr(buf, ",\"sum\":");
+        if (sp) {
+            char* end = strchr(sp + 1, '}');
+            if (end) memmove(sp, end, strlen(end) + 1);
+        }
+    }
 
     // Strip the "dcool":N, token to simulate a pre-2.5 save that never had it.
     char stripped[8192];

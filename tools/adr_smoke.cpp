@@ -482,20 +482,20 @@ int main() {
     {
         GameState g6; g6.init(); uint32_t t6 = 970; g6.settle(t6);
         g6.stores[R_FUR] = 1000 * FP;       // affords every P1 trade good
-        CHECK(g6.buy(T_SCALES) == RC_ERR_LOCKED,
+        CHECK(g6.buy(T_SCALES).status == RC_ERR_LOCKED,
               "buy before trading post -> RC_ERR_LOCKED");
 
         g6.buildings[B_TRADING_POST] = 1;   // trading post now stands
         int scalesBefore = g6.whole(R_SCALES);
         int furBefore    = g6.whole(R_FUR);
-        Result rb = g6.buy(T_SCALES);        // costs 150 fur (game_data.h TRADE)
-        CHECK(rb == RC_OK, "buy scales ok once trading post stands");
+        BuyResult rb = g6.buy(T_SCALES);        // costs 150 fur (game_data.h TRADE)
+        CHECK(rb.status == RC_OK && rb.purchased == 1, "buy scales ok once trading post stands");
         CHECK(g6.whole(R_SCALES) == scalesBefore + 1, "buy scales: +1 scales");
         CHECK(g6.whole(R_FUR) == furBefore - 150, "buy scales: -150 fur");
 
         g6.stores[R_FUR] = 0;                // force insufficiency
-        Result rc = g6.buy(T_SCALES);
-        CHECK(rc == RC_ERR_COST, "buy scales fails on insufficient fur");
+        BuyResult rc = g6.buy(T_SCALES);
+        CHECK(rc.status == RC_ERR_COST, "buy scales fails on insufficient fur");
         bool sawNotEnoughFur = false;
         for (int i = 0; i < g6.logCount; i++)
             if (strcmp(g6.log[i].enKey, "not enough fur") == 0) sawNotEnoughFur = true;
@@ -978,10 +978,10 @@ int main() {
         t.stores[R_SCALES] =  100 * FP;
         t.stores[R_TEETH]  =  100 * FP;
         int logBefore = t.logCount;
-        CHECK(t.buy(T_COMPASS) == RC_OK, "buy compass ok");
+        CHECK(t.buy(T_COMPASS).status == RC_OK, "buy compass ok");
         CHECK(t.whole(R_COMPASS) == 1, "compass owned == 1");
         CHECK(!t.buyOfferable(T_COMPASS), "compass at max -> leaves the buy list");
-        CHECK(t.buy(T_COMPASS) == RC_ERR_MAX, "second compass buy -> RC_ERR_MAX");
+        CHECK(t.buy(T_COMPASS).status == RC_ERR_MAX, "second compass buy -> RC_ERR_MAX");
         // The two buy() calls log nothing on success/max (buy() has no notify);
         // assert no stray max-notification key crept in.
         CHECK(t.logCount == logBefore, "compass at max pushes no maxMsg (upstream parity)");
@@ -996,7 +996,9 @@ int main() {
         // TRUNCATION rule (outside.js:376 Math.min(available, data)).
         GameState t; t.init(); t.buildings[B_TRADING_POST] = 1;
         t.stores[R_FUR] = 1000 * FP;                  // scales cost 150 -> 6 affordable
-        CHECK(t.buy(T_SCALES, 10) == RC_OK, "x10 with only 6 affordable -> RC_OK");
+        BuyResult rx = t.buy(T_SCALES, 10);
+        CHECK(rx.status == RC_OK && rx.purchased == 6,
+              "x10 with only 6 affordable -> RC_OK purchased=6");
         CHECK(t.whole(R_SCALES) == 6, "bought exactly the 6 it could pay for");
         CHECK(t.whole(R_FUR) == 100, "charged 6*150, not 10*150");
 
@@ -1004,14 +1006,14 @@ int main() {
         GameState p; p.init(); p.buildings[B_TRADING_POST] = 1;
         p.stores[R_FUR] = 100 * FP;
         int lb = p.logCount;
-        CHECK(p.buy(T_SCALES, 10) == RC_ERR_COST, "none affordable -> RC_ERR_COST");
+        CHECK(p.buy(T_SCALES, 10).status == RC_ERR_COST, "none affordable -> RC_ERR_COST");
         CHECK(p.whole(R_FUR) == 100, "a refused buy charges nothing");
         CHECK(p.logCount == lb + 1, "and pushes the 'not enough' notice once");
 
         // A multi-resource good truncates on its SCARCEST cost line.
         GameState m; m.init(); m.buildings[B_TRADING_POST] = 1;
         m.stores[R_FUR] = 10000 * FP; m.stores[R_SCALES] = 120 * FP;
-        CHECK(m.buy(T_IRON, 10) == RC_OK, "iron x10 -> RC_OK");
+        CHECK(m.buy(T_IRON, 10).status == RC_OK, "iron x10 -> RC_OK");
         CHECK(m.whole(R_IRON) == 2, "iron truncated to 2 by the 50-scale line");
         CHECK(m.whole(R_SCALES) == 20 && m.whole(R_FUR) == 9700,
               "both cost lines charged for exactly 2");
@@ -1020,15 +1022,15 @@ int main() {
         GameState c; c.init(); c.buildings[B_TRADING_POST] = 1;
         c.stores[R_FUR] = 100000 * FP; c.stores[R_SCALES] = 1000 * FP;
         c.stores[R_TEETH] = 1000 * FP;
-        CHECK(c.buy(T_COMPASS, 10) == RC_OK, "compass x10 -> RC_OK");
+        CHECK(c.buy(T_COMPASS, 10).status == RC_OK, "compass x10 -> RC_OK");
         CHECK(c.whole(R_COMPASS) == 1, "compass still capped at its maximum of 1");
         CHECK(c.whole(R_FUR) == 99600, "charged for ONE compass, not ten");
 
         // n <= 0 is a caller bug, never a free buy.
         GameState z; z.init(); z.buildings[B_TRADING_POST] = 1;
         z.stores[R_FUR] = 99999 * FP;
-        CHECK(z.buy(T_SCALES, 0) == RC_ERR_INVALID, "n=0 rejected");
-        CHECK(z.buy(T_SCALES, -5) == RC_ERR_INVALID, "negative n rejected");
+        CHECK(z.buy(T_SCALES, 0).status == RC_ERR_INVALID, "n=0 rejected");
+        CHECK(z.buy(T_SCALES, -5).status == RC_ERR_INVALID, "negative n rejected");
         CHECK(z.whole(R_SCALES) == 0, "neither guard bought anything");
     }
 

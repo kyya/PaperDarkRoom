@@ -39,6 +39,12 @@ enum Result : uint8_t {
     RC_ERR_INVALID,    // bad argument
 };
 
+struct BuyResult {
+    Result status;
+    int requested;
+    int purchased;
+};
+
 // One log line: an en_key (rendered via tr() at draw time — never a baked
 // sentence, keeping the §8.3 glyph closure complete) plus an optional integer
 // argument (e.g. villagers arrived) the renderer may splice into a {0} slot.
@@ -72,13 +78,17 @@ struct LogEntry {
 // an 8-entry save loads into a 16-slot ring untouched (and a 16-entry save read
 // by older firmware simply truncates at 8).
 constexpr int   LOG_CAP    = 16;
-constexpr int   SAVE_VER   = 3;    // v2 adds the random-event fields (nextEventAt,
-                                   // delayed-echo slot); v3 adds the craft-unlock
-                                   // bitsets (seen / craftShown). v1 & v2 saves
-                                   // still load (missing fields derived on read).
+constexpr int   SAVE_VER   = 4;    // v4 appends an FNV-1a checksum. v1–v3 still
+                                   // load; missing optional fields keep defaults.
 constexpr uint8_t ECHO_NONE = 0xFF;  // delayedEcho.res sentinel: slot empty
 #ifndef ADR_SAVE_PATH
 #define ADR_SAVE_PATH "/.darkroom/adr_save.json"
+#endif
+#ifndef ADR_SAVE_TMP_PATH
+#define ADR_SAVE_TMP_PATH ADR_SAVE_PATH ".tmp"
+#endif
+#ifndef ADR_SAVE_BAK_PATH
+#define ADR_SAVE_BAK_PATH ADR_SAVE_PATH ".bak"
 #endif
 
 // Compile switch: keep the fire frozen while the device deep-sleeps (default),
@@ -225,11 +235,16 @@ public:
     Result checkTraps(uint32_t now);
     Result build(uint8_t craftId);          // buildings
     Result craft(uint8_t craftId);          // tools/upgrades/weapons
-    // Buy `n` of a trading-post good, TRUNCATING to what is affordable (and to
-    // the good's maximum): a ×10 press with only 7 affordable buys 7 and returns
-    // RC_OK. RC_ERR_COST only when not even one is affordable. n defaults to 1,
-    // which is byte-for-byte the pre-v0.20 behaviour.
-    Result buy(uint8_t tradeId, int n = 1);
+    // How many of this good can be bought right now (0 if the post is down,
+    // at maximum, or none of the cost lines cover even one). Used by the
+    // Trade page for dashed/enabled state; buy() uses the same number.
+    int maxBuyable(uint8_t tradeId) const;
+    // Buy `requested` of a trading-post good, TRUNCATING to maxBuyable():
+    // a ×10 press with only 7 affordable buys 7 and returns RC_OK with
+    // purchased=7. RC_ERR_COST only when not even one is affordable.
+    // Visibility (hasSeen) stays in buyOfferable — buy() itself does not
+    // re-check seen, matching upstream room.js buy().
+    BuyResult buy(uint8_t tradeId, int requested = 1);
     Result assignWorker(uint8_t job, int delta);  // +/- villagers to a job
 
     // ---- read helpers ----

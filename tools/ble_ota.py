@@ -109,6 +109,10 @@ async def main() -> int:
                     help="firmware .bin (default: %(default)s)")
     ap.add_argument("--scan", type=float, default=30.0,
                     help="per-scan timeout, seconds (default: %(default)s)")
+    ap.add_argument("--address",
+                    help="skip name scan; connect this BLE address (Windows bond)")
+    ap.add_argument("--name", default=NAME,
+                    help="advertised name to scan (default: %(default)s)")
     ap.add_argument("--timeout", type=float, default=120.0,
                     help="verify wait after streaming, seconds "
                          "(default: %(default)s)")
@@ -135,11 +139,15 @@ async def main() -> int:
     print(f"[fw] {fw}")
     print(f"[fw] {total} B ({total / 1024:.1f} KiB) crc={crc:08x}")
 
-    dev = await scan(NAME, args.scan)
-    if not dev:
-        print("[scan] not found — is the device awake? (power button / USB)")
-        return 1
-    print(f"[scan] found {dev.address}")
+    if args.address:
+        print(f"[scan] using --address {args.address}")
+        dev = args.address
+    else:
+        dev = await scan(args.name, args.scan)
+        if not dev:
+            print(f"[scan] not found '{args.name}' — is the device awake?")
+            return 1
+        print(f"[scan] found {dev.address}")
 
     ota_last = {"v": None}
     fw_before = {"v": None}

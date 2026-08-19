@@ -17,6 +17,7 @@
 #include "icons.h"              // icons::drawCentred — 1bpp Lucide glyphs
 #include "icons_data.h"         // ICON_CART_* — this is its ONE includer
 #include "pager.h"
+#include "log_view.h"
 #include "game_state.h"
 #include "world_state.h"        // WorldState::ensureGenerated + compassFromVillage (§1.6)
 #include <M5Unified.h>
@@ -43,19 +44,29 @@ constexpr int CONTENT_W = 540 - 2 * PAD;     // 492px usable (§9.2)
 // are a SINGLE full-width column (x 24..516) — the buy labels ("购买能量元件" =
 // 216px @36px, measured scratchpad/measure_labels) plus a cost sub-row need the
 // whole width, unlike the Room/Outside two-column grids. Top -> bottom:
-//   header(0..72) · balance row(84, 24px fur/scales/teeth) · BUY bands
-//   (128 + n*(80+12), <=8 rows, last ends 852 < 928 status bar).
+//   header(0..72) · log stream · 毛皮/鳞片/牙齿 row · BUY bands hanging UP
+//   from 886. The balance sits on the button group so a buy's costs stay next
+//   to the rows they pay. Fewer goods grow the log the same way Room does.
 // ----------------------------------------------------------------------------
-constexpr int BAL_Y     = page_tabs::CONTENT_TOP + 12;   // 84 — balance row top
 // Three evenly-spread columns for the payment resources (毛皮/鳞片/牙齿), each
 // "名 N" — name 48px + a compact (abbreviated) amount clears the 168px pitch.
 constexpr int BAL_COLX[3] = { PAD, PAD + 168, PAD + 336 };   // {24, 192, 360}
-
-constexpr int BAND_TOP  = 128;               // first BUY band top (below balance)
+constexpr int BAL_H     = 12 * SCALE;        // 24px face
+constexpr int BAL_GAP   = 12;                // balance -> first buy band
+constexpr int LOG_TOP   = page_tabs::CONTENT_TOP + 4;   // 76, Room's log top
+constexpr int LOG_GAP   = 12;                // log -> balance
 constexpr int BUY_H     = 80;                // long-press band (§9.3: >=80px, floor)
 constexpr int BUY_GAP   = 12;                // vertical gap between bands
 constexpr int BUY_X     = PAD;               // full-width single column
 constexpr int BUY_W     = CONTENT_W;         // 492
+constexpr int BTN_AREA_BOTTOM = 886;         // same floor as Room (status bar at 928)
+
+int btnTopForRows(int rows) {
+    if (rows < 1) rows = 1;
+    return BTN_AREA_BOTTOM - (rows * BUY_H + (rows - 1) * BUY_GAP);
+}
+int balanceY(int btnTop) { return btnTop - BAL_GAP - BAL_H; }
+int logBottom(int btnTop) { return balanceY(btnTop) - LOG_GAP; }
                                              // (36 + 6 + 24 = 66 <= 80 — the
                                              // label+cost block clears an 80px
                                              // band with 7px top/bottom margin;
@@ -136,10 +147,7 @@ bool tradeOfferable(uint8_t id) {
 // gate (room.js buy() checks neither — only build()/craft() do), so only cost
 // gates here — an unaffordable good renders dashed.
 bool buyEnabled(uint8_t id) {
-    const TradeGood& g = TRADE[id];
-    for (int i = 0; i < 3 && g.cost[i].res != RA_END; i++)
-        if (g_game.stores[g.cost[i].res] < (int32_t)g.cost[i].amt * FP) return false;
-    return true;
+    return id < TRADE_COUNT && g_game.maxBuyable(id) > 0;
 }
 
 // The offerable trade goods for the current state (all under-maximum goods once
@@ -173,10 +181,10 @@ bool costLine(uint8_t id, char* out, size_t cap) {
 
 // Compute the visible band list for `page`: fills slotCodes[] + views[] and
 // regionsOut[] (one full-width y-band per slot, param = slot index). Batches of
-// 7 real goods + a trailing "更多" once the offerable list exceeds MAX_BANDS
-// (Room/Outside pagination 手法). Returns the band count (== region count).
+// (maxBands-1) real goods + a trailing "更多" once the offerable list exceeds
+// MAX_BANDS (Room/Outside pagination). Returns the band count (== region count).
 int layoutBands(pages::Region* regionsOut, uint8_t* slotCodes, BandView* views,
-                int page, int maxBands, int* slotCountOut) {
+                int page, int maxBands, int* slotCountOut, int* btnTopOut) {
     uint8_t all[TRADE_COUNT];
     int total = buildGoods(all, (int)sizeof(all));
 
@@ -198,6 +206,8 @@ int layoutBands(pages::Region* regionsOut, uint8_t* slotCodes, BandView* views,
     for (int i = 0; i < take && k < maxBands; i++) slotCodes[k++] = all[start + i];
     if (more && k < maxBands) slotCodes[k++] = A_MORE;
     int slotCount = k;
+    const int btnTop = btnTopForRows(slotCount);
+    if (btnTopOut) *btnTopOut = btnTop;
 
     for (int s = 0; s < slotCount; s++) {
         views[s].code = slotCodes[s];
@@ -213,7 +223,7 @@ int layoutBands(pages::Region* regionsOut, uint8_t* slotCodes, BandView* views,
             views[s].hasCost = costLine(id, views[s].cost, sizeof(views[s].cost));
             views[s].enabled = buyEnabled(id);
         }
-        int top = BAND_TOP + s * (BUY_H + BUY_GAP);
+        int top = btnTop + s * (BUY_H + BUY_GAP);
         regionsOut[s].y0 = (uint16_t)top;
         regionsOut[s].y1 = (uint16_t)(top + BUY_H);
         regionsOut[s].type  = 1;                     // firmware-local
@@ -227,13 +237,13 @@ int layoutBands(pages::Region* regionsOut, uint8_t* slotCodes, BandView* views,
 
 // Balance row: the three payment resources (毛皮/鳞片/牙齿), "名 N", N compact
 // (fmtAmount) so a five-figure fur pile can't overrun the column.
-void drawBalance(m5gfx::M5Canvas& c) {
+void drawBalance(m5gfx::M5Canvas& c, int y) {
     const uint8_t res[3] = { R_FUR, R_SCALES, R_TEETH };
     for (int i = 0; i < 3; i++) {
         char amt[8]; fmtAmount((int32_t)g_game.whole(res[i]), amt, sizeof(amt));
         char line[32];
         snprintf(line, sizeof(line), "%s %s", tr(RES_KEY[res[i]]), amt);
-        cjk::drawText(c, BAL_COLX[i], BAL_Y, line, SCALE);
+        cjk::drawText(c, BAL_COLX[i], y, line, SCALE);
     }
 }
 
@@ -246,7 +256,9 @@ pages::Rect bandRect(int top) {
 
 // Slot index -> its band's top, the one place that stacking rule is written
 // (layoutBands lays the regions out with the identical expression).
-int bandTopForSlot(int slot) { return BAND_TOP + slot * (BUY_H + BUY_GAP); }
+int bandTopForSlot(int btnTop, int slot) {
+    return btnTop + slot * (BUY_H + BUY_GAP);
+}
 
 // One full-width BUY band, through the shared renderer. This page's 36px-label-
 // over-24px-cost, block-centered band IS the app-wide button style (v0.12 pulled
@@ -296,6 +308,22 @@ void drawBuyBand(m5gfx::M5Canvas& c, int top, const BandView& v) {
     cjk::drawText(c, x0 + ICON_CART_W + 4, cy - 12, mult, 2, ink);
 }
 
+// Only purchase / buy-shortage / compass-unlock lines. Fire, builder, traps
+// stay on Room. "not enough wood" is a fire-room line and is excluded because
+// wood is not a TRADE cost.
+bool tradeLogKeep(const LogEntry& e) {
+    if (strncmp(e.enKey, "bought", 6) == 0) return true;
+    if (strncmp(e.enKey, "the compass points ", 19) == 0) return true;
+    if (strncmp(e.enKey, "not enough ", 11) != 0) return false;
+    const char* res = e.enKey + 11;
+    for (int t = 0; t < TRADE_COUNT; t++) {
+        if (strcmp(res, RES_KEY[TRADE[t].product]) == 0) return true;
+        for (int i = 0; i < 3 && TRADE[t].cost[i].res != RA_END; i++)
+            if (strcmp(res, RES_KEY[TRADE[t].cost[i].res]) == 0) return true;
+    }
+    return false;
+}
+
 // Content signature — a hash of every live value that alters a painted number or
 // label (whole resource units, buildings, the shared Room/Outside tab titles, the
 // seen-mask that gates a buy band). tick() compares it each second to decide a full
@@ -342,7 +370,11 @@ pages::Rect TradePage::pressRect(const pages::Region& rg, int x, int y) const {
     // press is about to be refused for cost.
     if (m_slotCodes[slot] >= TRADE_COUNT) return band;
     const int cx = band.x + stepColX(band.w);
-    if (x >= cx) return pages::Rect{ cx, band.y, STEP_COL_W, band.h };
+    if (x >= cx) {
+        // Column plus the STEP_INSET gutter to the band frame — a 96px flash
+        // stopped 12px short of the round-rect's right edge.
+        return pages::Rect{ cx, band.y, band.x + band.w - cx, band.h };
+    }
     return pages::Rect{ band.x, band.y, stepColX(band.w) - 4, band.h };
 }
 
@@ -358,12 +390,14 @@ bool TradePage::draw(m5gfx::M5Canvas& c) {
     if (!available()) return false;
     c.fillSprite(TFT_WHITE);
     page_tabs::draw(c, 2);           // three-tab header, Trade active
-    drawBalance(c);
     BandView views[MAX_BANDS];
     m_regionCount = layoutBands(m_regions, m_slotCodes, views, m_page, MAX_BANDS,
-                                &m_slotCount);
+                                &m_slotCount, &m_btnTop);
+    log_view::draw(c, PAD, LOG_TOP, CONTENT_W, logBottom(m_btnTop), tradeLogKeep);
+    drawBalance(c, balanceY(m_btnTop));
     for (int s = 0; s < m_slotCount; s++)
-        drawBuyBand(c, BAND_TOP + s * (BUY_H + BUY_GAP), views[s]);
+        drawBuyBand(c, bandTopForSlot(m_btnTop, s), views[s]);
+    m_lastLogSig = log_view::sig(tradeLogKeep);
     return true;
 }
 
@@ -392,10 +426,10 @@ void TradePage::onLocalAction(uint8_t param, int x, int y) {
     // whole label + cost area, i.e. exactly where the band was pressed before
     // this column existed) buys one. buy() truncates, so a ×10 with only 3
     // affordable buys 3 and still reports RC_OK.
-    const pages::Rect band = bandRect(bandTopForSlot(slot));
+    const pages::Rect band = bandRect(bandTopForSlot(m_btnTop, slot));
     const int qty = (x >= band.x + stepColX(band.w)) ? stepper::MANY : 1;
-    Result r = g_game.buy(code, qty);
-    if (r == RC_OK) {
+    BuyResult r = g_game.buy(code, qty);
+    if (r.status == RC_OK) {
         // room.js: `if(stores.compass && !pathDiscovery){ pathDiscovery = true;
         // Path.openPath() }` — buying the compass (capped at 1, so this is always
         // the FIRST buy) is what "discovers" Path; openPath pushes the one-time
@@ -404,6 +438,14 @@ void TradePage::onLocalAction(uint8_t param, int x, int y) {
         // (path_page::doEmbark) — a compass is always bought before any embark
         // (Path itself is gated on holding one), so generate it here too, with
         // the same seed strategy, so the notice has a real direction to report.
+        // Same stream as Room: "购买了鳞片" collapsing to "购买了鳞片 x6".
+        // "bought" + RES_KEY are both in strings_zh.h (了 is already in the face).
+        {
+            char key[48];
+            snprintf(key, sizeof(key), "bought%c%s", LOG_KEY_SEP,
+                     RES_KEY[TRADE[code].product]);
+            for (int i = 0; i < r.purchased; i++) g_game.pushLog(key);
+        }
         if (code == T_COMPASS) {
             if (!g_world.generated) {
                 uint32_t seed = epochNow();
@@ -414,7 +456,11 @@ void TradePage::onLocalAction(uint8_t param, int x, int y) {
             if (g_world.compassFromVillage(key, sizeof key)) g_game.pushLog(key);
         }
         M5.Speaker.tone(1800, 80);
-        g_game.save();
+        if (!g_game.save()) {
+            Serial.println("[trade] save failed after purchase");
+            M5.Speaker.tone(600, 120);
+            return;
+        }
         pager::showPage(pager::currentRingIndex(), false);
         // Re-baseline tick()'s content signature to the state we JUST drew, so this
         // same buy no longer trips a SECOND full-page redraw next tick — only genuine
@@ -424,9 +470,17 @@ void TradePage::onLocalAction(uint8_t param, int x, int y) {
         // capture; after showPage stays the canonical spot for parity with Room.)
         m_lastSig = contentSig();
     } else {
-        // RC_ERR_COST (engine pushed "not enough X") / RC_ERR_MAX / RC_ERR_LOCKED
-        // — low beep; nothing on this page changed, so no repaint.
+        // RC_ERR_COST already pushed "not enough X". Refresh the log now so the
+        // player sees 毛皮不够了 here, not only after flipping back to Room.
         M5.Speaker.tone(600, 120);
+        if (log_view::sig(tradeLogKeep) != m_lastLogSig) {
+            pages::Rect r = log_view::areaRect(LOG_TOP, logBottom(m_btnTop));
+            canvas.fillRect(r.x, r.y, r.w, r.h, TFT_WHITE);
+            log_view::draw(canvas, PAD, LOG_TOP, CONTENT_W, logBottom(m_btnTop),
+                           tradeLogKeep);
+            log_view::pushBand(LOG_TOP, logBottom(m_btnTop));
+            m_lastLogSig = log_view::sig(tradeLogKeep);
+        }
     }
 }
 
@@ -450,5 +504,15 @@ void TradePage::tick(uint32_t nowMs) {
     if (sig != m_lastSig) {
         m_lastSig = sig;
         pager::showPage(pager::currentRingIndex(), false);
+        return;
+    }
+    uint32_t ls = log_view::sig(tradeLogKeep);
+    if (ls != m_lastLogSig) {
+        pages::Rect r = log_view::areaRect(LOG_TOP, logBottom(m_btnTop));
+        canvas.fillRect(r.x, r.y, r.w, r.h, TFT_WHITE);
+        log_view::draw(canvas, PAD, LOG_TOP, CONTENT_W, logBottom(m_btnTop),
+                       tradeLogKeep);
+        log_view::pushBand(LOG_TOP, logBottom(m_btnTop));
+        m_lastLogSig = ls;
     }
 }
