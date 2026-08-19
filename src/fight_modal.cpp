@@ -51,19 +51,16 @@ constexpr int CONTENT_W   = 540 - 2 * PAD;     // 492
 // in a local copy — see action_band.h for why the copies had to go.
 
 // ---- enemy header (static during a fight) ----
-// v0.20: the 48px ASCII glyph became a full-width 492x276 plate
-// (enemy_art_data.h) — the same spec as the event illustrations, flush with PAD
-// across the whole CONTENT_W column so it lines up with the bars and the button
-// columns under it.
+// v0.20: the 48px ASCII glyph became a full-width plate (enemy_art_data.h),
+// flush with PAD across the CONTENT_W column so it lines up with the bars and
+// the button columns under it.
 //
 // The plate is ELASTIC. The attack grid is bottom-anchored and its row count
 // follows the weapons the expedition packs, so the room above it is not a
-// constant: 2 rows leave 742, a convoy hauling all 8 weapons (11 buttons, 6
-// rows) leaves only 382. Sizing every plate for that worst case would spend the
-// common fight's picture on an outlier, so instead the stored plate is CROPPED
-// vertically at draw time (art::blit srcY0/rows, centred) to whatever is left —
-// the full 276 in an ordinary fight, letterboxing toward ART_H_MIN when the
-// player is carrying an armoury.
+// constant. The stored plate is sized for a 1-row grid (the common fight) and
+// CROPPED vertically at draw time (art::blit srcY0/rows, centred) when a
+// heavier loadout leaves less — letterboxing toward ART_H_MIN at the armoury
+// end, never padded with empty air around a shorter picture.
 //
 // The height is resolved ONCE in raise() and frozen for the fight (s_artH).
 // Recomputing it per repaint would make the whole panel jump the moment an
@@ -342,8 +339,9 @@ void lockArtHeight() {
     // it overlaps the plate rather than following it.
     const int below = ART_GAP + PCARD_H + CARD_GAP;
     const int room = btnTop - ART_Y_MIN - below;
-    // Keep the stored proportion whenever it fits; only a loadout heavy enough
-    // to squeeze past it makes the plate crop.
+    // Spend every row the grid left. The stored plate is already as tall as a
+    // 1-row fight, so this only crops; it never letterboxes a shorter picture
+    // inside a taller hole.
     int h = (room > ENEMY_ART_H) ? ENEMY_ART_H : room;
     if (h < ART_H_MIN) h = ART_H_MIN;
     // Even height keeps the centred crop symmetric (and the 4bpp row arithmetic

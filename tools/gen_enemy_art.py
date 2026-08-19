@@ -8,28 +8,22 @@
 # pipeline is imported from gen_event_art.py rather than restated; only the
 # geometry and the subject table differ.
 #
-# 492x420 — full CONTENT_W wide (so it lines up pixel-exact with the enemy bar
-# and the button columns) at 1.17:1, a shade taller than square.
-#
-# This is a PROPORTION, chosen and then held, not the largest the panel could
-# give. Earlier revisions sized the plate to fill whatever space was left — which
-# made the picture's own aspect a side effect of how many weapons the player
-# happened to pack (0.81 with a light loadout, 3.7 with a full one). A portrait
-# cannot be composed against a frame that keeps changing shape.
-#
-# fight_modal now keeps this ratio and distributes any leftover height as EQUAL
-# air above and below the plate, so the picture looks the same in every fight.
-# The vertical crop (art::blit srcY0/rows) still exists, but only as the fallback
-# for a loadout so heavy that even 420 will not fit:
+# 492x620 — full CONTENT_W wide, tall enough to spend the 1-row attack grid's
+# leftover (fight_modal lockArtHeight: 1 row -> 620px of plate). A 420px plate
+# left ~200px of paper-white air above and below the picture in the common
+# fight, indistinguishable from the drawing's own padding, so the subject
+# looked like it was floating in a hole. 620 fills that slot; heavier loadouts
+# crop it from the centre (art::blit srcY0/rows) the way they always did.
 #
 #     buttons   rows   room for the plate   (3 columns)
-#      1- 3      1            698  -> 420 + 278 of shared air
-#      4- 6      2            608  -> 420 + 188
-#      7- 9      3            518  -> 420 +  98
-#     10-12      4            428  -> 420 +   8
+#      1- 3      1            620  -> 620 (fills)
+#      4- 6      2            530  -> 530 (90px crop)
+#      7- 9      3            440  -> 440
+#     10-12      4            350  -> 350
 #
-# COMPOSE FOR THE CROP anyway: keep the subject vertically centred and treat the
-# top and bottom edges as trim.
+# COMPOSE FOR THE CROP: keep the subject vertically centred and treat the top
+# and bottom edges as trim. Landscape drawings (lizard) letterbox rather than
+# losing a head or a tail to a cover-fit.
 #
 # SUBJECTS (see fight_modal.cpp / world_state.h Combat.enemyId):
 #   - the 11 random-encounter enemies are indexed by adr::EncounterId
@@ -57,7 +51,10 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from gen_event_art import quantize, pack4bpp, rle, unrle, c_array  # noqa: E402
 
 ART_W = 492
-ART_H = 420
+ART_H = 620
+# If a cover-fit would shave more than this fraction off EACH side, letterbox
+# instead. Landscape subjects (the lizard is 2:1) must not lose a snout.
+MAX_COVER_SIDE = 0.08
 # The height that survives the tightest crop (6-row attack grid). Kept in sync
 # with fight_modal.cpp ART_H_MIN — it is the safe area the art must compose for.
 MIN_CROP_H = 110
@@ -145,22 +142,53 @@ def flatten_paper(im):
     return im.point(lut)
 
 
-def build(key, glyph, srcdir):
-    """Load <srcdir>/<key>.png, cover-fit to the plate, or synthesise a stand-in.
+# Paper-grain scans register as "ink" all the way to the edge at WHITE_POINT.
+# A darker cut finds the actual subject; 160 sits above the lightest strokes
+# we measured and well below the textured ground.
+INK_BBOX_THR = 160
 
-    Cover-fit rather than a plain resize: the source is square-ish and the plate
-    is 1.17:1, so a straight resize would squash the subject. Fitting to the
-    wider axis and centre-cropping keeps the drawing's proportions, which is also
-    what the compose-for-the-crop rule in docs/enemy-art-prompts.md assumes.
+
+def ink_bbox(im):
+    """Axis-aligned box of real strokes, ignoring grey paper grain."""
+    mask = im.point(lambda v: 255 if v < INK_BBOX_THR else 0)
+    bb = mask.getbbox()
+    return bb if bb else (0, 0, im.width, im.height)
+
+
+def fit_plate(im):
+    """Trim sparse paper, then cover-fit — or letterbox if cover would clip.
+
+    The 1-row plate is taller than most of the source drawings. Cover-fitting
+    a wide subject (lizard ~2:1) into 492x620 would shave a third off each
+    side; letterboxing keeps the animal whole and spends the leftover as
+    paper, which is already the panel's ground.
     """
+    x0, y0, x1, y1 = ink_bbox(im)
+    bw, bh = x1 - x0, y1 - y0
+    pad = max(8, int(0.04 * max(bw, bh)))
+    x0 = max(0, x0 - pad)
+    y0 = max(0, y0 - pad)
+    x1 = min(im.width, x1 + pad)
+    y1 = min(im.height, y1 + pad)
+    crop = flatten_paper(im.crop((x0, y0, x1, y1)))
+    bw, bh = crop.size
+    cover = max(ART_W / bw, ART_H / bh)
+    side = max(0.0, (bw * cover - ART_W) / 2.0 / (bw * cover))
+    s = min(ART_W / bw, ART_H / bh) if side > MAX_COVER_SIDE else cover
+    nw = max(1, round(bw * s))
+    nh = max(1, round(bh * s))
+    resized = crop.resize((nw, nh), Image.LANCZOS)
+    plate = Image.new("L", (ART_W, ART_H), 255)
+    plate.paste(resized, ((ART_W - nw) // 2, (ART_H - nh) // 2))
+    return plate
+
+
+def build(key, glyph, srcdir):
+    """Load <srcdir>/<key>.png, fit to the plate, or synthesise a stand-in."""
     path = os.path.join(srcdir, key + ".png")
     if not os.path.exists(path):
         return placeholder(glyph, key), True
-    im = Image.open(path).convert("L")
-    s = max(ART_W / im.width, ART_H / im.height)
-    im = im.resize((round(im.width * s), round(im.height * s)), Image.LANCZOS)
-    l, t = (im.width - ART_W) // 2, (im.height - ART_H) // 2
-    return flatten_paper(im.crop((l, t, l + ART_W, t + ART_H))), False
+    return fit_plate(Image.open(path).convert("L")), False
 
 
 def main():
