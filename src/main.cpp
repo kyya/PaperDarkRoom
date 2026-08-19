@@ -425,6 +425,10 @@ static void sleepNow(const char* reason) {
                           (unsigned long)sleepSecs);
         }
     }
+    if (g_world.ex.active && !g_world.saveTrek()) {
+        Serial.println("[sleep] trek save failed — staying awake");
+        return;
+    }
     if (!g_game.save()) {
         Serial.println("[sleep] save failed — staying awake");
         return;
@@ -575,7 +579,18 @@ void setup() {
     // redraw isn't latency-sensitive and clears ghosting).
     if (g_displayReady) {
         if (pager::ringCount() > 0) {
-            pager::restore(true);
+            // A live trek belongs on the map. Hardware power-off may have left
+            // the last persisted name as a village page.
+            if (trekActive) {
+                int wi = pager::ringIndexByName("world");
+                if (wi >= 0 && pager::showPage(wi, true)) {
+                    Serial.printf("[boot] trek live — world page %d\n", wi);
+                } else {
+                    pager::restore(true);
+                }
+            } else {
+                pager::restore(true);
+            }
             Serial.printf("[boot] restored page %d/%d\n",
                           pager::currentRingIndex(), pager::ringCount());
         }

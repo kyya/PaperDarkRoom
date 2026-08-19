@@ -741,6 +741,36 @@ static void layer4_trekbin() {
               ld.ex.outfitItem[I_RIFLE] == 1, "bag (res+items) round-trips");
         CHECK(memcmp(ld.ex.tiles, w.ex.tiles, WORLD_CELLS) == 0, "working map round-trips");
     }
+    // -- hard power-off mid-rename: primary gone, only trek.bak remains --
+    {
+        GameState gs; gs.init();
+        WorldState w; w.init(); w.generateMap(0x111);
+        CHECK(w.saveWorld(), "bak-only: world saved");
+        int16_t out[RES_COUNT] = { 0 }; out[R_CURED_MEAT] = 5;
+        gs.stores[R_CURED_MEAT] = 5 * FP;
+        w.embark(gs, out, nullptr, 0x22);
+        w.move(gs, DIR_NORTH);
+        remove(ADR_TREK_PATH);          // torn promote left only .bak
+        WorldState ld; ld.init();
+        CHECK(ld.restore(), "restore() finds bak when primary is missing");
+        CHECK(ld.ex.active, "bak-only restore is still on expedition");
+    }
+    // -- Arduino FILE_WRITE append leftover: file longer than the CRC image --
+    {
+        GameState gs; gs.init();
+        WorldState w; w.init(); w.generateMap(0x333);
+        int16_t out[RES_COUNT] = { 0 }; out[R_CURED_MEAT] = 4;
+        gs.stores[R_CURED_MEAT] = 4 * FP;
+        w.embark(gs, out, nullptr, 0x44);
+        remove(ADR_TREK_PATH ".bak");
+        FILE* f = fopen(ADR_TREK_PATH, "ab");
+        CHECK(f != nullptr, "pad trek.bin");
+        uint8_t junk[64]; memset(junk, 0xA5, sizeof junk);
+        fwrite(junk, 1, sizeof junk, f);
+        fclose(f);
+        WorldState ld; ld.init();
+        CHECK(ld.loadTrek() && ld.ex.active, "oversized trek.bin still loads prefix");
+    }
     // -- truncated trek rejected --
     {
         remove(ADR_TREK_PATH ".bak");

@@ -249,6 +249,7 @@ static const AdrString ADR_STRINGS[] = {
     { "bodies and supplies from both sides litter the ground.", "两方的尸体和物资散落在地上" },
     { "bolas", "套索" },
     { "bone spear", "骨枪" },
+    { "bought", "购买了" },
     { "boxer", "拳击手" },
     { "bring the room with you.", "您确定吗？" },
     { "bring your friends.", "分享给你的好友。" },

@@ -80,6 +80,9 @@ constexpr size_t TREK_BIN_SIZE_CRC = TREK_BIN_SIZE_V1 + 4;
 #ifdef ARDUINO
 static bool w_writeAtomic(const char* path, const char* tmp, const char* bak,
                           const uint8_t* d, size_t n) {
+    // ESP32 SD FILE_WRITE is "a+": a leftover .tmp from a torn rename would
+    // append and produce a file bigger than the CRC image. Drop it first.
+    SD.remove(tmp);
     File f = SD.open(tmp, FILE_WRITE);
     if (!f) return false;
     size_t wr = f.write(d, n);
@@ -102,16 +105,19 @@ static int w_read(const char* path, uint8_t* buf, size_t cap) {
     File f = SD.open(path, FILE_READ);
     if (!f) return -1;
     size_t len = f.size();
-    if (len == 0 || len > cap) { f.close(); return -1; }
-    size_t rd = f.read(buf, len);
+    if (len == 0) { f.close(); return -1; }
+    // Prefix of an oversized file (append leftover) is still a valid image.
+    size_t want = len > cap ? cap : len;
+    size_t rd = f.read(buf, want);
     f.close();
-    return rd == len ? (int)rd : -1;
+    return rd == want ? (int)rd : -1;
 }
 static bool w_exists(const char* path) { return SD.exists(path); }
 static void w_remove(const char* path) { SD.remove(path); }
 #else
 static bool w_writeAtomic(const char* path, const char* tmp, const char* bak,
                           const uint8_t* d, size_t n) {
+    remove(tmp);
     FILE* f = fopen(tmp, "wb");
     if (!f) return false;
     size_t wr = fwrite(d, 1, n, f);
@@ -137,12 +143,13 @@ static int w_read(const char* path, uint8_t* buf, size_t cap) {
     if (!f) return -1;
     if (fseek(f, 0, SEEK_END) != 0) { fclose(f); return -1; }
     long size = ftell(f);
-    if (size <= 0 || (size_t)size > cap || fseek(f, 0, SEEK_SET) != 0) {
+    if (size <= 0 || fseek(f, 0, SEEK_SET) != 0) {
         fclose(f); return -1;
     }
-    size_t rd = fread(buf, 1, (size_t)size, f);
+    size_t want = (size_t)size > cap ? cap : (size_t)size;
+    size_t rd = fread(buf, 1, want, f);
     fclose(f);
-    return rd == (size_t)size ? (int)rd : -1;
+    return rd == want ? (int)rd : -1;
 }
 static bool w_exists(const char* path) {
     FILE* f = fopen(path, "rb");
@@ -1189,7 +1196,10 @@ bool WorldState::restore() {
     memset(&ex, 0, sizeof ex);
     memset(&cx, 0, sizeof cx);      // a resumed trip has no active combat (=flee)
     if (!loadWorld()) { generated = false; return false; }
-    if (w_exists(ADR_TREK_PATH) && loadTrek() && ex.active) return true;
+    // loadTrek already tries primary then bak. Do not require the primary to
+    // exist — a hard power-off between rename-to-bak and rename-tmp-in leaves
+    // only trek.bak, which is still a live expedition.
+    if (loadTrek() && ex.active) return true;
     ex.active = false;
     return false;
 }

@@ -14,6 +14,7 @@
 #include "page_layout.h"        // PAD (shared layout authority)
 #include "page_tabs.h"          // shared two-tab header (生火间 │ 小型村落)
 #include "pager.h"
+#include "log_view.h"
 #include "game_state.h"
 #include <M5Unified.h>
 #include <stdio.h>
@@ -185,32 +186,6 @@ struct BandView {
     int     coolLeft, coolTotal;
 };
 
-// Splice one arg into a "...{0}..." template (the game's own placeholder form).
-void fmt1(char* out, size_t cap, const char* tmpl, const char* arg) {
-    const char* h = strstr(tmpl, "{0}");
-    if (!h) { snprintf(out, cap, "%s", tmpl); return; }
-    int pre = (int)(h - tmpl);
-    snprintf(out, cap, "%.*s%s%s", pre, tmpl, arg, h + 3);
-}
-
-// Splice up to three args into a "{0}/{1}/{2}" template, in placeholder order
-// (the idle-crew notice is the only line that needs more than one slot). A
-// missing slot simply leaves the rest of the template as-is.
-void fmtN(char* out, size_t cap, const char* tmpl, const char* const* args, int n) {
-    size_t o = 0;
-    for (const char* p = tmpl; *p && o + 1 < cap; ) {
-        int idx = -1;
-        if (p[0] == '{' && p[1] >= '0' && p[1] <= '9' && p[2] == '}') idx = p[1] - '0';
-        if (idx >= 0 && idx < n) {
-            o += (size_t)snprintf(out + o, cap - o, "%s", args[idx]);
-            p += 3;
-        } else {
-            out[o++] = *p++;
-        }
-    }
-    out[o < cap ? o : cap - 1] = 0;
-}
-
 // RTC -> Unix epoch, mirroring main.cpp's epochNow (only differences matter to
 // settle()/cooldownLeft, so the mktime timezone is irrelevant if consistent).
 uint32_t epochNow() {
@@ -235,113 +210,6 @@ pages::Rect buttonAreaRect(int btnTop) {
 pages::Rect cellRect(int btnTop, int row, int col) {
     return pages::Rect{ COL_X0[col], btnTop + row * (ROOM_BTN_H + BTN_GAP),
                         COL_W, ROOM_BTN_H };
-}
-
-// Count the lines cjk::drawWrapped would emit for `utf8` at width w — same
-// greedy CJK/space wrap, no drawing — so the log stream can pick how many
-// recent entries fit its band (logLines) before painting (nothing spills onto
-// the buttons).
-int wrapLineCount(const char* utf8, int w, int scale) {
-    constexpr int MAX = 256;
-    static uint32_t cps[MAX];
-    static int      advs[MAX];
-    int n = 0;
-    const char* p = utf8;
-    while (n < MAX) {
-        const unsigned char* s = (const unsigned char*)p;
-        if (*s == 0) break;
-        int32_t cp; int len;
-        if (*s < 0x80)              { cp = *s;        len = 1; }
-        else if ((*s >> 5) == 0x6)  { cp = *s & 0x1F; len = 2; }
-        else if ((*s >> 4) == 0xE)  { cp = *s & 0x0F; len = 3; }
-        else if ((*s >> 3) == 0x1E) { cp = *s & 0x07; len = 4; }
-        else                        { cp = *s;        len = 1; }
-        for (int i = 1; i < len; i++) {
-            if ((s[i] & 0xC0) != 0x80) { len = i; break; }
-            cp = (cp << 6) | (s[i] & 0x3F);
-        }
-        char one[5]; memcpy(one, s, (size_t)len); one[len] = 0;
-        cps[n]  = (uint32_t)cp;
-        advs[n] = cjk::textWidth(one, scale);
-        p += len;
-        n++;
-    }
-    if (n == 0) return 1;
-    auto breakAfter = [](uint32_t cp) { return cp == 0x20 || cp >= 0x2000; };
-    int lines = 0, lineStart = 0;
-    while (lineStart < n) {
-        int curW = 0, lastBreak = -1, j = lineStart;
-        for (; j < n; j++) {
-            if (curW + advs[j] > w && j > lineStart) break;
-            curW += advs[j];
-            if (breakAfter(cps[j])) lastBreak = j;
-        }
-        int lineEnd = (j >= n) ? n
-                    : (lastBreak >= lineStart) ? lastBreak + 1 : j;
-        lines++;
-        lineStart = lineEnd;
-        if (lineStart < n && cps[lineStart] == 0x20) lineStart++;
-    }
-    return lines < 1 ? 1 : lines;
-}
-
-// Render one log entry's en_key into `out` as official zh, splicing its arg if
-// the template carries a {0}. Most {0} templates take a number (population
-// lines pass a count) but "the fire is {0}" / "the room is {0}" (v0.3.1
-// feedback 1: pushed by game_state.cpp on every fire/temp change now that the
-// persistent state line is gone) pass a Fire/Temp enum value instead — look
-// that up in FIRE_TEXT/TEMP_TEXT and splice the translated status word.
-// A repeated entry (v0.3.1: GameState::pushLog collapses a repeat of the
-// newest line instead of scrolling a duplicate — see game_state.h LogEntry::
-// count) gets an ASCII " x<count>" suffix, same "CJK label x%u" mixed-script
-// convention outside_page.cpp already uses for worker band labels.
-void logText(const LogEntry& e, char* out, size_t cap) {
-    const char* zh = tr(e.enKey);
-    char base[160];
-    if (strchr(e.enKey, LOG_KEY_SEP)) {
-        // Compound key (game_state checkTraps): an intro key followed by one key
-        // per listed item. tr() each segment on its own — the table has no entry
-        // for the joined form — then re-join: the intro runs straight into the
-        // first item ("陷阱捕获到皮毛碎片") and the rest hang off the Chinese
-        // enumeration comma, standing in for upstream's "X, Y and Z".
-        char seg[LOG_KEY_MAX];
-        size_t o = 0;
-        int idx = 0;
-        for (const char* p = e.enKey; ; idx++) {
-            const char* q = strchr(p, LOG_KEY_SEP);
-            size_t len = q ? (size_t)(q - p) : strlen(p);
-            if (len >= sizeof(seg)) len = sizeof(seg) - 1;
-            memcpy(seg, p, len); seg[len] = 0;
-            int w = snprintf(base + o, sizeof(base) - o, "%s%s",
-                             idx > 1 ? "、" : "", tr(seg));
-            if (w > 0) o += (size_t)w;
-            if (!q || o >= sizeof(base)) break;
-            p = q + 1;
-        }
-    } else if (e.hasArg && strcmp(e.enKey, "the fire is {0}") == 0) {
-        uint8_t idx = (e.arg >= 0 && e.arg < 5) ? (uint8_t)e.arg : 0;
-        fmt1(base, sizeof(base), zh, tr(FIRE_TEXT[idx]));
-    } else if (e.hasArg && strcmp(e.enKey, "the room is {0}") == 0) {
-        uint8_t idx = (e.arg >= 0 && e.arg < 5) ? (uint8_t)e.arg : 0;
-        fmt1(base, sizeof(base), zh, tr(TEMP_TEXT[idx]));
-    } else if (e.hasArg && (strcmp(e.enKey, "{0} short of {1}, {2} idle") == 0 ||
-                            strcmp(e.enKey, "{0} back to work") == 0)) {
-        // Idle-crew notice (game_state applyIncomeSource): the arg is a packed
-        // job / short input / idle headcount triple, spliced from the official
-        // job + resource name strings rather than a per-job sentence.
-        uint8_t job = idleArgJob(e.arg), res = idleArgRes(e.arg);
-        char num[16]; snprintf(num, sizeof(num), "%d", idleArgIdle(e.arg));
-        const char* a[3] = { tr(JOB_KEY[job < JOB_COUNT ? job : 0]),
-                             tr(RES_KEY[res < RES_COUNT ? res : 0]), num };
-        fmtN(base, sizeof(base), zh, a, 3);
-    } else if (e.hasArg && strstr(zh, "{0}")) {
-        char num[16]; snprintf(num, sizeof(num), "%ld", (long)e.arg);
-        fmt1(base, sizeof(base), zh, num);
-    } else {
-        snprintf(base, sizeof(base), "%s", zh);
-    }
-    if (e.count > 1) snprintf(out, cap, "%s x%u", base, (unsigned)e.count);
-    else             snprintf(out, cap, "%s", base);
 }
 
 // Is craftable id offerable now? Delegates the progressive-unlock decision to
@@ -570,25 +438,7 @@ int layoutBands(pages::Region* regionsOut, uint8_t* slotCodes, BandView* views,
 // its screen row, so a message that wraps to three lines keeps ONE tone and the
 // gradient reads as "messages sinking into the dark" rather than a striped band.
 void drawLog(m5gfx::M5Canvas& c, int btnTop) {
-    const int budget = logLines(btnTop);
-    int start = g_game.logCount;   // lowest index that still fits
-    int usedLines = 0;
-    for (int i = g_game.logCount - 1; i >= 0; i--) {
-        char t[160]; logText(g_game.log[i], t, sizeof(t));
-        int lines = wrapLineCount(t, CONTENT_W, LOG_SCALE);
-        if (usedLines + lines > budget) break;
-        usedLines += lines;
-        start = i;
-    }
-    int y = LOG_TOP;
-    for (int i = g_game.logCount - 1; i >= start; i--) {
-        char t[160]; logText(g_game.log[i], t, sizeof(t));
-        int age  = g_game.logCount - 1 - i;
-        int tier = (age < LOG_FADE_BLACK) ? 0 : 1 + (age - LOG_FADE_BLACK) / LOG_FADE_STEP;
-        if (tier >= LOG_FADE_TIERS) tier = LOG_FADE_TIERS - 1;
-        y = cjk::drawWrapped(c, PAD, y, CONTENT_W, t, LOG_SCALE, LOG_LINEH,
-                             LOG_FADE[tier]);
-    }
+    log_view::draw(c, PAD, LOG_TOP, CONTENT_W, logBandBottom(btnTop));
 }
 
 // The log band's partial-refresh target (buttonAreaRect parity): the whole log
@@ -692,18 +542,7 @@ uint32_t contentSig() {
 // before saturation. A logCount baseline therefore goes permanently blind a
 // handful of lines into a session — which is why the old contentSig could miss a
 // log change outright whenever no resource happened to move with it.
-uint32_t logSig() {
-    uint32_t sig = 2166136261u;
-    auto mix = [&](uint32_t v) { sig = (sig ^ v) * 16777619u; };
-    mix(g_game.logCount);
-    for (int i = 0; i < g_game.logCount; i++) {
-        const LogEntry& e = g_game.log[i];
-        for (const char* p = e.enKey; *p; p++) mix((uint32_t)(uint8_t)*p);
-        mix((uint32_t)e.arg);
-        mix((uint32_t)e.count | (e.hasArg ? 0x100u : 0u));
-    }
-    return sig;
-}
+uint32_t logSig() { return log_view::sig(); }
 
 // Bounding rect (2px bleed) of the grid cells named in `mask` (bit s = slot s):
 // each cell is COL_X0[col], its row top, COL_W x ROOM_BTN_H. The cooldown tick
